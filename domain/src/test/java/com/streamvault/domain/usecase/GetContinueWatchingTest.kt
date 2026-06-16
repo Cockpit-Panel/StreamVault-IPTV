@@ -198,5 +198,6 @@ class GetContinueWatchingTest {
         override suspend fun clearAllHistory() = com.streamvault.domain.model.Result.success(Unit)
         override suspend fun clearHistoryForProvider(providerId: Long) = com.streamvault.domain.model.Result.success(Unit)
         override suspend fun clearLiveHistoryForProvider(providerId: Long) = com.streamvault.domain.model.Result.success(Unit)
+        override suspend fun clearVodHistory() = com.streamvault.domain.model.Result.success(Unit)
     }
 }

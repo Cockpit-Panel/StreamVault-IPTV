@@ -116,6 +116,7 @@ class GetRecommendationsTest {
         override fun browseMovies(query: LibraryBrowseQuery): Flow<PagedResult<Movie>> = unsupported()
         override fun searchMovies(providerId: Long, query: String): Flow<List<Movie>> = unsupported()
         override suspend fun getMovie(movieId: Long): Movie? = error("Not used in test")
+        override suspend fun getMovieVariants(movieId: Long): List<Movie> = emptyList()
         override suspend fun getMovieDetails(providerId: Long, movieId: Long): Result<Movie> = error("Not used in test")
         override suspend fun getStreamInfo(movie: Movie): Result<StreamInfo> = error("Not used in test")
         override suspend fun refreshMovies(providerId: Long): Result<Unit> = error("Not used in test")
