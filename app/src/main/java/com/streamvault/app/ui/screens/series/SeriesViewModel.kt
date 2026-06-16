@@ -869,6 +869,12 @@ class SeriesViewModel @Inject constructor(
         _uiState.update { it.copy(userMessage = null) }
     }
 
+    fun clearContinueWatching() {
+        viewModelScope.launch {
+            playbackHistoryRepository.clearVodHistory()
+        }
+    }
+
     fun enterCategoryReorderMode(category: Category) {
         dismissCategoryOptions()
         viewModelScope.launch {

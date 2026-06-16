@@ -221,6 +221,7 @@ fun SeriesScreen(
                 searchQuery = uiState.searchQuery,
                 onSearchQueryChange = viewModel::setSearchQuery,
                 onSeriesClick = onSeriesClick,
+                onClearContinueWatching = { viewModel.clearContinueWatching() },
                 onProtectedSeriesClick = { seriesId ->
                     pendingCategory = null
                     pendingSeriesId = seriesId
@@ -331,6 +332,7 @@ private fun SeriesVodContent(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     onSeriesClick: (Long) -> Unit,
+    onClearContinueWatching: (() -> Unit)? = null,
     onProtectedSeriesClick: (Long) -> Unit,
     onProtectedCategoryClick: (Category) -> Unit,
     onShowDialog: (Series) -> Unit,
@@ -585,7 +587,8 @@ private fun SeriesVodContent(
             item(key = "continue_watching") {
                 ContinueWatchingRow(
                         items = continueWatching,
-                        onItemClick = { history -> onSeriesClick(history.seriesId ?: history.contentId) }
+                        onItemClick = { history -> onSeriesClick(history.seriesId ?: history.contentId) },
+                        onClear = onClearContinueWatching
                     )
             }
             }

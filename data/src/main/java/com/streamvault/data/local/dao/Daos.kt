@@ -3237,6 +3237,9 @@ interface PlaybackHistoryDao {
     @Query("DELETE FROM playback_history")
     suspend fun deleteAll()
 
+    @Query("DELETE FROM playback_history WHERE content_type != 'LIVE'")
+    suspend fun deleteAllVod()
+
     @Query("DELETE FROM playback_history WHERE provider_id = :providerId")
     suspend fun deleteByProvider(providerId: Long)
 

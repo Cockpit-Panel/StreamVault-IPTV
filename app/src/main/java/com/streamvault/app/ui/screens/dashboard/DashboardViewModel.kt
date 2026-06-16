@@ -595,6 +595,12 @@ class DashboardViewModel @Inject constructor(
     fun userMessageShown() {
         _uiState.value = _uiState.value.copy(userMessage = null)
     }
+
+    fun clearContinueWatching() {
+        viewModelScope.launch {
+            playbackHistoryRepository.clearVodHistory()
+        }
+    }
 }
 
 private data class DashboardLiveContext(

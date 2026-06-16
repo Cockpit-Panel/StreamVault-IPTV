@@ -1759,6 +1759,12 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    fun clearContinueWatching() {
+        viewModelScope.launch {
+            playbackHistoryRepository.clearVodHistory()
+        }
+    }
+
     fun removeChannelFromRecent(channel: Channel) {
         val providerId = _uiState.value.provider?.id ?: return
         viewModelScope.launch {

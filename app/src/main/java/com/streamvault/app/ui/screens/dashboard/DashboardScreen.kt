@@ -201,7 +201,8 @@ fun DashboardScreen(
 
                     DashboardHomeSection.CONTINUE_WATCHING -> ContinueWatchingRow(
                         items = uiState.continueWatching,
-                        onItemClick = onPlaybackHistoryClick
+                        onItemClick = onPlaybackHistoryClick,
+                        onClear = { viewModel.clearContinueWatching() }
                     )
 
                     DashboardHomeSection.RECENT_MOVIES -> CategoryRow(

@@ -223,6 +223,7 @@ fun MoviesScreen(
                 onSearchQueryChange = viewModel::setSearchQuery,
                 onMovieClick = onMovieClick,
                 onContinueWatchingPlay = onContinueWatchingPlay,
+                onClearContinueWatching = { viewModel.clearContinueWatching() },
                 onProtectedMovieClick = { movie ->
                     pendingCategory = null
                     pendingMovie = movie
@@ -336,6 +337,7 @@ private fun MoviesVodContent(
     onSearchQueryChange: (String) -> Unit,
     onMovieClick: (Movie) -> Unit,
     onContinueWatchingPlay: (PlaybackHistory) -> Unit,
+    onClearContinueWatching: (() -> Unit)? = null,
     onProtectedMovieClick: (Movie) -> Unit,
     onProtectedCategoryClick: (Category) -> Unit,
     onShowDialog: (Movie) -> Unit,
@@ -590,7 +592,8 @@ private fun MoviesVodContent(
             item(key = "continue_watching") {
                 ContinueWatchingRow(
                         items = continueWatching,
-                        onItemClick = onContinueWatchingPlay
+                        onItemClick = onContinueWatchingPlay,
+                        onClear = onClearContinueWatching
                     )
             }
             }

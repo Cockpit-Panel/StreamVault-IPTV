@@ -46,6 +46,7 @@ import com.streamvault.domain.model.PlaybackHistory
 fun ContinueWatchingRow(
     items: List<PlaybackHistory>,
     onItemClick: (PlaybackHistory) -> Unit,
+    onClear: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (items.isEmpty()) return
@@ -63,6 +64,11 @@ fun ContinueWatchingRow(
                 style = MaterialTheme.typography.titleMedium,
                 color = TextPrimary
             )
+            if (onClear != null) {
+                androidx.compose.material3.TextButton(onClick = onClear) {
+                    Text(text = stringResource(R.string.action_clear), color = Color.White)
+                }
+            }
         }
 
         LazyRow(

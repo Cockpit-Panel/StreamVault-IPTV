@@ -256,6 +256,18 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
         Result.error("Failed to clear live playback history", e)
     }
 
+    override suspend fun clearVodHistory(): Result<Unit> = try {
+        pendingResumeUpdates.clear()
+        transactionRunner.inTransaction {
+            dao.deleteAll()
+            movieDao.resetAllWatchProgress()
+            episodeDao.resetAllWatchProgress()
+        }
+        Result.success(Unit)
+    } catch (e: Exception) {
+        Result.error("Failed to clear watch history", e)
+    }
+
     override suspend fun flushPendingProgress(): Result<Unit> = try {
         flushPendingResumeUpdates()
         Result.success(Unit)
