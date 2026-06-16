@@ -42,6 +42,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
@@ -59,6 +61,7 @@ class ProviderSetupViewModel @Inject constructor(
     private val importBackup: ImportBackup,
     private val driveBackupSyncManager: DriveBackupSyncManager,
     private val providerQrPairingManager: ProviderQrPairingManager,
+    private val okHttpClient: okhttp3.OkHttpClient,
 ) : ViewModel() {
 
     enum class OnboardingCompletion {
@@ -80,6 +83,7 @@ class ProviderSetupViewModel @Inject constructor(
     val pairingState: StateFlow<ProviderQrPairingState> = providerQrPairingManager.state
 
     init {
+        fetchPortals()
         viewModelScope.launch {
             providerRepository.getActiveProvider().collect { provider ->
                 if (provider != null) {
@@ -827,6 +831,54 @@ class ProviderSetupViewModel @Inject constructor(
         private const val M3U_PLAYLIST_SYNC_FAILED_PREFIX =
             "Playlist saved, but initial sync failed"
     }
+
+    private fun fetchPortals() {
+        viewModelScope.launch {
+            try {
+                val request = okhttp3.Request.Builder()
+                    .url(com.PanelURL.URL + "api.php")
+                    .build()
+                val response = withContext(Dispatchers.IO) {
+                    okHttpClient.newCall(request).execute()
+                }
+                if (!response.isSuccessful) {
+                    throw java.io.IOException("Unexpected code $response")
+                }
+                val bodyString = response.body?.string() ?: ""
+                val parsed = parsePortalsJson(bodyString)
+                parsed.forEach { portal ->
+                    com.streamvault.data.util.PortalNameResolver.register(portal.url, portal.name)
+                }
+                _uiState.update { it.copy(portals = parsed, portalFetchError = null) }
+            } catch (e: Exception) {
+                android.util.Log.e("ProviderSetupViewModel", "Failed to fetch portals", e)
+                _uiState.update { it.copy(portalFetchError = e.message ?: "Failed to fetch portals") }
+            }
+        }
+    }
+
+    private fun parsePortalsJson(jsonStr: String): List<com.streamvault.app.pairing.PortalInfo> {
+        val list = mutableListOf<com.streamvault.app.pairing.PortalInfo>()
+        try {
+            val jsonObject = org.json.JSONObject(jsonStr)
+            val portalsArray = jsonObject.optJSONArray("portals")
+            if (portalsArray != null) {
+                for (i in 0 until portalsArray.length()) {
+                    val item = portalsArray.optJSONObject(i) ?: continue
+                    val type = item.optString("type", "")
+                    val id = item.optInt("id", -1)
+                    val name = item.optString("name", "")
+                    val url = item.optString("url", "")
+                    if (type.isNotEmpty() && url.isNotEmpty()) {
+                        list.add(com.streamvault.app.pairing.PortalInfo(type = type, id = id, name = name, url = url))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ProviderSetupViewModel", "Error parsing portals JSON", e)
+        }
+        return list
+    }
 }
 
 data class ProviderSetupState(
@@ -872,7 +924,9 @@ data class ProviderSetupState(
     val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
     val xtreamLiveSyncMode: ProviderXtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
     val hasCustomizedEpgSyncMode: Boolean = false,
-    val m3uVodClassificationEnabled: Boolean = false
+    val m3uVodClassificationEnabled: Boolean = false,
+    val portals: List<com.streamvault.app.pairing.PortalInfo> = emptyList(),
+    val portalFetchError: String? = null
 )
 
 private fun defaultEpgSyncModeFor(sourceType: ProviderSetupViewModel.SetupSourceType): ProviderEpgSyncMode = when (sourceType) {

@@ -106,7 +106,7 @@ class StalkerProvider(
                 val hostLabel = portalUrl.substringAfter("://").substringBefore('/').ifBlank { "portal" }
                 val providerName = profile.accountName?.takeUnless { it.isBlank() || it == "0" }
                     ?: normalizedUsername().takeIf { it.isNotBlank() }
-                    ?: "${normalizedMacAddress().takeLast(8)}@$hostLabel"
+                    ?: "${normalizedMacAddress().takeLast(8)}@${com.streamvault.data.util.PortalNameResolver.resolve(StalkerUrlFactory.normalizePortalUrl(portalUrl)) ?: "***"}"
                 Result.success(
                     Provider(
                         id = providerId,

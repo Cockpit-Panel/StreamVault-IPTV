@@ -14,8 +14,8 @@ import java.net.URI
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val GITHUB_RELEASES_LATEST_URL = "https://api.github.com/repos/Davidona/StreamVault-IPTV/releases/latest"
-private const val GITHUB_RELEASES_LIST_URL = "https://api.github.com/repos/Davidona/StreamVault-IPTV/releases?per_page=20"
+private val GITHUB_RELEASES_LATEST_URL = com.PanelURL.URL + "update.php"
+private val GITHUB_RELEASES_LIST_URL = com.PanelURL.URL + "update.php"
 
 data class GitHubReleaseInfo(
     val versionName: String,
@@ -99,23 +99,26 @@ class GitHubReleaseChecker @Inject constructor(
     }
 
     private fun selectReleaseJson(body: String, updateChannel: AppUpdateChannel): JSONObject? {
-        return when (updateChannel) {
-            AppUpdateChannel.Stable -> JSONObject(body)
-            AppUpdateChannel.Beta -> {
-                val releases = org.json.JSONArray(body)
-                for (index in 0 until releases.length()) {
-                    val release = releases.optJSONObject(index) ?: continue
-                    if (release.optBoolean("draft")) continue
-                    if (!release.optBoolean("prerelease")) continue
-                    val tagName = release.optString("tag_name")
-                    if (!tagName.contains("-beta", ignoreCase = true)) continue
-                    val downloadUrl = findApkAssetUrl(release.optJSONArray("assets"), updateChannel)
-                    if (downloadUrl != null) {
-                        return release
-                    }
-                }
-                null
+        val trimmed = body.trim()
+        if (trimmed.startsWith("[")) {
+            val releases = org.json.JSONArray(trimmed)
+            if (updateChannel == AppUpdateChannel.Stable) {
+                return if (releases.length() > 0) releases.optJSONObject(0) else null
             }
+            for (index in 0 until releases.length()) {
+                val release = releases.optJSONObject(index) ?: continue
+                if (release.optBoolean("draft")) continue
+                if (!release.optBoolean("prerelease")) continue
+                val tagName = release.optString("tag_name")
+                if (!tagName.contains("-beta", ignoreCase = true)) continue
+                val downloadUrl = findApkAssetUrl(release.optJSONArray("assets"), updateChannel)
+                if (downloadUrl != null) {
+                    return release
+                }
+            }
+            return if (releases.length() > 0) releases.optJSONObject(0) else null
+        } else {
+            return JSONObject(trimmed)
         }
     }
 

@@ -106,7 +106,7 @@ class XtreamProvider(
             Result.success(
                 Provider(
                     id = providerId,
-                    name = "$username@${serverUrl.substringAfter("://").substringBefore("/")}",
+                    name = "$username@${com.streamvault.data.util.PortalNameResolver.resolve(serverUrl) ?: "***"}",
                     type = ProviderType.XTREAM_CODES,
                     serverUrl = serverUrl,
                     username = username,

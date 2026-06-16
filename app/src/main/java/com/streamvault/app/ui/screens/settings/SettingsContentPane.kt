@@ -154,13 +154,6 @@ internal fun SettingsContentPane(
                 onShareBackup = onShareBackup,
                 onRestoreBackup = onRestoreBackup
             )
-            settingsDriveBackupSection(
-                uiState = uiState,
-                onSignIn = onDriveSignIn,
-                onSignOut = onDriveSignOut,
-                onPush = onDrivePush,
-                onPull = onDrivePull
-            )
         } else if (dialogState.selectedCategory == 6) {
             epgSourcesSection(
                 uiState = uiState,

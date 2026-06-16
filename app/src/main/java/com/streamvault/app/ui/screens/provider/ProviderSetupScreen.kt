@@ -217,6 +217,21 @@ fun ProviderSetupScreen(
             onProviderAdded()
         }
     }
+    val showXtream = uiState.portals.isEmpty() || uiState.portals.any { it.type.lowercase() == "xc" }
+    val showStalker = uiState.portals.isEmpty() || uiState.portals.any { it.type.lowercase() == "stalker" }
+
+    LaunchedEffect(uiState.portals) {
+        if (!uiState.isEditing && uiState.portals.isNotEmpty()) {
+            val hasXc = uiState.portals.any { it.type.lowercase() == "xc" }
+            val hasStalker = uiState.portals.any { it.type.lowercase() == "stalker" }
+            if (!hasXc && hasStalker) {
+                selectedTab = 1
+            } else if (hasXc) {
+                selectedTab = 0
+            }
+        }
+    }
+
     ProviderSetupCompletionLayer(
         uiState = uiState,
         knownLocalM3uUrls = knownLocalM3uUrls,
@@ -336,6 +351,8 @@ fun ProviderSetupScreen(
                         isEditing = uiState.isEditing,
                         isEditLabel = if (uiState.isEditing) androidx.compose.ui.res.stringResource(R.string.setup_edit_provider)
                                       else androidx.compose.ui.res.stringResource(R.string.setup_provider_title),
+                        showXtream = showXtream,
+                        showStalker = showStalker,
                         onSelect = ::onSourceTypeSelected,
                         onImportClick = { showImportOptionsDialog = true },
                         modifier = Modifier.width(200.dp).fillMaxHeight()
@@ -381,6 +398,8 @@ fun ProviderSetupScreen(
                     SourceTypeTabRow(
                         sourceType = sourceType,
                         isEditing = uiState.isEditing,
+                        showXtream = showXtream,
+                        showStalker = showStalker,
                         onSelect = ::onSourceTypeSelected,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -774,18 +793,32 @@ private fun ProviderFormContent(
 
             when (sourceType) {
                 SourceType.XTREAM -> {
-                    ProviderTextField(
-                        value = serverUrl, onValueChange = onServerUrlChange,
-                        placeholder = androidx.compose.ui.res.stringResource(R.string.setup_server_hint),
-                        keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
-                            keyboardType = if (isTelevisionDevice) KeyboardType.Ascii else KeyboardType.Uri,
-                            imeAction = ImeAction.Next
-                        )
+                    PortalSelector(
+                        selectedUrl = serverUrl,
+                        portals = uiState.portals,
+                        portalType = "xc",
+                        onPortalSelected = { portal ->
+                            onServerUrlChange(portal.url)
+                            val prefix = username.trim()
+                            val newDefaultName = if (prefix.isNotEmpty()) "$prefix@${portal.name}" else portal.name
+                            if (name.isEmpty() || name == "Phone Xtream Provider" || uiState.portals.any { it.name == name } || (name.contains("@") && uiState.portals.any { it.name == name.substringAfter("@") })) {
+                                onNameChange(newDefaultName)
+                            }
+                        }
                     )
                     ProviderTextField(
-                        value = username, onValueChange = onUsernameChange,
+                        value = username, onValueChange = { newVal ->
+                            onUsernameChange(newVal)
+                            val selectedPortal = uiState.portals.find { it.url == serverUrl }
+                            if (selectedPortal != null) {
+                                val currentServerName = selectedPortal.name
+                                val prefix = newVal.trim()
+                                val newDefaultName = if (prefix.isNotEmpty()) "$prefix@$currentServerName" else currentServerName
+                                if (name.isEmpty() || name == currentServerName || (name.contains("@") && name.substringAfter("@") == currentServerName)) {
+                                    onNameChange(newDefaultName)
+                                }
+                            }
+                        },
                         placeholder = androidx.compose.ui.res.stringResource(R.string.setup_user_hint),
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
@@ -850,18 +883,32 @@ private fun ProviderFormContent(
                 }
 
                 SourceType.STALKER -> {
-                    ProviderTextField(
-                        value = serverUrl, onValueChange = onServerUrlChange,
-                        placeholder = "Portal URL",
-                        keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
-                            keyboardType = if (isTelevisionDevice) KeyboardType.Ascii else KeyboardType.Uri,
-                            imeAction = ImeAction.Next
-                        )
+                    PortalSelector(
+                        selectedUrl = serverUrl,
+                        portals = uiState.portals,
+                        portalType = "stalker",
+                        onPortalSelected = { portal ->
+                            onServerUrlChange(portal.url)
+                            val macPart = stalkerMacAddress.trim().takeLast(8)
+                            val newDefaultName = if (macPart.isNotEmpty()) "$macPart@${portal.name}" else portal.name
+                            if (name.isEmpty() || name == "Phone Stalker Portal" || uiState.portals.any { it.name == name } || (name.contains("@") && uiState.portals.any { it.name == name.substringAfter("@") })) {
+                                onNameChange(newDefaultName)
+                            }
+                        }
                     )
                     ProviderTextField(
-                        value = stalkerMacAddress, onValueChange = onStalkerMacAddressChange,
+                        value = stalkerMacAddress, onValueChange = { newVal ->
+                            onStalkerMacAddressChange(newVal)
+                            val selectedPortal = uiState.portals.find { it.url == serverUrl }
+                            if (selectedPortal != null) {
+                                val currentServerName = selectedPortal.name
+                                val macPart = newVal.trim().takeLast(8)
+                                val newDefaultName = if (macPart.isNotEmpty()) "$macPart@$currentServerName" else currentServerName
+                                if (name.isEmpty() || name == currentServerName || (name.contains("@") && name.substringAfter("@") == currentServerName)) {
+                                    onNameChange(newDefaultName)
+                                }
+                            }
+                        },
                         placeholder = if (stalkerAuthMode == StalkerAuthMode.CREDENTIALS_ONLY) {
                             "MAC address (optional)"
                         } else {
@@ -1605,6 +1652,8 @@ private fun SourceTypeSelectorPanel(
     sourceType: SourceType,
     isEditing: Boolean,
     isEditLabel: String,
+    showXtream: Boolean,
+    showStalker: Boolean,
     onSelect: (SourceType) -> Unit,
     onImportClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -1633,7 +1682,7 @@ private fun SourceTypeSelectorPanel(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextTertiary
             )
-            if (!isEditing || sourceType == SourceType.XTREAM) {
+            if ((!isEditing && showXtream) || (isEditing && sourceType == SourceType.XTREAM)) {
                 SourceTypeCard(
                     title = androidx.compose.ui.res.stringResource(R.string.setup_xtream),
                     subtitle = androidx.compose.ui.res.stringResource(R.string.setup_info_xtream_body),
@@ -1642,7 +1691,7 @@ private fun SourceTypeSelectorPanel(
                     onClick = { onSelect(SourceType.XTREAM) }
                 )
             }
-            if (!isEditing || sourceType == SourceType.STALKER) {
+            if ((!isEditing && showStalker) || (isEditing && sourceType == SourceType.STALKER)) {
                 SourceTypeCard(
                     title = androidx.compose.ui.res.stringResource(R.string.setup_stalker),
                     badge = androidx.compose.ui.res.stringResource(R.string.badge_beta),
@@ -1650,24 +1699,6 @@ private fun SourceTypeSelectorPanel(
                     selected = sourceType == SourceType.STALKER,
                     enabled = !isEditing,
                     onClick = { onSelect(SourceType.STALKER) }
-                )
-            }
-            if (!isEditing || sourceType == SourceType.M3U_URL) {
-                SourceTypeCard(
-                    title = androidx.compose.ui.res.stringResource(R.string.setup_tab_url),
-                    subtitle = androidx.compose.ui.res.stringResource(R.string.setup_info_m3u_body),
-                    selected = sourceType == SourceType.M3U_URL,
-                    enabled = !isEditing,
-                    onClick = { onSelect(SourceType.M3U_URL) }
-                )
-            }
-            if (!isEditing || sourceType == SourceType.M3U_FILE) {
-                SourceTypeCard(
-                    title = androidx.compose.ui.res.stringResource(R.string.setup_tab_file),
-                    subtitle = androidx.compose.ui.res.stringResource(R.string.setup_file_browse_hint),
-                    selected = sourceType == SourceType.M3U_FILE,
-                    enabled = !isEditing,
-                    onClick = { onSelect(SourceType.M3U_FILE) }
                 )
             }
             if (!isEditing) {
@@ -1750,37 +1781,25 @@ private fun SourceTypeCard(
 private fun SourceTypeTabRow(
     sourceType: SourceType,
     isEditing: Boolean,
+    showXtream: Boolean,
+    showStalker: Boolean,
     onSelect: (SourceType) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (!isEditing || sourceType == SourceType.XTREAM) {
+        if ((!isEditing && showXtream) || (isEditing && sourceType == SourceType.XTREAM)) {
             TabButton(
                 text = androidx.compose.ui.res.stringResource(R.string.setup_xtream),
                 isSelected = sourceType == SourceType.XTREAM,
                 onClick = { if (!isEditing) onSelect(SourceType.XTREAM) }
             )
         }
-        if (!isEditing || sourceType == SourceType.STALKER) {
+        if ((!isEditing && showStalker) || (isEditing && sourceType == SourceType.STALKER)) {
             TabButton(
                 text = androidx.compose.ui.res.stringResource(R.string.setup_stalker),
                 badge = androidx.compose.ui.res.stringResource(R.string.badge_beta),
                 isSelected = sourceType == SourceType.STALKER,
                 onClick = { if (!isEditing) onSelect(SourceType.STALKER) }
-            )
-        }
-        if (!isEditing || sourceType == SourceType.M3U_URL) {
-            TabButton(
-                text = androidx.compose.ui.res.stringResource(R.string.setup_tab_url),
-                isSelected = sourceType == SourceType.M3U_URL,
-                onClick = { if (!isEditing) onSelect(SourceType.M3U_URL) }
-            )
-        }
-        if (!isEditing || sourceType == SourceType.M3U_FILE) {
-            TabButton(
-                text = androidx.compose.ui.res.stringResource(R.string.setup_tab_file),
-                isSelected = sourceType == SourceType.M3U_FILE,
-                onClick = { if (!isEditing) onSelect(SourceType.M3U_FILE) }
             )
         }
     }
@@ -2290,19 +2309,6 @@ private fun ImportOptionsDialog(
                     isLoading = isImportingBackup,
                     onClick = onImportBackup
                 )
-                if (driveSignedIn) {
-                    ImportDialogActionButton(
-                        text = stringResource(R.string.settings_drive_pull),
-                        isLoading = isImportingBackup,
-                        onClick = onImportFromDrive
-                    )
-                } else {
-                    ImportDialogActionButton(
-                        text = stringResource(R.string.settings_drive_signin),
-                        isLoading = false,
-                        onClick = onDriveSignIn
-                    )
-                }
             }
         },
         footer = {
@@ -2466,3 +2472,122 @@ private fun resolveFileImportError(context: android.content.Context, error: Thro
     return if (isStorageFull) context.getString(R.string.setup_file_import_storage_full)
            else context.getString(R.string.setup_file_import_failed)
 }
+
+@Composable
+private fun PortalSelector(
+    selectedUrl: String,
+    portals: List<com.streamvault.app.pairing.PortalInfo>,
+    portalType: String,
+    onPortalSelected: (com.streamvault.app.pairing.PortalInfo) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    val filteredPortals = portals.filter { it.type.lowercase() == portalType.lowercase() }
+    
+    val selectedPortal = filteredPortals.find { it.url == selectedUrl }
+    val displayText = when {
+        selectedPortal != null -> selectedPortal.name
+        else -> "Select Portal"
+    }
+
+    var isFocused by remember { mutableStateOf(false) }
+    val borderColor = if (isFocused) Primary else SurfaceHighlight
+    val bgColor     = if (isFocused) Surface  else SurfaceElevated
+
+    Surface(
+        onClick = { showDialog = true },
+        modifier = modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .onFocusEvent { isFocused = it.hasFocus }
+            .mouseClickable(onClick = { showDialog = true }),
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(BorderStroke(1.dp, borderColor)),
+            focusedBorder = Border(BorderStroke(2.dp, FocusBorder))
+        ),
+        colors = ClickableSurfaceDefaults.colors(containerColor = bgColor, focusedContainerColor = bgColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = displayText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (selectedUrl.isNotEmpty()) OnBackground else OnSurfaceDim
+            )
+            Text(
+                text = "▼",
+                style = MaterialTheme.typography.bodySmall,
+                color = OnSurfaceDim
+            )
+        }
+    }
+
+    if (showDialog) {
+        PremiumDialog(
+            title = "Select Portal",
+            subtitle = "Choose a portal from the list",
+            onDismissRequest = { showDialog = false },
+            content = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                ) {
+                    if (filteredPortals.isEmpty()) {
+                        Text(
+                            text = "No portals available.",
+                            color = OnSurfaceDim,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    } else {
+                        filteredPortals.forEach { portal ->
+                            var itemFocused by remember { mutableStateOf(false) }
+                            Surface(
+                                onClick = {
+                                    onPortalSelected(portal)
+                                    showDialog = false
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onFocusEvent { itemFocused = it.hasFocus }
+                                    .mouseClickable {
+                                        onPortalSelected(portal)
+                                        showDialog = false
+                                    },
+                                shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+                                colors = ClickableSurfaceDefaults.colors(
+                                    containerColor = if (itemFocused) Primary.copy(alpha = 0.15f) else Color.Transparent,
+                                    focusedContainerColor = Primary.copy(alpha = 0.25f)
+                                ),
+                                border = ClickableSurfaceDefaults.border(
+                                    border = Border(BorderStroke(1.dp, if (itemFocused) Primary else Color.Transparent)),
+                                    focusedBorder = Border(BorderStroke(2.dp, FocusBorder))
+                                )
+                            ) {
+                                Text(
+                                    text = portal.name,
+                                    modifier = Modifier.padding(16.dp),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = OnBackground
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            footer = {
+                PremiumDialogFooterButton(
+                    label = "Cancel",
+                    onClick = { showDialog = false }
+                )
+            }
+        )
+    }
+}
+

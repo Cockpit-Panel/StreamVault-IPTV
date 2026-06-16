@@ -44,6 +44,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import org.json.JSONArray
 
 private const val PAIRING_SESSION_MS = 5 * 60 * 1_000L
 private const val PAIRING_QR_SIZE = 384
@@ -53,12 +57,16 @@ private const val TAG = "ProviderQrPairing"
 @Singleton
 class ProviderQrPairingManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val validateAndAddProvider: ValidateAndAddProvider
+    private val validateAndAddProvider: ValidateAndAddProvider,
+    private val okHttpClient: okhttp3.OkHttpClient
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val secureRandom = SecureRandom()
     private val _state = MutableStateFlow(ProviderQrPairingState())
     val state: StateFlow<ProviderQrPairingState> = _state.asStateFlow()
+
+    private var cachedPortals: List<PortalInfo> = emptyList()
+
 
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -68,6 +76,7 @@ class ProviderQrPairingManager @Inject constructor(
 
     suspend fun startPairing() {
         stopPairing()
+        fetchPortals()
         val host = resolveLanIpv4Address()
         if (host.isNullOrBlank()) {
             _state.value = ProviderQrPairingState(
@@ -217,26 +226,19 @@ class ProviderQrPairingManager @Inject constructor(
     }
 
     private suspend fun addProviderFromForm(form: Map<String, String>): ProviderPairingSubmitResult {
-        val type = form["type"].orEmpty().lowercase(Locale.US)
-        val name = form["name"].orEmpty().ifBlank {
-            when (type) {
-                "m3u" -> "Phone M3U Playlist"
-                "stalker" -> "Phone Stalker Portal"
-                else -> "Phone Xtream Provider"
-            }
-        }
+        val portalIdStr = form["portalId"]
+        val portalId = portalIdStr?.toIntOrNull()
+        val portal = cachedPortals.find { it.id == portalId }
+            ?: return ProviderPairingSubmitResult.Error("Selected portal not found on TV.")
+
+        val type = portal.type.lowercase(Locale.US)
+        val name = portal.name
+        val url = portal.url
+
         val result = when (type) {
-            "m3u" -> validateAndAddProvider.addM3u(
-                M3uProviderSetupCommand(
-                    url = form["m3uUrl"].orEmpty(),
-                    name = name,
-                    epgSyncMode = ProviderEpgSyncMode.BACKGROUND
-                ),
-                onProgress = ::updateProgress
-            )
             "stalker" -> validateAndAddProvider.loginStalker(
                 StalkerProviderSetupCommand(
-                    portalUrl = form["serverUrl"].orEmpty(),
+                    portalUrl = url,
                     macAddress = form["macAddress"].orEmpty(),
                     authMode = StalkerAuthMode.AUTO,
                     username = form["username"].orEmpty(),
@@ -248,7 +250,7 @@ class ProviderQrPairingManager @Inject constructor(
             )
             else -> validateAndAddProvider.loginXtream(
                 XtreamProviderSetupCommand(
-                    serverUrl = form["serverUrl"].orEmpty(),
+                    serverUrl = url,
                     username = form["username"].orEmpty(),
                     password = form["password"].orEmpty(),
                     name = name,
@@ -380,68 +382,91 @@ class ProviderQrPairingManager @Inject constructor(
         }
     }
 
-    private fun formPage(token: String): String = """
-        <!doctype html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>StreamVault Pairing</title>
-          <style>
-            body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101820;color:#f8fafc;margin:0;padding:24px}
-            main{max-width:560px;margin:0 auto;background:#172635;border:1px solid #2b4258;border-radius:22px;padding:22px;box-shadow:0 18px 60px rgba(0,0,0,.35)}
-            h1{margin:0 0 8px;font-size:26px} p{color:#b9c6d3;line-height:1.45}
-            label{display:block;margin-top:14px;font-weight:700}
-            input,select{width:100%;box-sizing:border-box;margin-top:7px;padding:13px;border-radius:12px;border:1px solid #39546d;background:#0c1620;color:#fff;font-size:16px}
-            button{width:100%;margin-top:20px;padding:15px;border:0;border-radius:14px;background:#32d6a0;color:#06110d;font-weight:900;font-size:17px}
-            .hint{font-size:13px;color:#93a4b5}.field-group{display:none}.field-group.active{display:block}
-          </style>
-        </head>
-        <body>
-        <main>
-          <h1>Add provider to StreamVault</h1>
-          <p>Enter details on your phone. They are sent directly to your TV over your local Wi-Fi only.</p>
-          <form method="post" action="/submit">
-            <input type="hidden" name="token" value="${token.escapeHtml()}">
-            <label>Provider type</label>
-            <select name="type" id="type" onchange="updateType()">
-              <option value="xtream">Xtream Codes</option>
-              <option value="m3u">M3U Playlist URL</option>
-              <option value="stalker">Stalker / MAG Portal</option>
-            </select>
-            <label>Provider name</label>
-            <input name="name" placeholder="Provider Name">
-            <div id="serverFields" class="field-group active">
-              <label>Server / portal URL</label>
-              <input name="serverUrl" placeholder="https://example.com">
-              <label>Username</label>
-              <input name="username" autocomplete="username">
-              <label>Password</label>
-              <input name="password" type="password" autocomplete="current-password">
-            </div>
-            <div id="m3uFields" class="field-group">
-              <label>M3U playlist URL</label>
-              <input name="m3uUrl" placeholder="https://example.com/get.php?...">
-            </div>
-            <div id="stalkerFields" class="field-group">
-              <label>MAC address</label>
-              <input name="macAddress" placeholder="00:1A:79:AA:BB:CC">
-              <p class="hint">For credential-only portals, leave MAC blank and fill username/password above.</p>
-            </div>
-            <button type="submit">Send to TV</button>
-          </form>
-        </main>
-        <script>
-          function updateType(){
-            const t=document.getElementById('type').value;
-            document.getElementById('serverFields').classList.toggle('active', t !== 'm3u');
-            document.getElementById('m3uFields').classList.toggle('active', t === 'm3u');
-            document.getElementById('stalkerFields').classList.toggle('active', t === 'stalker');
-          }
-        </script>
-        </body>
-        </html>
-    """.trimIndent()
+    private fun formPage(token: String): String {
+        if (cachedPortals.isEmpty()) {
+            return """
+                <!doctype html>
+                <html lang="en">
+                <head>
+                  <meta charset="utf-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <title>StreamVault Pairing</title>
+                  <style>
+                    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101820;color:#f8fafc;margin:0;padding:24px}
+                    main{max-width:560px;margin:0 auto;background:#2a1720;border:1px solid #582b35;border-radius:22px;padding:22px}
+                    h1{color:#ff8b8b}
+                  </style>
+                </head>
+                <body>
+                <main>
+                  <h1>No Portals Available</h1>
+                  <p>The TV failed to load portal information from the API. Please ensure the TV has internet access and try again.</p>
+                </main>
+                </body>
+                </html>
+            """.trimIndent()
+        }
+
+        val optionsBuilder = StringBuilder()
+        cachedPortals.forEach { portal ->
+            optionsBuilder.append("""<option value="${portal.id}" data-type="${portal.type}">${portal.name.escapeHtml()}</option>""")
+        }
+
+        return """
+            <!doctype html>
+            <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <title>StreamVault Pairing</title>
+              <style>
+                body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101820;color:#f8fafc;margin:0;padding:24px}
+                main{max-width:560px;margin:0 auto;background:#172635;border:1px solid #2b4258;border-radius:22px;padding:22px;box-shadow:0 18px 60px rgba(0,0,0,.35)}
+                h1{margin:0 0 8px;font-size:26px} p{color:#b9c6d3;line-height:1.45}
+                label{display:block;margin-top:14px;font-weight:700}
+                input,select{width:100%;box-sizing:border-box;margin-top:7px;padding:13px;border-radius:12px;border:1px solid #39546d;background:#0c1620;color:#fff;font-size:16px}
+                button{width:100%;margin-top:20px;padding:15px;border:0;border-radius:14px;background:#32d6a0;color:#06110d;font-weight:900;font-size:17px}
+                .hint{font-size:13px;color:#93a4b5}.field-group{display:none}.field-group.active{display:block}
+              </style>
+            </head>
+            <body>
+            <main>
+              <h1>Add provider to StreamVault</h1>
+              <p>Enter details on your phone. They are sent directly to your TV over your local Wi-Fi only.</p>
+              <form method="post" action="/submit">
+                <input type="hidden" name="token" value="${token.escapeHtml()}">
+                <label>Select Portal</label>
+                <select name="portalId" id="portalId" onchange="updateFields()">
+                  $optionsBuilder
+                </select>
+                <div id="credentialsFields" class="field-group active">
+                  <label>Username</label>
+                  <input name="username" autocomplete="username">
+                  <label>Password</label>
+                  <input name="password" type="password" autocomplete="current-password">
+                </div>
+                <div id="stalkerFields" class="field-group">
+                  <label>MAC address</label>
+                  <input name="macAddress" placeholder="00:1A:79:AA:BB:CC">
+                </div>
+                <button type="submit">Send to TV</button>
+              </form>
+            </main>
+            <script>
+              function updateFields(){
+                const sel = document.getElementById('portalId');
+                const opt = sel.options[sel.selectedIndex];
+                if (!opt) return;
+                const type = opt.getAttribute('data-type');
+                document.getElementById('stalkerFields').classList.toggle('active', type === 'stalker');
+                document.getElementById('credentialsFields').classList.toggle('active', type === 'xc');
+              }
+              updateFields();
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+    }
 
     private fun successPage(providerName: String): String = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -460,6 +485,50 @@ class ProviderQrPairingManager @Inject constructor(
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
+
+    private suspend fun fetchPortals() {
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url(com.PanelURL.URL + "api.php")
+                    .build()
+                val response = okHttpClient.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val bodyString = response.body?.string() ?: ""
+                    val portals = parsePortalsJson(bodyString)
+                    cachedPortals = portals
+                    portals.forEach { portal ->
+                        com.streamvault.data.util.PortalNameResolver.register(portal.url, portal.name)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch portals for QR pairing", e)
+            }
+        }
+    }
+
+    private fun parsePortalsJson(jsonStr: String): List<PortalInfo> {
+        val list = mutableListOf<PortalInfo>()
+        try {
+            val jsonObject = JSONObject(jsonStr)
+            val portalsArray = jsonObject.optJSONArray("portals")
+            if (portalsArray != null) {
+                for (i in 0 until portalsArray.length()) {
+                    val item = portalsArray.optJSONObject(i) ?: continue
+                    val type = item.optString("type", "")
+                    val id = item.optInt("id", -1)
+                    val name = item.optString("name", "")
+                    val url = item.optString("url", "")
+                    if (type.isNotEmpty() && url.isNotEmpty()) {
+                        list.add(PortalInfo(type = type, id = id, name = name, url = url))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing portals JSON", e)
+        }
+        return list
+    }
 }
 
 data class ProviderQrPairingState(

@@ -17,7 +17,20 @@ private val providerAllowedOutputFormatsType = object : TypeToken<List<String>>(
 
 fun ProviderEntity.toDomain() = Provider(
     id = id,
-    name = name,
+    name = if (name.contains("@")) {
+        val userPart = name.substringBefore("@")
+        val domainPart = name.substringAfter("@")
+        val resolvedName = com.streamvault.data.util.PortalNameResolver.resolve(serverUrl)
+        if (resolvedName != null) {
+            "$userPart@$resolvedName"
+        } else {
+            if (domainPart != "***" && !domainPart.contains(".") && !domainPart.contains("/")) {
+                name
+            } else {
+                "$userPart@***"
+            }
+        }
+    } else name,
     type = type,
     serverUrl = serverUrl,
     username = username,

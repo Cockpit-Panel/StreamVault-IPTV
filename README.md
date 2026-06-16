@@ -11,11 +11,18 @@
 	<a href="LICENSE"><img src="https://img.shields.io/badge/License-StreamVault_OSL-0284c7?style=for-the-badge" alt="License" /></a>
 </p>
 
-StreamVault is a TV-first IPTV player for Android TV built with Kotlin, Jetpack Compose, Room, Hilt, and Media3.
+StreamVault is a TV-first IPTV player for Android TV built with Kotlin, Jetpack Compose, Room, Hilt, and Media3, customized for Cockpit Panel.
 
-It is designed for large playlists, remote-friendly browsing, fast provider switching, and a polished living-room playback experience. StreamVault supports `M3U` playlists, `Xtream Codes`, and `Stalker Portal` providers, with dedicated flows for `Live TV`, `Movies`, and `Series`.
+It is designed for large playlists, remote-friendly browsing, fast provider switching, and a polished living-room playback experience. StreamVault supports `Xtream Codes` and `Stalker Portal` providers loaded dynamically from the Cockpit Portals API, with dedicated flows for `Live TV`, `Movies`, and `Series`.
 
-Built for Android TV first, StreamVault focuses on the things generic IPTV apps usually get wrong: D-pad navigation, quick channel movement, large-library organization, and a player that still feels good to use from the couch. Phone and tablet installs are also supported, but the primary UX target is TV.
+## Cockpit Customizations
+- **Dynamic Portals API**: Dropdown portal selector fetches and displays portals dynamically from the Cockpit server.
+- **Server URL Protection**: Server URLs are completely hidden from users.
+- **Dynamic Tab Filtering**: Only displays Xtream Codes and/or Stalker tabs based on portals returned by the API. M3U playlist additions are hidden.
+- **Dynamic Playlist Naming**: Custom playlists are dynamically named in the `USERNAME@SERVER NAME` or `MACADDRESS@SERVER NAME` format based on the selected portal, completely hiding underlying URLs.
+- **Secure QR Pairing**: Token-based pairing where the TV resolves portal URLs locally.
+- **Update Redirection**: Pointed update checks directly to the Cockpit update server.
+- **Settings & Providers Cleanup**: Removed Combined M3U merge cards, Google Drive backup sync, Crash Reports, and Developer Info / About sections.
 
 ## Preview
 <p align="center">
