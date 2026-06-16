@@ -17,6 +17,8 @@ import com.streamvault.app.tv.LauncherRecommendationsManager
 import com.streamvault.app.tv.WatchNextManager
 import com.streamvault.data.remote.stalker.StalkerUrlFactory
 import com.streamvault.data.remote.xtream.XtreamStreamUrlResolver
+import com.streamvault.data.sync.SyncManager
+import com.streamvault.domain.repository.DownloadManager
 import com.streamvault.data.security.CredentialDecryptionException
 import com.streamvault.domain.manager.RecordingManager
 import com.streamvault.domain.model.Category
