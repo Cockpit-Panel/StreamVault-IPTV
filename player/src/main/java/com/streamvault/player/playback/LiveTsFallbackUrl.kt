@@ -18,17 +18,12 @@ internal fun shouldFallbackMalformedHlsToLiveTs(
     category: PlaybackErrorCategory,
     resolvedStreamType: ResolvedStreamType,
     playbackStarted: Boolean
-): Boolean =
-    category == PlaybackErrorCategory.SOURCE_MALFORMED &&
-        resolvedStreamType == ResolvedStreamType.HLS &&
-        !playbackStarted
+): Boolean = false
 
 internal fun shouldFallbackStalledHlsToLiveTs(
     resolvedStreamType: ResolvedStreamType,
     recoveryAttempt: Int
-): Boolean =
-    resolvedStreamType == ResolvedStreamType.HLS &&
-        recoveryAttempt >= 2
+): Boolean = false
 
 internal fun buildLiveTsFallbackUrl(url: String): String? {
     val uri = runCatching { URI(url) }.getOrNull() ?: return null

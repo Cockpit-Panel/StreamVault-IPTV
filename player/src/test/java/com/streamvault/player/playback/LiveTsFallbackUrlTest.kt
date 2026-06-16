@@ -30,18 +30,14 @@ class LiveTsFallbackUrlTest {
     }
 
     @Test
-    fun `malformed hls can use transport stream fallback`() {
+    fun `malformed hls does not use transport stream fallback`() {
         assertThat(
             shouldFallbackMalformedHlsToLiveTs(
                 category = PlaybackErrorCategory.SOURCE_MALFORMED,
                 resolvedStreamType = ResolvedStreamType.HLS,
                 playbackStarted = false
             )
-        ).isTrue()
-    }
-
-    @Test
-    fun `malformed hls does not switch to transport stream after playback started`() {
+        ).isFalse()
         assertThat(
             shouldFallbackMalformedHlsToLiveTs(
                 category = PlaybackErrorCategory.SOURCE_MALFORMED,
@@ -52,13 +48,13 @@ class LiveTsFallbackUrlTest {
     }
 
     @Test
-    fun `stalled hls can use transport stream fallback after bounded recoveries`() {
+    fun `stalled hls does not use transport stream fallback`() {
         assertThat(
             shouldFallbackStalledHlsToLiveTs(
                 resolvedStreamType = ResolvedStreamType.HLS,
                 recoveryAttempt = 2
             )
-        ).isTrue()
+        ).isFalse()
         assertThat(
             shouldFallbackStalledHlsToLiveTs(
                 resolvedStreamType = ResolvedStreamType.HLS,

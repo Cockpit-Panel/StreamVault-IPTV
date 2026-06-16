@@ -7,6 +7,9 @@ import com.streamvault.domain.model.LiveChannelVariant
 import java.net.URI
 import java.util.Locale
 
+private val LIVE_AVC_CODEC_TOKENS = listOf("avc", "h264", "x264")
+private val LIVE_HEVC_CODEC_TOKENS = listOf("hevc", "h265", "x265", "hev1", "hvc1", "av1")
+
 internal enum class LiveRecoveryCandidateKind {
     VARIANT,
     XTREAM_TS_FALLBACK,
@@ -59,18 +62,25 @@ internal fun selectNextLiveVariant(
     triedAlternativeStreams: Set<String>,
     failedStreamsThisSession: Map<String, Int>
 ): LiveChannelVariant? {
-    return variants.firstOrNull { variant ->
+    val eligibleVariants = variants.filter { variant ->
         variant.rawChannelId != currentVariantId &&
             variant.streamUrl.isNotBlank() &&
             variant.streamUrl != currentStreamUrl &&
             variant.streamUrl !in triedAlternativeStreams &&
             (failedStreamsThisSession[variant.streamUrl] ?: 0) == 0
-    } ?: variants.firstOrNull { variant ->
-        variant.rawChannelId != currentVariantId &&
-            variant.streamUrl.isNotBlank() &&
-            variant.streamUrl != currentStreamUrl &&
-            variant.streamUrl !in triedAlternativeStreams
     }
+    if (eligibleVariants.isEmpty()) {
+        return variants.firstOrNull { variant ->
+            variant.rawChannelId != currentVariantId &&
+                variant.streamUrl.isNotBlank() &&
+                variant.streamUrl != currentStreamUrl &&
+                variant.streamUrl !in triedAlternativeStreams
+        }
+    }
+
+    return eligibleVariants.firstOrNull { liveVariantCodecPriority(it) == 2 }
+        ?: eligibleVariants.firstOrNull { liveVariantCodecPriority(it) == 1 }
+        ?: eligibleVariants.firstOrNull()
 }
 
 internal fun selectNextLiveRecoveryCandidate(
@@ -192,4 +202,21 @@ private fun extractXtreamLiveStreamId(url: String): Long? {
     return fileSegment.substringBefore('?')
         .substringBeforeLast('.', missingDelimiterValue = fileSegment)
         .toLongOrNull()
+}
+
+private fun liveVariantCodecPriority(variant: LiveChannelVariant): Int {
+    val codecLabel = variant.attributes.codecLabel?.trim()?.uppercase(Locale.ROOT).orEmpty()
+    if (codecLabel in setOf("AVC", "H.264")) return 2
+    if (codecLabel in setOf("HEVC", "AV1")) return 0
+
+    val name = buildString {
+        append(variant.originalName)
+        append(' ')
+        append(variant.canonicalName)
+    }.lowercase(Locale.ROOT)
+    return when {
+        LIVE_AVC_CODEC_TOKENS.any { token -> name.contains(token) } -> 2
+        LIVE_HEVC_CODEC_TOKENS.any { token -> name.contains(token) } -> 0
+        else -> 1
+    }
 }

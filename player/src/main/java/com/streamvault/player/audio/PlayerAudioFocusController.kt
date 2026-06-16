@@ -3,6 +3,7 @@ package com.streamvault.player.audio
 import android.content.Context
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,7 +16,7 @@ class PlayerAudioFocusController(
     private val onAudioFocusDenied: (() -> Unit)? = null
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private var audioFocusRequest: AudioFocusRequest? = null
+    private var audioFocusRequest: Any? = null
     private var hasAudioFocus = false
     private var shouldResumeOnAudioFocusGain = false
     private var isDucked = false
@@ -77,12 +78,22 @@ class PlayerAudioFocusController(
         }
         if (osContentType != currentOsContentType) {
             currentOsContentType = osContentType
-            audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+            abandonAudioFocusRequestObject()
             audioFocusRequest = null
             hasAudioFocus = false
         }
-        val request = audioFocusRequest ?: buildAudioFocusRequest().also { audioFocusRequest = it }
-        val granted = audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val request = (audioFocusRequest as? AudioFocusRequest)
+                ?: buildAudioFocusRequest().also { audioFocusRequest = it }
+            audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
         hasAudioFocus = granted
         if (!granted) {
             Log.w(TAG, "audio-focus denied")
@@ -163,9 +174,18 @@ class PlayerAudioFocusController(
 
     private fun abandonAudioFocusIfHeld() {
         if (!hasAudioFocus) return
-        audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+        abandonAudioFocusRequestObject()
         hasAudioFocus = false
         isDucked = false
+    }
+
+    private fun abandonAudioFocusRequestObject() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            (audioFocusRequest as? AudioFocusRequest)?.let(audioManager::abandonAudioFocusRequest)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(audioFocusChangeListener)
+        }
     }
 
     private fun buildAudioFocusRequest(): AudioFocusRequest {

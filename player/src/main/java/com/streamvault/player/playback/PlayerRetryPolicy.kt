@@ -70,9 +70,9 @@ class PlayerRetryPolicy(
             PlaybackErrorCategory.LIVE_WINDOW -> true
             PlaybackErrorCategory.NETWORK,
             PlaybackErrorCategory.HTTP_SERVER,
+            PlaybackErrorCategory.PROVIDER_LIMIT,
             PlaybackErrorCategory.EMPTY_RESPONSE,
             PlaybackErrorCategory.UNKNOWN -> streamContext.isLive
-            PlaybackErrorCategory.PROVIDER_LIMIT -> false
             PlaybackErrorCategory.SOURCE_MALFORMED -> streamContext.resolvedStreamType == ResolvedStreamType.HLS
             PlaybackErrorCategory.HTTP_AUTH,
             PlaybackErrorCategory.SSL,
@@ -88,8 +88,8 @@ class PlayerRetryPolicy(
             PlaybackErrorCategory.LIVE_WINDOW -> "refresh-live-window"
             PlaybackErrorCategory.NETWORK -> "transient-network"
             PlaybackErrorCategory.HTTP_SERVER -> "server-retryable"
-            PlaybackErrorCategory.PROVIDER_LIMIT -> "provider-limit"
-            PlaybackErrorCategory.EMPTY_RESPONSE -> "empty-http-response"
+            PlaybackErrorCategory.PROVIDER_LIMIT -> "terminal-provider-limit"
+            PlaybackErrorCategory.EMPTY_RESPONSE -> "terminal-empty-response"
             PlaybackErrorCategory.SOURCE_MALFORMED ->
                 if (streamContext.resolvedStreamType == ResolvedStreamType.HLS) {
                     "malformed-live-hls-refresh"
@@ -152,7 +152,6 @@ class PlayerRetryPolicy(
 
             PlaybackErrorCategory.FORMAT_UNSUPPORTED -> if (playbackStarted) 1 else 0
 
-            PlaybackErrorCategory.PROVIDER_LIMIT -> 0
             PlaybackErrorCategory.LIVE_WINDOW -> 1
             PlaybackErrorCategory.HTTP_SERVER -> {
                 val isProgressive = streamContext.resolvedStreamType == ResolvedStreamType.PROGRESSIVE
@@ -162,6 +161,8 @@ class PlayerRetryPolicy(
                     else -> 2
                 }
             }
+            PlaybackErrorCategory.PROVIDER_LIMIT,
+            PlaybackErrorCategory.EMPTY_RESPONSE -> 0
             PlaybackErrorCategory.NETWORK -> when {
                 error.hasCause<UnknownHostException>() -> 1
                 error.hasCause<SocketTimeoutException>() || error.hasCause<ConnectException>() ->
@@ -175,7 +176,6 @@ class PlayerRetryPolicy(
                 else -> 1
             }
 
-            PlaybackErrorCategory.EMPTY_RESPONSE -> if (playbackStarted) 0 else 1
             PlaybackErrorCategory.SOURCE_MALFORMED -> when {
                 streamContext.resolvedStreamType == ResolvedStreamType.HLS && playbackStarted ->
                     LIVE_HLS_MALFORMED_RETRY_ATTEMPTS_AFTER_START

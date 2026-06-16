@@ -26,6 +26,7 @@ interface MovieRepository {
     fun searchMovies(providerId: Long, query: String): Flow<List<Movie>>
     suspend fun getMovie(movieId: Long): Movie?
     suspend fun getMovieDetails(providerId: Long, movieId: Long): Result<Movie>
+    suspend fun getMovieVariants(movieId: Long): List<Movie>
     suspend fun getStreamInfo(movie: Movie): Result<StreamInfo>
     suspend fun refreshMovies(providerId: Long): Result<Unit>
     suspend fun getWatchProgress(movieId: Long): Long? = null

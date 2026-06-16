@@ -65,7 +65,6 @@ internal fun PlayerViewModel.applyPrepareSessionState(
     val previousCategoryId = currentCategoryId
     val previousCombinedProfileId = currentCombinedProfileId
     val previousCombinedSourceFilterProviderId = currentCombinedSourceFilterProviderId
-    stopActiveStalkerPlaybackFetchDeferral()
     val shouldReloadPlaylist = categoryId != -1L &&
         (
             categoryId != previousCategoryId ||
@@ -126,6 +125,7 @@ internal fun PlayerViewModel.applyPrepareSessionState(
     }
 
     hasRetriedWithSoftwareDecoder = false
+    hasRetriedWithAvcMovieVariant = false
     playerEngine.setDecoderMode(preferredDecoderMode)
     playerEngine.setSurfaceMode(preferredSurfaceMode)
     updateDecoderMode(preferredDecoderMode)

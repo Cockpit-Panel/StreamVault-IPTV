@@ -38,7 +38,12 @@ class PlayerViewBinder(
         val playerView = renderView as? PlayerView ?: return
         boundResizeMode = resizeMode
         if (boundPlayerView !== playerView) {
-            PlayerView.switchTargetView(player, boundPlayerView, playerView)
+            runCatching {
+                PlayerView.switchTargetView(player, boundPlayerView, playerView)
+            }.getOrElse {
+                boundPlayerView?.player = null
+                playerView.player = player
+            }
             boundPlayerView = playerView
         } else if (playerView.player !== player) {
             playerView.player = player

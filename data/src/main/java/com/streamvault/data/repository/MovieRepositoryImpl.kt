@@ -53,6 +53,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emitAll
@@ -380,6 +381,13 @@ class MovieRepositoryImpl @Inject constructor(
 
     override suspend fun getMovie(movieId: Long): Movie? =
         movieDao.getById(movieId)?.toDomain()
+
+    override suspend fun getMovieVariants(movieId: Long): List<Movie> {
+        val movie = movieDao.getById(movieId) ?: return emptyList()
+        return movieDao.getByProvider(movie.providerId).first()
+            .map { it.toDomain() }
+            .filter { it.id != movieId }
+    }
 
     override suspend fun getMovieDetails(providerId: Long, movieId: Long): Result<Movie> {
         val movieEntity = movieDao.getById(movieId)

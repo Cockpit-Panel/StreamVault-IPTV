@@ -2,7 +2,6 @@ package com.streamvault.app.ui.screens.player
 
 import androidx.lifecycle.viewModelScope
 import com.streamvault.domain.model.ContentType
-import com.streamvault.domain.model.ProviderType
 import com.streamvault.player.PlaybackState
 import com.streamvault.player.PlayerEngine
 import kotlinx.coroutines.delay
@@ -85,7 +84,6 @@ fun PlayerViewModel.onAppBackgrounded() {
 fun PlayerViewModel.onAppForegrounded() {
     if (isAppInForeground) return
     isAppInForeground = true
-    releaseDownloadPlaybackSlot()
     if (shouldResumeAfterForeground && !resumePrompt.value.show) {
         playerEngine.play()
     }
@@ -93,7 +91,6 @@ fun PlayerViewModel.onAppForegrounded() {
 }
 
 fun PlayerViewModel.onPlayerScreenDisposed() {
-    releaseDownloadPlaybackSlot()
     if (currentContentType != ContentType.LIVE) {
         viewModelScope.launch {
             persistPlaybackProgress()
@@ -116,36 +113,6 @@ internal fun PlayerViewModel.clearPlaybackTimers() {
     playbackTimerDefaultsApplied = false
     sleepTimerExitEmitted = false
     _sleepTimerUiState.value = SleepTimerUiState()
-}
-
-internal fun PlayerViewModel.stopActiveStalkerPlaybackFetchDeferral() {
-    val providerId = activeStalkerPlaybackProviderId ?: return
-    activeStalkerPlaybackProviderId = null
-    viewModelScope.launch {
-        syncManager.noteStalkerPlaybackStopped(providerId)
-    }
-}
-
-internal suspend fun PlayerViewModel.synchronizeStalkerPlaybackFetchDeferral(isPlaying: Boolean) {
-    if (!isPlaying) {
-        stopActiveStalkerPlaybackFetchDeferral()
-        return
-    }
-
-    val providerId = currentProviderId.takeIf { it > 0L } ?: run {
-        stopActiveStalkerPlaybackFetchDeferral()
-        return
-    }
-    val provider = providerRepository.getProvider(providerId)
-    if (provider?.type != ProviderType.STALKER_PORTAL) {
-        stopActiveStalkerPlaybackFetchDeferral()
-        return
-    }
-    if (activeStalkerPlaybackProviderId == providerId) return
-
-    stopActiveStalkerPlaybackFetchDeferral()
-    activeStalkerPlaybackProviderId = providerId
-    syncManager.noteStalkerPlaybackStarted(providerId)
 }
 
 fun PlayerViewModel.handOffPlaybackToMultiView() {
@@ -196,7 +163,7 @@ internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine)
             channel = channel!!,
             streamInfo = streamInfo!!,
             engine = activeEngine,
-            source = adoptedHandoffSource ?: com.streamvault.app.player.PreviewHandoffSource.HOME
+            source = com.streamvault.app.player.PreviewHandoffSource.HOME
         )
         mainPlayerEngine.resetForReuse()
     } else {

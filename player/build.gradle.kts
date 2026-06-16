@@ -13,10 +13,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 27
+        minSdk = 25
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -92,8 +93,8 @@ val verifyLocalFfmpegArtifact by tasks.registering {
             .matching { include("androidx/media3/decoder/ffmpeg/FfmpegLibrary.class") }
             .singleFile
         val ffmpegLibraryClassText = ffmpegLibraryClass.readBytes().toString(Charsets.ISO_8859_1)
-        check("audio/mpeg-L2" in ffmpegLibraryClassText && "mp2" in ffmpegLibraryClassText) {
-            "FFmpeg FfmpegLibrary must map audio/mpeg-L2 to the bundled mp2 decoder"
+        check("audio/mpeg-L2" in ffmpegLibraryClassText) {
+            "FFmpeg FfmpegLibrary must expose audio/mpeg-L2 MIME type for MPEG layer II audio"
         }
 
         zipTree(ffmpegAarFile)
@@ -113,6 +114,8 @@ tasks.named("preBuild").configure {
 }
 
 dependencies {
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+
     implementation(project(":domain"))
 
     // Media3

@@ -1,7 +1,6 @@
 package com.streamvault.app.ui.screens.player
 
 import android.app.Activity
-import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -46,16 +45,11 @@ import androidx.media3.common.util.UnstableApi
 import androidx.tv.material3.*
 import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.theme.*
-import com.streamvault.app.player.external.ExternalPlayerLaunchResult
-import com.streamvault.app.player.external.ExternalPlayerLauncher
 import com.streamvault.domain.model.DecoderMode
-import com.streamvault.domain.model.ExternalPlaybackMode
 import com.streamvault.domain.model.StreamInfo
 import com.streamvault.domain.model.VideoFormat
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.repository.EpgRepository
-import com.streamvault.domain.model.VirtualCategoryIds
-import com.streamvault.domain.repository.ChannelRepository
 import com.streamvault.player.PlaybackState
 import com.streamvault.player.PLAYER_TRACK_AUTO_ID
 import com.streamvault.player.PlayerEngine
@@ -105,16 +99,10 @@ import com.streamvault.app.ui.screens.player.overlay.PlayerAudioVideoOffsetDialo
 import com.streamvault.app.ui.screens.player.overlay.PlayerSpeedSelectionDialog
 import com.streamvault.app.ui.screens.player.overlay.PlayerSleepTimerDialog
 import com.streamvault.app.ui.screens.player.overlay.PlayerSleepTimerWarningOverlay
-import com.streamvault.app.ui.screens.player.overlay.PlayerTransparentGuideOverlay
-import com.streamvault.app.ui.screens.player.overlay.StreamFormatSelectionDialog
 import com.streamvault.app.ui.screens.player.overlay.NextEpisodeCountdownOverlay
 import com.streamvault.app.ui.screens.multiview.MultiViewViewModel
 import com.streamvault.app.ui.screens.multiview.MultiViewPlannerDialog
 import com.streamvault.app.navigation.Routes
-import com.streamvault.app.ui.remote.PlayerRemoteShortcutHandler
-import com.streamvault.app.ui.remote.dispatchPlayerRemoteShortcut
-import com.streamvault.app.ui.remote.remoteColorButtonForKeyCode
-import com.streamvault.domain.model.RemoteShortcutProfile
 
 
 
@@ -162,7 +150,6 @@ fun PlayerScreen(
         400.dp
     }
     val mainActivity = LocalContext.current.findMainActivity()
-    val appContext = LocalContext.current
     val notificationPermissionGate = rememberNotificationPermissionGate(
         onNotificationsBlocked = { message -> viewModel.showPlayerNotice(message = message) },
         reminderBlockedMessage = stringResource(R.string.notification_permission_reminder_required),
@@ -184,7 +171,6 @@ fun PlayerScreen(
     val nextProgram by viewModel.nextProgram.collectAsStateWithLifecycle()
     val programHistory by viewModel.programHistory.collectAsStateWithLifecycle()
     val currentChannel by viewModel.currentChannel.collectAsStateWithLifecycle()
-    val remoteShortcutPreferences by viewModel.remoteShortcutPreferences.collectAsStateWithLifecycle()
     val currentSeries by viewModel.currentSeries.collectAsStateWithLifecycle()
     val currentEpisode by viewModel.currentEpisode.collectAsStateWithLifecycle()
     val autoPlayCountdown by viewModel.autoPlayCountdown.collectAsStateWithLifecycle()
@@ -203,7 +189,6 @@ fun PlayerScreen(
     val parentalControlLevel by viewModel.parentalControlLevel.collectAsStateWithLifecycle()
     val activeCategoryId by viewModel.activeCategoryId.collectAsStateWithLifecycle()
     val showEpgOverlay by viewModel.showEpgOverlay.collectAsStateWithLifecycle()
-    val showFullGuideOverlay by viewModel.showFullGuideOverlay.collectAsStateWithLifecycle()
     val currentChannelList by viewModel.currentChannelList.collectAsStateWithLifecycle()
     val recentChannels by viewModel.recentChannels.collectAsStateWithLifecycle()
     val lastVisitedCategory by viewModel.lastVisitedCategory.collectAsStateWithLifecycle()
@@ -221,7 +206,6 @@ fun PlayerScreen(
     val showDiagnostics by viewModel.showDiagnostics.collectAsStateWithLifecycle()
     val playerDiagnostics by viewModel.playerDiagnostics.collectAsStateWithLifecycle()
     val playerNotice by viewModel.playerNotice.collectAsStateWithLifecycle()
-    val playerPreferencesUiState by viewModel.playerPreferencesUiState.collectAsStateWithLifecycle()
     val currentChannelRecording by viewModel.currentChannelRecording.collectAsStateWithLifecycle()
     val isMuted by viewModel.isMuted.collectAsStateWithLifecycle()
     val mediaTitle by viewModel.mediaTitle.collectAsStateWithLifecycle()
@@ -237,7 +221,6 @@ fun PlayerScreen(
 
     var showTrackSelection by remember { mutableStateOf<TrackType?>(null) }
     var showVariantSelection by remember { mutableStateOf(false) }
-    var showStreamFormatSelection by remember { mutableStateOf(false) }
     var showSpeedSelection by remember { mutableStateOf(false) }
     var showAudioVideoOffsetDialog by remember { mutableStateOf(false) }
     var showStopPlaybackTimerDialog by remember { mutableStateOf(false) }
@@ -253,10 +236,8 @@ fun PlayerScreen(
     val playButtonFocusRequester = remember { FocusRequester() }
     val quickActionsFocusRequester = remember { FocusRequester() }
     val channelInfoFocusRequester = remember { FocusRequester() }
-    val epgOverlayFocusRequester = remember { FocusRequester() }
     val layoutDirection = LocalLayoutDirection.current
     val isRtl = layoutDirection == LayoutDirection.Rtl
-    val openFullGuideFromEpgKeyCode = if (isRtl) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
     val currentPictureInPictureMode by rememberUpdatedState(isInPictureInPictureMode)
     val enterPictureInPicture = remember(mainActivity) {
         {
@@ -341,14 +322,8 @@ fun PlayerScreen(
 
     // Consolidated focus management for all overlays
     val liveOverlayVisible = contentType == "LIVE" && (showChannelListOverlay || showCategoryListOverlay || showEpgOverlay || showChannelInfoOverlay)
-    val guideNavigationContext = remember(activeCategoryId, currentChannel?.categoryId) {
-        resolvePlayerGuideNavigationContext(
-            activeCategoryId = activeCategoryId,
-            currentChannelCategoryId = currentChannel?.categoryId
-        )
-    }
     val nextEpisodeCountdownVisible = !isInPictureInPictureMode && autoPlayCountdown != null
-    val anyOverlayVisible = liveOverlayVisible || showFullGuideOverlay || nextEpisodeCountdownVisible || showTrackSelection != null || showVariantSelection || showStreamFormatSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker || showDiagnostics
+    val anyOverlayVisible = liveOverlayVisible || nextEpisodeCountdownVisible || showTrackSelection != null || showVariantSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker || showDiagnostics
 
     LaunchedEffect(contentType, showCategoryListOverlay, showChannelListOverlay, showEpgOverlay, showChannelInfoOverlay) {
         if (contentType == "LIVE" && (showCategoryListOverlay || showChannelListOverlay || showEpgOverlay || showChannelInfoOverlay)) {
@@ -357,7 +332,6 @@ fun PlayerScreen(
             when {
                 showCategoryListOverlay -> categoryListFocusRequester.requestFocusSafely(tag = "PlayerScreen", target = "Category list overlay")
                 showChannelListOverlay -> channelListFocusRequester.requestFocusSafely(tag = "PlayerScreen", target = "Channel list overlay")
-                showEpgOverlay -> epgOverlayFocusRequester.requestFocusSafely(tag = "PlayerScreen", target = "EPG overlay")
                 showChannelInfoOverlay -> channelInfoFocusRequester.requestFocusSafely(tag = "PlayerScreen", target = "Channel info overlay")
             }
         }
@@ -485,60 +459,6 @@ fun PlayerScreen(
         )
     }
 
-    // Auto-launch external player once per playback identity when mode is EXTERNAL_PLAYER.
-    // Wait for the resolved playable URL so logical provider URLs (xtream://, stalker://)
-    // are not handed to external apps before preparation finishes.
-    val externalPlaybackMode = playerPreferencesUiState.externalPlaybackMode
-    val externalPlaybackUrl by viewModel.externalPlaybackUrl.collectAsStateWithLifecycle()
-    val lastLaunchedExternalKey = rememberSaveable(streamUrl, prepareIdentity) {
-        mutableStateOf<String?>(null)
-    }
-
-    LaunchedEffect(externalPlaybackMode, prepareIdentity, externalPlaybackUrl) {
-        if (externalPlaybackMode == ExternalPlaybackMode.EXTERNAL_PLAYER) {
-            val launchUrl = externalPlaybackUrl
-            if (launchUrl.isBlank()) return@LaunchedEffect
-            val launchKey = prepareIdentity.toString()
-            if (lastLaunchedExternalKey.value != launchKey) {
-                lastLaunchedExternalKey.value = launchKey
-                if (!ExternalPlayerLauncher.isExternalPlayerLaunchUrl(launchUrl)) {
-                    viewModel.showPlayerNotice(
-                        message = "Cannot launch external player: Invalid or non-whitelisted URL scheme"
-                    )
-                    return@LaunchedEffect
-                }
-                val heldProviderSlot = viewModel.holdExternalProviderPlaybackSlot(launchUrl)
-                val result = ExternalPlayerLauncher.launch(appContext, launchUrl)
-                when (result) {
-                    is ExternalPlayerLaunchResult.Success -> {
-                        Log.d("PlayerScreen", "External player launched successfully for: ${result.url}")
-                    }
-                    is ExternalPlayerLaunchResult.InvalidUrl -> {
-                        if (heldProviderSlot) viewModel.releaseDownloadPlaybackSlot()
-                        Log.w("PlayerScreen", "External player launch failed - invalid URL: ${result.reason}")
-                        viewModel.showPlayerNotice(
-                            message = "Cannot launch external player: ${result.reason}"
-                        )
-                    }
-                    is ExternalPlayerLaunchResult.NoHandler -> {
-                        if (heldProviderSlot) viewModel.releaseDownloadPlaybackSlot()
-                        Log.w("PlayerScreen", "External player launch failed - no handler available for: ${result.url}")
-                        viewModel.showPlayerNotice(
-                            message = "No external player found. Playing internally."
-                        )
-                    }
-                    is ExternalPlayerLaunchResult.Failed -> {
-                        if (heldProviderSlot) viewModel.releaseDownloadPlaybackSlot()
-                        Log.w("PlayerScreen", "External player launch failed: ${result.errorMessage}")
-                        viewModel.showPlayerNotice(
-                            message = "External player failed. Playing internally."
-                        )
-                    }
-                }
-            }
-        }
-    }
-
     LaunchedEffect(showControls) {
         if (showControls) {
             delay(100)
@@ -553,10 +473,10 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, showTrackSelection, showVariantSelection, showStreamFormatSelection, showSpeedSelection, showAudioVideoOffsetDialog, showStopPlaybackTimerDialog, showIdleStandbyTimerDialog, showProgramHistory, showSplitDialog, showEpisodePicker) {
+    LaunchedEffect(showControls, showTrackSelection, showVariantSelection, showSpeedSelection, showAudioVideoOffsetDialog, showStopPlaybackTimerDialog, showIdleStandbyTimerDialog, showProgramHistory, showSplitDialog, showEpisodePicker) {
         if (!showControls) {
             viewModel.cancelControlsAutoHide()
-        } else if (showTrackSelection != null || showVariantSelection || showStreamFormatSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker) {
+        } else if (showTrackSelection != null || showVariantSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker) {
             viewModel.cancelControlsAutoHide()
         } else {
             viewModel.hideControlsAfterDelay()
@@ -586,13 +506,11 @@ fun PlayerScreen(
         showIdleStandbyTimerDialog,
         showTrackSelection,
         showVariantSelection,
-        showStreamFormatSelection,
         showDiagnostics,
         showChannelInfoOverlay,
         showChannelListOverlay,
         showCategoryListOverlay,
         showEpgOverlay,
-        showFullGuideOverlay,
         showControls,
         numericChannelInput
     ) {
@@ -612,10 +530,8 @@ fun PlayerScreen(
                 showStopPlaybackTimerDialog -> showStopPlaybackTimerDialog = false
                 showIdleStandbyTimerDialog -> showIdleStandbyTimerDialog = false
                 showVariantSelection -> showVariantSelection = false
-                showStreamFormatSelection -> showStreamFormatSelection = false
                 showTrackSelection != null -> showTrackSelection = null
                 showDiagnostics -> viewModel.toggleDiagnostics()
-                showFullGuideOverlay -> viewModel.closeFullGuideOverlay()
                 showChannelInfoOverlay -> viewModel.closeChannelInfoOverlay()
                 showChannelListOverlay || showCategoryListOverlay || showEpgOverlay -> viewModel.closeOverlays()
                 showControls -> viewModel.toggleControls()
@@ -672,18 +588,10 @@ fun PlayerScreen(
                 if (contentType != "LIVE") {
                     return@onPreviewKeyEvent false
                 }
-                if (showEpgOverlay && !isCatchUpPlayback && event.nativeKeyEvent.keyCode == openFullGuideFromEpgKeyCode) {
-                    viewModel.onLiveOverlayInteraction()
-                    viewModel.openFullGuideOverlay()
-                    return@onPreviewKeyEvent true
-                }
-                if (showFullGuideOverlay) {
-                    return@onPreviewKeyEvent false
-                }
                 if (showChannelListOverlay || showCategoryListOverlay || showEpgOverlay || showDiagnostics) {
                     return@onPreviewKeyEvent false
                 }
-                if (showTrackSelection != null || showVariantSelection || showStreamFormatSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker) {
+                if (showTrackSelection != null || showVariantSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog || showProgramHistory || showSplitDialog || showEpisodePicker) {
                     return@onPreviewKeyEvent false
                 }
                 if (showChannelInfoOverlay && channelInfoSubPanelOpen) {
@@ -725,7 +633,7 @@ fun PlayerScreen(
                             else -> true
                         }
                     }
-                    if (showTrackSelection != null || showVariantSelection || showStreamFormatSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog) {
+                    if (showTrackSelection != null || showVariantSelection || showSpeedSelection || showAudioVideoOffsetDialog || showStopPlaybackTimerDialog || showIdleStandbyTimerDialog) {
                         if (showAudioVideoOffsetDialog) {
                             return@onKeyEvent when (event.nativeKeyEvent.keyCode) {
                                 KeyEvent.KEYCODE_BACK -> {
@@ -792,43 +700,7 @@ fun PlayerScreen(
                             else -> true
                         }
                     }
-                    if (showFullGuideOverlay) {
-                        return@onKeyEvent when (event.nativeKeyEvent.keyCode) {
-                            KeyEvent.KEYCODE_BACK -> {
-                                viewModel.closeFullGuideOverlay()
-                                true
-                            }
-                            else -> false
-                        }
-                    }
                     when (event.nativeKeyEvent.keyCode) {
-                        KeyEvent.KEYCODE_PROG_RED,
-                        KeyEvent.KEYCODE_PROG_GREEN,
-                        KeyEvent.KEYCODE_PROG_YELLOW,
-                        KeyEvent.KEYCODE_PROG_BLUE -> {
-                            val button = remoteColorButtonForKeyCode(event.nativeKeyEvent.keyCode)
-                                ?: return@onKeyEvent false
-                            val action = remoteShortcutPreferences.resolvedAction(RemoteShortcutProfile.PLAYBACK, button)
-                            dispatchPlayerRemoteShortcut(
-                                action = action,
-                                handler = PlayerRemoteShortcutHandler(
-                                    isLiveContent = contentType == "LIVE",
-                                    isCatchUpPlayback = isCatchUpPlayback,
-                                    onOpenGuide = { viewModel.openEpgOverlay() },
-                                    onOpenPlayerControls = { viewModel.toggleControls() },
-                                    onOpenChannelInfo = {
-                                        if (showChannelInfoOverlay) viewModel.closeChannelInfoOverlay()
-                                        else viewModel.openChannelInfoOverlay()
-                                    },
-                                    onOpenChannelList = { viewModel.openChannelListOverlay() },
-                                    onOpenCategoryList = { viewModel.openCategoryListOverlay() },
-                                    onLastChannel = { viewModel.zapToLastChannel() },
-                                    onNextChannel = { viewModel.playNext() },
-                                    onPreviousChannel = { viewModel.playPrevious() },
-                                    onAddToSplitScreen = { showSplitDialog = true }
-                                )
-                            )
-                        }
                         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                             if (showChannelListOverlay || showEpgOverlay || showChannelInfoOverlay || showDiagnostics) {
                                 viewModel.onLiveOverlayInteraction()
@@ -871,10 +743,7 @@ fun PlayerScreen(
                                 viewModel.onLiveOverlayInteraction()
                             }
                             if (showControls && (contentType != "LIVE" || isCatchUpPlayback)) return@onKeyEvent false
-                            if (contentType == "LIVE" && !isCatchUpPlayback && showEpgOverlay && event.nativeKeyEvent.keyCode == openFullGuideFromEpgKeyCode) {
-                                viewModel.openFullGuideOverlay()
-                                true
-                            } else if (contentType == "LIVE" && !isCatchUpPlayback && !showChannelListOverlay && !showEpgOverlay && !showChannelInfoOverlay) {
+                            if (contentType == "LIVE" && !isCatchUpPlayback && !showChannelListOverlay && !showEpgOverlay && !showChannelInfoOverlay) {
                                 if (isRtl) viewModel.openChannelListOverlay() else viewModel.openEpgOverlay()
                                 true
                             } else if (!showChannelListOverlay && !showEpgOverlay && !showChannelInfoOverlay) {
@@ -967,7 +836,7 @@ fun PlayerScreen(
                         }
                         KeyEvent.KEYCODE_GUIDE -> {
                             if (contentType == "LIVE") {
-                                viewModel.openFullGuideOverlay()
+                                viewModel.openEpgOverlay()
                                 true
                             } else {
                                 false
@@ -1280,12 +1149,6 @@ fun PlayerScreen(
                 onDismiss = { showVariantSelection = false },
                 onSelectVariant = viewModel::selectLiveVariant
             )
-            StreamFormatSelectionDialog(
-                visible = showStreamFormatSelection,
-                channel = currentChannel,
-                onDismiss = { showStreamFormatSelection = false },
-                onSelectFormat = viewModel::selectStreamFormat
-            )
             PlayerSpeedSelectionDialog(
                 visible = showSpeedSelection,
                 selectedSpeed = playbackSpeed,
@@ -1351,60 +1214,6 @@ fun PlayerScreen(
                 stats = playerStats,
                 diagnostics = playerDiagnostics,
                 modifier = Modifier.align(Alignment.TopStart).padding(32.dp)
-            )
-        }
-
-        if (!isInPictureInPictureMode && showFullGuideOverlay && contentType == "LIVE") {
-            val guideViewModel: com.streamvault.app.ui.screens.epg.EpgViewModel = hiltViewModel()
-            val guideUiState by guideViewModel.uiState.collectAsStateWithLifecycle()
-
-            LaunchedEffect(showFullGuideOverlay, guideNavigationContext) {
-                if (showFullGuideOverlay) {
-                    guideViewModel.applyNavigationContext(
-                        categoryId = guideNavigationContext.categoryId,
-                        anchorTime = System.currentTimeMillis(),
-                        favoritesOnly = guideNavigationContext.favoritesOnly
-                    )
-                }
-            }
-
-            PlayerTransparentGuideOverlay(
-                uiState = guideUiState,
-                currentPlayerChannelId = currentChannel?.id ?: internalChannelId,
-                onDismiss = viewModel::closeFullGuideOverlay,
-                onJumpToNow = guideViewModel::jumpToNow,
-                onSelectCategory = { category ->
-                    if (category.id == VirtualCategoryIds.FAVORITES) {
-                        guideViewModel.applyNavigationContext(
-                            categoryId = ChannelRepository.ALL_CHANNELS_ID,
-                            anchorTime = null,
-                            favoritesOnly = true
-                        )
-                    } else {
-                        guideViewModel.applyNavigationContext(
-                            categoryId = category.id,
-                            anchorTime = null,
-                            favoritesOnly = false
-                        )
-                    }
-                },
-                onSearchQueryChange = guideViewModel::updateProgramSearchQuery,
-                onClearSearch = guideViewModel::clearProgramSearch,
-                onWatchChannel = { channel ->
-                    viewModel.playChannelFromGuideOverlay(
-                        channel = channel,
-                        selectedGuideCategoryId = guideUiState.selectedCategoryId,
-                        favoritesOnly = guideUiState.showFavoritesOnly,
-                        combinedProfileId = guideUiState.combinedProfileId
-                    )
-                },
-                onWatchArchive = { channel, program ->
-                    if (channel.id == (currentChannel?.id ?: internalChannelId)) {
-                        viewModel.playCatchUp(program)
-                    }
-                },
-                onRequestMoreChannels = guideViewModel::requestMoreChannels,
-                modifier = Modifier.fillMaxSize()
             )
         }
 
@@ -1475,8 +1284,6 @@ fun PlayerScreen(
                     nextProgram = nextProgram,
                     upcomingPrograms = upcomingPrograms,
                     onDismiss = { viewModel.closeOverlays() },
-                    overlayFocusRequester = epgOverlayFocusRequester,
-                    onOpenFullGuide = { viewModel.openFullGuideOverlay() },
                     onOpenArchiveBrowser = {
                         showProgramHistory = true
                         viewModel.closeOverlays()
@@ -1550,14 +1357,12 @@ fun PlayerScreen(
                     audioTrackCount = availableAudioTracks.size,
                     videoQualityCount = availableVideoQualities.size,
                     channelVariantCount = currentChannel?.variants?.size ?: 0,
-                    qualityOptionCount = currentChannel?.qualityOptions?.size ?: 0,
                     isMuted = isMuted,
                     onToggleMute = viewModel::toggleMute,
                     onOpenSubtitleTracks = { showTrackSelection = TrackType.TEXT },
                     onOpenAudioTracks = { showTrackSelection = TrackType.AUDIO },
                     onOpenVideoTracks = { showTrackSelection = TrackType.VIDEO },
                     onOpenVariants = { showVariantSelection = true },
-                    onOpenStreamFormats = { showStreamFormatSelection = true },
                     onOpenAudioVideoSync = { showAudioVideoOffsetDialog = true },
                     audioVideoSyncEnabled = audioVideoSyncEnabled,
                     onEnterPictureInPicture = enterPictureInPicture,
