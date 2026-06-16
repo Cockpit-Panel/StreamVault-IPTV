@@ -376,12 +376,17 @@ fun SeriesPosterCard(series: Series, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun EpisodeRowCard(episode: Episode, modifier: Modifier = Modifier) {
+fun EpisodeRowCard(
+    episode: Episode,
+    modifier: Modifier = Modifier,
+    fallbackImageUrl: String? = null
+) {
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val previewWidth = if (screenWidth < 700.dp) 124.dp else 164.dp
     val durationMs = episode.durationSeconds.toLong() * 1000L
     val showProgress = episode.watchProgress > 5000L && durationMs > 0L &&
         !isPlaybackComplete(episode.watchProgress, durationMs)
+    val displayUrl = episode.coverUrl.takeIf { !it.isNullOrBlank() } ?: fallbackImageUrl
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -399,18 +404,19 @@ fun EpisodeRowCard(episode: Episode, modifier: Modifier = Modifier) {
                         .background(AppColors.SurfaceEmphasis),
                     contentAlignment = Alignment.Center
                 ) {
-                    // Fallback label always visible; covered by AsyncImage on successful load
-                    Text(
-                        text = stringResource(R.string.label_episode, episode.episodeNumber),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = AppColors.TextSecondary
-                    )
-                    if (!episode.coverUrl.isNullOrBlank()) {
+                    if (displayUrl != null) {
                         AsyncImage(
-                            model = episode.coverUrl,
+                            model = displayUrl,
                             contentDescription = episode.title,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        // Fallback: episode number label when no image is available
+                        Text(
+                            text = stringResource(R.string.label_episode, episode.episodeNumber),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = AppColors.TextSecondary
                         )
                     }
                 }

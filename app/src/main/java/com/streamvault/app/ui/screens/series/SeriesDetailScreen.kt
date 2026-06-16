@@ -432,9 +432,13 @@ private fun SeriesDetailContent(
                         )
                     }
                 }
+                val fallbackCover = series?.let {
+                        it.posterUrl ?: it.backdropUrl
+                    }
                 items(visibleEpisodes, key = { it.id }) { episode ->
                     EpisodeItem(
                         episode = episode,
+                        fallbackImageUrl = fallbackCover,
                         onClick = { onEpisodeClick(episode) },
                         onCopyUrl = { copyEpisodeUrl(episode) },
                         onDownload = { onDownloadEpisode(episode) }
@@ -568,6 +572,7 @@ fun SeasonChip(
 @Composable
 fun EpisodeItem(
     episode: Episode,
+    fallbackImageUrl: String? = null,
     onClick: () -> Unit,
     onCopyUrl: () -> Unit,
     onDownload: () -> Unit
@@ -588,6 +593,7 @@ fun EpisodeItem(
         ) {
             EpisodeRowCard(
                 episode = episode,
+                fallbackImageUrl = fallbackImageUrl,
                 modifier = Modifier.fillMaxWidth()
             )
         }
