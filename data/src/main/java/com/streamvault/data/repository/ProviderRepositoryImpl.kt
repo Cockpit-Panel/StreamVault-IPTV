@@ -207,9 +207,10 @@ class ProviderRepositoryImpl @Inject constructor(
         } catch (e: CredentialDecryptionException) {
             return Result.error(e.message ?: CredentialDecryptionException.MESSAGE, e)
         }
+        val resolvedUrl = ProviderInputSanitizer.resolveUrlProtocol(normalizedServerUrl)
         val provider = createXtreamProvider(
             providerId = 0,
-            serverUrl = normalizedServerUrl,
+            serverUrl = resolvedUrl,
             username = normalizedUsername,
             password = effectivePassword,
             httpUserAgent = httpUserAgent,
@@ -222,7 +223,7 @@ class ProviderRepositoryImpl @Inject constructor(
                     val updated = authResult.data.copy(
                         id = existingProvider.id,
                         name = normalizedName.ifBlank { existingProvider.name },
-                        serverUrl = normalizedServerUrl,
+                        serverUrl = resolvedUrl,
                         username = normalizedUsername,
                         password = effectivePassword,
                         httpUserAgent = httpUserAgent,
