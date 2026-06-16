@@ -29,8 +29,10 @@ import com.streamvault.data.remote.xtream.XtreamProvider
 import com.streamvault.data.security.CredentialCrypto
 import com.streamvault.data.sync.ContentCachePolicy
 import com.streamvault.data.sync.SyncManager
+import com.streamvault.data.util.movieVariantGroupKey
 import com.streamvault.data.util.rankSearchResults
 import com.streamvault.data.util.toFtsPrefixQuery
+import com.streamvault.domain.util.movieVariantQualityScore
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.LibraryFilterType
@@ -64,6 +66,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.time.Year
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -105,6 +108,7 @@ class MovieRepositoryImpl @Inject constructor(
         const val DETAIL_REFRESH_TTL_MILLIS = 14L * 24L * 60L * 60L * 1000L
         const val CACHE_STATE_SUMMARY_ONLY = "SUMMARY_ONLY"
         const val CACHE_STATE_DETAIL_HYDRATED = "DETAIL_HYDRATED"
+        val YEAR_IN_TITLE_REGEX = Regex("""(19|20)\d{2}""")
     }
 
     private data class CachedXtreamProvider(
@@ -141,7 +145,7 @@ class MovieRepositoryImpl @Inject constructor(
         preferencesRepository.parentalControlLevel.flatMapLatest { level ->
             if (level >= 3) movieDao.getByProviderUnprotected(providerId)
             else movieDao.getByProvider(providerId)
-        }.map { list -> list.map { it.toDomain() } }
+        }.map { list -> list.distinctByMovieDedupKey().map { it.toDomain() } }
 
     override fun getMoviesByCategory(providerId: Long, categoryId: Long): Flow<List<Movie>> =
         flow {
@@ -150,7 +154,12 @@ class MovieRepositoryImpl @Inject constructor(
                 preferencesRepository.parentalControlLevel.flatMapLatest { level ->
                     if (level >= 3) movieDao.getByCategoryUnprotected(providerId, categoryId)
                     else movieDao.getByCategory(providerId, categoryId)
-                }.map { list -> list.map { it.toDomain() } }
+                }.map { list ->
+                    list
+                        .distinctByMovieDedupKey()
+                        .sortedByDescending(::movieReleaseScore)
+                        .map { it.toDomain() }
+                }
             )
         }
 
@@ -171,7 +180,7 @@ class MovieRepositoryImpl @Inject constructor(
                 } else {
                     entities
                 }
-            }.map { list -> list.map { it.toDomain() } }
+            }.map { list -> list.distinctByMovieDedupKey().sortedByDescending { movieReleaseScore(it) }.map { it.toDomain() } }
         )
     }
 
@@ -188,7 +197,12 @@ class MovieRepositoryImpl @Inject constructor(
                     } else {
                         entities
                     }
-                }.map { list -> list.map { it.toDomain() } }
+                }.map { list ->
+                    list
+                        .distinctByMovieDedupKey()
+                        .sortedByDescending { movieReleaseScore(it) }
+                        .map { it.toDomain() }
+                }
             )
         }
 
@@ -255,7 +269,7 @@ class MovieRepositoryImpl @Inject constructor(
             } else {
                 entities
             }
-        }.map { list -> list.map { it.toDomain() } }
+        }.map { list -> list.distinctByMovieDedupKey().sortedByDescending { movieReleaseScore(it) }.map { it.toDomain() } }
 
     override fun getFreshPreview(providerId: Long, limit: Int): Flow<List<Movie>> =
         combine(
@@ -267,7 +281,12 @@ class MovieRepositoryImpl @Inject constructor(
             } else {
                 entities
             }
-        }.map { list -> list.map { it.toDomain() } }
+        }.map { list ->
+            list
+                .currentYearOrOriginalBrowse()
+                .distinctByMovieDedupKey()
+                .map { it.toDomain() }
+        }
 
     override fun getRecommendations(providerId: Long, limit: Int): Flow<List<Movie>> =
         combine(
@@ -277,7 +296,7 @@ class MovieRepositoryImpl @Inject constructor(
             playbackHistoryDao.getRecentlyWatchedByProvider(providerId, limit = maxOf(limit * 4, 24))
         ) { topRated, fresh, favorites, history ->
             buildRecommendations(
-                movies = (topRated + fresh).distinctBy { it.id },
+                movies = (topRated + fresh).distinctMoviesByMovieDedupKey(),
                 favoriteIds = favorites.map { it.contentId }.toSet(),
                 recentlyWatchedIds = history
                     .asSequence()
@@ -304,7 +323,7 @@ class MovieRepositoryImpl @Inject constructor(
                 ) { categoryItems, topRated ->
                     buildRelatedContent(
                         target = targetMovie,
-                        candidates = (categoryItems + topRated).distinctBy { it.id }.filterNot { it.id == movieId },
+                        candidates = (categoryItems + topRated).distinctMoviesByMovieDedupKey().filterNot { it.id == movieId },
                         limit = limit
                     )
                 }
@@ -312,7 +331,7 @@ class MovieRepositoryImpl @Inject constructor(
         }
 
     override fun getMoviesByIds(ids: List<Long>): Flow<List<Movie>> =
-        movieDao.getByIds(ids).map { entities -> entities.map { it.toDomain() } }
+        movieDao.getByIds(ids).map { entities -> entities.distinctByMovieDedupKey().map { it.toDomain() } }
 
     override fun getCategories(providerId: Long): Flow<List<Category>> =
         combine(
@@ -384,9 +403,21 @@ class MovieRepositoryImpl @Inject constructor(
 
     override suspend fun getMovieVariants(movieId: Long): List<Movie> {
         val movie = movieDao.getById(movieId) ?: return emptyList()
-        return movieDao.getByProvider(movie.providerId).first()
+        val groupKey = movie.movieVariantGroupKey()
+        val favoriteIds = favoriteDao.getAllByType(movie.providerId, ContentType.MOVIE.name)
+            .first()
+            .asSequence()
+            .filter { it.groupId == null }
+            .map { it.contentId }
+            .toSet()
+        return movieDao.getByProvider(movie.providerId)
+            .first()
+            .asSequence()
+            .filter { it.movieVariantGroupKey() == groupKey }
             .map { it.toDomain() }
-            .filter { it.id != movieId }
+            .map { movie -> if (movie.id in favoriteIds) movie.copy(isFavorite = true) else movie }
+            .sortedWith(movieVariantComparator())
+            .toList()
     }
 
     override suspend fun getMovieDetails(providerId: Long, movieId: Long): Result<Movie> {
@@ -1483,6 +1514,7 @@ class MovieRepositoryImpl @Inject constructor(
     private fun movieReleaseScore(movie: Movie): Long =
         movie.releaseDate?.filter { it.isDigit() }?.take(8)?.toLongOrNull()
             ?: movie.year?.toLongOrNull()
+            ?: yearFromTitle(movie.name)?.toLong()
             ?: movie.addedAt.takeIf { it > 0L }
             ?: 0L
 
@@ -1553,5 +1585,66 @@ class MovieRepositoryImpl @Inject constructor(
         if (progressMs <= 0L || totalDurationMs <= 0L) return false
         return progressMs >= (totalDurationMs * 0.95f).toLong()
     }
+
+    private fun List<MovieBrowseEntity>.distinctByMovieDedupKey(): List<MovieBrowseEntity> =
+        groupBy { it.movieVariantGroupKey() }
+            .values
+            .map { group -> selectPreferredBrowseMovie(group) }
+
+    private fun List<Movie>.distinctMoviesByMovieDedupKey(): List<Movie> =
+        groupBy { it.movieVariantGroupKey() }
+            .values
+            .map { group -> selectPreferredMovie(group) }
+
+    private fun List<MovieBrowseEntity>.currentYearOrOriginalBrowse(): List<MovieBrowseEntity> {
+        val currentYear = currentYear()
+        val currentYearItems = filter { movieDisplayYear(it.year, it.releaseDate, it.name) == currentYear }
+        return if (currentYearItems.isNotEmpty()) currentYearItems else this
+    }
+
+    private fun selectPreferredBrowseMovie(group: List<MovieBrowseEntity>): MovieBrowseEntity {
+        val sorted = group.sortedWith(movieBrowseVariantComparator())
+        return sorted.first()
+    }
+
+    private fun selectPreferredMovie(group: List<Movie>): Movie {
+        val sorted = group.sortedWith(movieVariantComparator())
+        val canonical = sorted.first()
+        return if (group.any { it.isFavorite } && !canonical.isFavorite) canonical.copy(isFavorite = true) else canonical
+    }
+
+    private fun movieBrowseVariantComparator(): Comparator<MovieBrowseEntity> =
+        compareByDescending<MovieBrowseEntity> { movieDisplayYear(it.year, it.releaseDate, it.name) == currentYear() }
+            .thenByDescending { movieDisplayYear(it.year, it.releaseDate, it.name) ?: 0 }
+            .thenByDescending { it.addedAt }
+            .thenByDescending { it.rating }
+            .thenBy { it.name.lowercase() }
+            .thenBy { it.id }
+
+    private fun movieVariantComparator(): Comparator<Movie> =
+        compareByDescending<Movie> { movieVariantQualityScore(it.name) }
+            .thenByDescending { movieDisplayYear(it.year, it.releaseDate, it.name) == currentYear() }
+            .thenByDescending { movieDisplayYear(it.year, it.releaseDate, it.name) ?: 0 }
+            .thenByDescending { it.addedAt }
+            .thenByDescending { it.rating }
+            .thenBy { it.name.lowercase() }
+            .thenBy { it.id }
+
+    private fun movieDisplayYear(year: String?, releaseDate: String?, name: String?): Int? =
+        year?.trim()?.toIntOrNull()
+            ?: releaseDate?.filter(Char::isDigit)?.take(4)?.toIntOrNull()
+            ?: yearFromTitle(name)
+
+    private fun yearFromTitle(value: String?): Int? =
+        value?.let { YEAR_IN_TITLE_REGEX.find(it)?.value?.toIntOrNull() }
+
+    private fun currentYear(): Int = Year.now().value
+
+    private fun movieReleaseScore(movie: MovieBrowseEntity): Long =
+        movie.releaseDate?.filter { it.isDigit() }?.take(8)?.toLongOrNull()
+            ?: movie.year?.toLongOrNull()
+            ?: yearFromTitle(movie.name)?.toLong()
+            ?: movie.addedAt.takeIf { it > 0L }
+            ?: 0L
 }
 
