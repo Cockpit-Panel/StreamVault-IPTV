@@ -10,11 +10,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
@@ -23,6 +29,7 @@ import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.theme.OnBackground
 import com.streamvault.app.ui.theme.OnSurface
 import com.streamvault.app.ui.theme.Primary
+import com.streamvault.domain.model.LiveStreamFormatMode
 
 internal fun LazyListScope.settingsPlaybackSection(
     uiState: SettingsUiState,
@@ -74,6 +81,33 @@ internal fun LazyListScope.settingsPlaybackSection(
     onShowEthernetQualityDialogChange: (Boolean) -> Unit
 ) {
     item {
+        val liveStreamFormatMode by viewModel.playerLiveStreamFormatMode.collectAsStateWithLifecycle()
+        var showLiveStreamFormatDialog by rememberSaveable { mutableStateOf(false) }
+        val liveStreamFormatOptions = remember {
+            listOf(
+                LiveStreamFormatMode.AUTO,
+                LiveStreamFormatMode.HLS,
+                LiveStreamFormatMode.MPEG_TS
+            )
+        }
+        if (showLiveStreamFormatDialog) {
+            PremiumSelectionDialog(
+                title = "Live stream format",
+                onDismiss = { showLiveStreamFormatDialog = false }
+            ) {
+                liveStreamFormatOptions.forEachIndexed { index, mode ->
+                    LevelOption(
+                        level = index,
+                        text = formatLiveStreamFormatModeLabel(mode),
+                        currentLevel = if (liveStreamFormatMode == mode) index else -1,
+                        onSelect = {
+                            viewModel.setPlayerLiveStreamFormatMode(mode)
+                            showLiveStreamFormatDialog = false
+                        }
+                    )
+                }
+            }
+        }
         TvClickableSurface(
             onClick = { viewModel.setPreventStandbyDuringPlayback(!uiState.preventStandbyDuringPlayback) },
             shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
@@ -236,6 +270,11 @@ internal fun LazyListScope.settingsPlaybackSection(
             style = MaterialTheme.typography.bodySmall,
             color = OnBackground.copy(alpha = 0.6f),
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+        )
+        ClickableSettingsRow(
+            label = "Live stream format",
+            value = formatLiveStreamFormatModeLabel(liveStreamFormatMode),
+            onClick = { showLiveStreamFormatDialog = true }
         )
         HorizontalDivider(color = Color.White.copy(alpha = 0.07f), modifier = Modifier.padding(vertical = 4.dp))
         TvClickableSurface(

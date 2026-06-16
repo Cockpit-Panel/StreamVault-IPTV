@@ -27,6 +27,7 @@ import com.streamvault.domain.model.AppLandingDestination
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveChannelObservedQuality
+import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 import com.streamvault.domain.model.PlayerSurfaceMode
@@ -130,6 +131,7 @@ class PreferencesRepository @Inject constructor(
         val PLAYER_FAST_RETRY_ON_TRANSIENT_FAILURES =
             booleanPreferencesKey("player_fast_retry_on_transient_failures")
         val PLAYER_DECODER_MODE = stringPreferencesKey("player_decoder_mode")
+        val PLAYER_LIVE_STREAM_FORMAT_MODE = stringPreferencesKey("player_live_stream_format_mode")
         val PLAYER_VOD_HTTP_PROTOCOL_MODE = stringPreferencesKey("player_vod_http_protocol_mode")
         val LEGACY_PLAYER_MOVIE_HTTP_PROTOCOL_MODE = stringPreferencesKey("player_movie_http_protocol_mode")
         val PLAYER_AUDIO_OUTPUT_PREFERENCE = stringPreferencesKey("player_audio_output_preference")
@@ -298,6 +300,12 @@ class PreferencesRepository @Inject constructor(
         preferences[PreferencesKeys.PLAYER_SURFACE_MODE]
             ?.let { saved -> PlayerSurfaceMode.entries.firstOrNull { it.name == saved } }
             ?: PlayerSurfaceMode.AUTO
+    }
+
+    val playerLiveStreamFormatMode: Flow<LiveStreamFormatMode> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.PLAYER_LIVE_STREAM_FORMAT_MODE]
+            ?.let { saved -> LiveStreamFormatMode.entries.firstOrNull { it.name == saved } }
+            ?: LiveStreamFormatMode.AUTO
     }
 
     val playerVodHttpProtocolMode: Flow<VodHttpProtocolMode> = context.dataStore.data.map { preferences ->
@@ -873,6 +881,12 @@ class PreferencesRepository @Inject constructor(
     suspend fun setPlayerSurfaceMode(mode: PlayerSurfaceMode) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.PLAYER_SURFACE_MODE] = mode.name
+        }
+    }
+
+    suspend fun setPlayerLiveStreamFormatMode(mode: LiveStreamFormatMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_LIVE_STREAM_FORMAT_MODE] = mode.name
         }
     }
 

@@ -3,6 +3,7 @@ package com.streamvault.data.remote.xtream
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.entity.ProviderEntity
+import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.data.remote.stalker.StalkerApiService
 import com.streamvault.data.remote.stalker.StalkerCommandVariant
 import com.streamvault.data.remote.stalker.StalkerCategoryRecord
@@ -22,11 +23,14 @@ import com.streamvault.data.remote.stalker.StalkerStreamKind
 import com.streamvault.data.remote.stalker.StalkerUrlFactory
 import com.streamvault.domain.model.ContentType
 import com.streamvault.data.security.CredentialCrypto
+import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.ProviderType
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 
 class XtreamStreamUrlResolverTest {
     private val credentialCrypto = object : CredentialCrypto {
@@ -35,6 +39,30 @@ class XtreamStreamUrlResolverTest {
     }
 
     private val stalkerApiService = FakeStalkerApiService()
+
+    private fun preferencesRepository(
+        liveStreamFormatMode: LiveStreamFormatMode = LiveStreamFormatMode.AUTO
+    ): PreferencesRepository = mock<PreferencesRepository>().apply {
+        whenever(playerLiveStreamFormatMode).thenReturn(flowOf(liveStreamFormatMode))
+    }
+
+    private fun xtreamResolver(
+        liveStreamFormatMode: LiveStreamFormatMode = LiveStreamFormatMode.AUTO
+    ): XtreamStreamUrlResolver = XtreamStreamUrlResolver(
+        providerDao = FakeProviderDao(xtreamProvider()),
+        credentialCrypto = credentialCrypto,
+        stalkerApiService = stalkerApiService,
+        preferencesRepository = preferencesRepository(liveStreamFormatMode)
+    )
+
+    private fun xtreamProvider(): ProviderEntity = ProviderEntity(
+        id = 9,
+        name = "Xtream",
+        type = ProviderType.XTREAM_CODES,
+        serverUrl = "https://portal.example.com",
+        username = "alice",
+        password = "secret"
+    )
 
 
     @Test
@@ -67,6 +95,87 @@ class XtreamStreamUrlResolverTest {
     }
 
     @Test
+    fun resolveWithMetadata_overrides_live_internal_url_to_mpegTs_when_preferred() {
+        runBlocking {
+        val resolver = xtreamResolver(LiveStreamFormatMode.MPEG_TS)
+        val url = XtreamUrlFactory.buildInternalStreamUrl(
+            providerId = 9,
+            kind = XtreamStreamKind.LIVE,
+            streamId = 456,
+            containerExtension = "m3u8"
+        )
+
+        val resolved = resolver.resolveWithMetadata(url)
+
+        assertThat(resolved?.url).isEqualTo("https://portal.example.com/live/alice/secret/456.ts")
+        assertThat(resolved?.containerExtension).isEqualTo("ts")
+        }
+    }
+
+    @Test
+    fun resolveWithMetadata_overrides_live_internal_url_to_hls_when_preferred() {
+        runBlocking {
+        val resolver = xtreamResolver(LiveStreamFormatMode.HLS)
+        val url = XtreamUrlFactory.buildInternalStreamUrl(
+            providerId = 9,
+            kind = XtreamStreamKind.LIVE,
+            streamId = 456,
+            containerExtension = "ts"
+        )
+
+        val resolved = resolver.resolveWithMetadata(url)
+
+        assertThat(resolved?.url).isEqualTo("https://portal.example.com/live/alice/secret/456.m3u8")
+        assertThat(resolved?.containerExtension).isEqualTo("m3u8")
+        }
+    }
+
+    @Test
+    fun resolveWithMetadata_keeps_live_internal_url_extension_in_auto_mode() {
+        runBlocking {
+        val resolver = xtreamResolver(LiveStreamFormatMode.AUTO)
+        val url = XtreamUrlFactory.buildInternalStreamUrl(
+            providerId = 9,
+            kind = XtreamStreamKind.LIVE,
+            streamId = 456,
+            containerExtension = "m3u8"
+        )
+
+        val resolved = resolver.resolveWithMetadata(url)
+
+        assertThat(resolved?.url).isEqualTo("https://portal.example.com/live/alice/secret/456.m3u8")
+        assertThat(resolved?.containerExtension).isEqualTo("m3u8")
+        }
+    }
+
+    @Test
+    fun resolveWithMetadata_does_not_apply_live_format_preference_to_vod_or_series() {
+        runBlocking {
+        val resolver = xtreamResolver(LiveStreamFormatMode.MPEG_TS)
+        val movieUrl = XtreamUrlFactory.buildInternalStreamUrl(
+            providerId = 9,
+            kind = XtreamStreamKind.MOVIE,
+            streamId = 456,
+            containerExtension = "mp4"
+        )
+        val seriesUrl = XtreamUrlFactory.buildInternalStreamUrl(
+            providerId = 9,
+            kind = XtreamStreamKind.SERIES,
+            streamId = 789,
+            containerExtension = "mkv"
+        )
+
+        val movie = resolver.resolveWithMetadata(movieUrl)
+        val series = resolver.resolveWithMetadata(seriesUrl)
+
+        assertThat(movie?.url).isEqualTo("https://portal.example.com/movie/alice/secret/456.mp4")
+        assertThat(movie?.containerExtension).isEqualTo("mp4")
+        assertThat(series?.url).isEqualTo("https://portal.example.com/series/alice/secret/789.mkv")
+        assertThat(series?.containerExtension).isEqualTo("mkv")
+        }
+    }
+
+    @Test
     fun resolveWithMetadata_prefers_allowed_direct_source_for_vod() {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
@@ -81,7 +190,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = stalkerApiService
+            stalkerApiService = stalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val url = XtreamUrlFactory.buildInternalStreamUrl(
             providerId = 9,
@@ -115,7 +225,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = stalkerApiService
+            stalkerApiService = stalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val url = XtreamUrlFactory.buildInternalStreamUrl(
             providerId = 9,
@@ -150,7 +261,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = stalkerApiService
+            stalkerApiService = stalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
 
         val resolved = resolver.resolveWithMetadata(
@@ -181,7 +293,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = stalkerApiService
+            stalkerApiService = stalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val url = XtreamUrlFactory.buildInternalStreamUrl(
             providerId = 9,
@@ -212,7 +325,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = stalkerApiService
+            stalkerApiService = stalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
 
         val resolved = resolver.resolveWithMetadata(
@@ -274,7 +388,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
             providerId = 14,
@@ -324,7 +439,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val directCmd = "http://0connect.top:8080/9UTXtQcxuxkk/9fa4ed5x07/443?play_token=iwdgLK23Yl"
         val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
@@ -366,7 +482,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
             providerId = 14,
@@ -409,7 +526,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
             providerId = 14,
@@ -447,7 +565,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
         val descriptor = StalkerPlaybackDescriptor(
             primaryMode = StalkerPlaybackMode.MULTI_CMD,
@@ -501,7 +620,8 @@ class XtreamStreamUrlResolverTest {
                 )
             ),
             credentialCrypto = credentialCrypto,
-            stalkerApiService = fakeStalkerApiService
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
         )
 
         val resolved = resolver.resolveWithMetadata(

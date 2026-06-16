@@ -11,6 +11,7 @@ import com.streamvault.app.util.OfficialBuildStatus
 import com.streamvault.domain.model.AppLandingDestination
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.AudioOutputPreference
+import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 
 internal data class SettingsScreenLabels(
@@ -256,6 +257,12 @@ internal fun formatVodHttpProtocolModeLabel(
 ): String = when (mode) {
     VodHttpProtocolMode.COMPATIBILITY_HTTP1 -> context.getString(R.string.settings_vod_http_protocol_compatibility)
     VodHttpProtocolMode.AUTO -> context.getString(R.string.settings_vod_http_protocol_auto)
+}
+
+internal fun formatLiveStreamFormatModeLabel(mode: LiveStreamFormatMode): String = when (mode) {
+    LiveStreamFormatMode.AUTO -> "Auto"
+    LiveStreamFormatMode.HLS -> "HLS (m3u8)"
+    LiveStreamFormatMode.MPEG_TS -> "MPEG-TS (ts)"
 }
 
 private fun formatExternalPlaybackModeLabel(

@@ -92,6 +92,7 @@ class BackupManagerImpl @Inject constructor(
                 put("playerAudioOutputPreference", preferencesRepository.playerAudioOutputPreference.first().name)
                 put("playerCompatibilityMemoryEnabled", preferencesRepository.playerCompatibilityMemoryEnabled.first().toString())
                 put("playerSurfaceMode", preferencesRepository.playerSurfaceMode.first().name)
+                put("playerLiveStreamFormatMode", preferencesRepository.playerLiveStreamFormatMode.first().name)
                 put("playerVodHttpProtocolMode", preferencesRepository.playerVodHttpProtocolMode.first().name)
                 put("playerPlaybackSpeed", preferencesRepository.playerPlaybackSpeed.first().toString())
                 put("playerAudioVideoSyncEnabled", preferencesRepository.playerAudioVideoSyncEnabled.first().toString())
@@ -585,6 +586,13 @@ class BackupManagerImpl @Inject constructor(
                 .firstOrNull { entry -> entry.name == savedMode }
             if (surfaceMode != null) {
                 preferencesRepository.setPlayerSurfaceMode(surfaceMode)
+            }
+        }
+        prefs["playerLiveStreamFormatMode"]?.takeIf { it.isNotBlank() }?.let { savedMode ->
+            val formatMode = com.streamvault.domain.model.LiveStreamFormatMode.entries
+                .firstOrNull { entry -> entry.name == savedMode }
+            if (formatMode != null) {
+                preferencesRepository.setPlayerLiveStreamFormatMode(formatMode)
             }
         }
         (prefs["playerVodHttpProtocolMode"] ?: prefs["playerMovieHttpProtocolMode"])?.takeIf { it.isNotBlank() }?.let { savedMode ->

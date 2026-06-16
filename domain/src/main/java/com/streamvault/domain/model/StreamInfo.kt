@@ -81,3 +81,9 @@ enum class VodHttpProtocolMode {
     COMPATIBILITY_HTTP1,
     AUTO
 }
+
+enum class LiveStreamFormatMode {
+    AUTO,
+    HLS,
+    MPEG_TS
+}

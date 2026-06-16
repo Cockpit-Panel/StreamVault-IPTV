@@ -46,6 +46,7 @@ import com.streamvault.domain.model.CombinedM3uProfile
 import com.streamvault.domain.model.GroupedChannelLabelMode
 import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.LiveChannelGroupingMode
+import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 import com.streamvault.domain.model.ProviderStatus
@@ -125,6 +126,12 @@ class SettingsViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(SettingsUiState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
+    val playerLiveStreamFormatMode: StateFlow<LiveStreamFormatMode> =
+        preferencesRepository.playerLiveStreamFormatMode.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = LiveStreamFormatMode.AUTO
+        )
     private val activeProviderIdFlow = providerRepository.getActiveProvider().map { it?.id }
     private val appUpdateActions = SettingsAppUpdateActions(
         appContext = application,
@@ -755,6 +762,12 @@ class SettingsViewModel @Inject constructor(
     fun setPlayerSurfaceMode(mode: com.streamvault.domain.model.PlayerSurfaceMode) {
         viewModelScope.launch {
             preferencesRepository.setPlayerSurfaceMode(mode)
+        }
+    }
+
+    fun setPlayerLiveStreamFormatMode(mode: LiveStreamFormatMode) {
+        viewModelScope.launch {
+            preferencesRepository.setPlayerLiveStreamFormatMode(mode)
         }
     }
 
