@@ -111,6 +111,16 @@ object ChannelNormalizer {
     fun getLogicalGroupId(channelName: String, providerId: Long): String =
         classify(channelName, providerId).logicalGroupId
 
+    /**
+     * Returns true when the channel name is wrapped in hash markers,
+     * e.g. "#### GENERAL HD/4K ####". These are category-header entries
+     * from some providers (like Strong8k) that are not actual playable channels.
+     */
+    fun isHashWrappedHeader(channelName: String): Boolean {
+        val trimmed = channelName.trim()
+        return trimmed.startsWith("##") && trimmed.endsWith("##")
+    }
+
     fun classify(
         channelName: String,
         providerId: Long,

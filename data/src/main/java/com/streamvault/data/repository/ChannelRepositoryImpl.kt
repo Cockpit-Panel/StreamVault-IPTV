@@ -640,13 +640,18 @@ class ChannelRepositoryImpl @Inject constructor(
         entities: List<ChannelBrowseEntity>,
         level: Int,
         unlockedCats: Set<Long>
-    ): List<ChannelBrowseEntity> = if (level >= 3) {
-        entities.filter { entity ->
-            val isUnlocked = entity.categoryId != null && unlockedCats.contains(entity.categoryId)
-            (!entity.isAdult && !entity.isUserProtected) || isUnlocked
+    ): List<ChannelBrowseEntity> {
+        val usable = entities.filterNot { entity ->
+            ChannelNormalizer.isHashWrappedHeader(entity.name)
         }
-    } else {
-        entities
+        return if (level >= 3) {
+            usable.filter { entity ->
+                val isUnlocked = entity.categoryId != null && unlockedCats.contains(entity.categoryId)
+                (!entity.isAdult && !entity.isUserProtected) || isUnlocked
+            }
+        } else {
+            usable
+        }
     }
 
     private fun sortChannelsByNumber(channels: List<Channel>): List<Channel> =
