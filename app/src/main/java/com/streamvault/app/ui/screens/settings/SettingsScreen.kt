@@ -1,8 +1,12 @@
 package com.streamvault.app.ui.screens.settings
 
+import android.content.ActivityNotFoundException
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -13,13 +17,19 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.tv.material3.*
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.graphics.Color
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.streamvault.app.backup.BackupFileBridge
+import com.streamvault.app.device.isFireTvDevice
+import com.streamvault.app.device.removableAppStorageDirs
+import java.io.File
 import com.streamvault.app.diagnostics.CrashReportStore
 import com.streamvault.app.util.OfficialBuildVerifier
 import com.streamvault.app.ui.components.shell.AppTopBarCloseAction
@@ -31,6 +41,20 @@ import androidx.compose.ui.res.stringResource
 import com.streamvault.app.R
 import com.streamvault.app.ui.design.requestFocusSafely
 import kotlinx.coroutines.delay
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+private val backupFileNameFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+
+private fun buildBackupFileName(): String =
+    "streamvault_backup_${LocalDateTime.now().format(backupFileNameFormatter)}.json"
+
+// Fire OS strips the AOSP DocumentsUI, so ACTION_CREATE_DOCUMENT and
+// ACTION_OPEN_DOCUMENT have no handler and throw ActivityNotFoundException.
+// ACTION_OPEN_DOCUMENT_TREE is handled by Amazon's storage UI, so on Fire TV
+// we route backup export/import through a folder picker instead.
+private fun Context.isFireTv(): Boolean =
+    packageManager.hasSystemFeature("amazon.hardware.fire_tv")
 
 
 @Composable
@@ -72,6 +96,59 @@ fun SettingsScreen(
         uri?.let { viewModel.inspectBackup(it.toString()) }
     }
 
+    var pendingImportCandidates by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+
+    val exportTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        treeUri ?: return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                treeUri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+        val folder = DocumentFile.fromTreeUri(context, treeUri)
+        if (folder == null || !folder.canWrite()) {
+            viewModel.showUserMessage(context.getString(R.string.settings_backup_folder_create_failed))
+            return@rememberLauncherForActivityResult
+        }
+        val newFile = folder.createFile(BackupFileBridge.MIME_TYPE_JSON, buildBackupFileName())
+        if (newFile == null) {
+            viewModel.showUserMessage(context.getString(R.string.settings_backup_folder_create_failed))
+            return@rememberLauncherForActivityResult
+        }
+        viewModel.exportConfig(newFile.uri.toString())
+    }
+
+    val importTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        treeUri ?: return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                treeUri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val folder = DocumentFile.fromTreeUri(context, treeUri)
+        if (folder == null) {
+            viewModel.showUserMessage(context.getString(R.string.settings_backup_folder_read_failed))
+            return@rememberLauncherForActivityResult
+        }
+        val candidates = folder.listFiles()
+            .filter { it.isFile && it.name?.endsWith(".json", ignoreCase = true) == true }
+            .sortedByDescending { it.lastModified() }
+            .map { (it.name ?: "backup.json") to it.uri.toString() }
+        when {
+            candidates.isEmpty() ->
+                viewModel.showUserMessage(context.getString(R.string.settings_backup_no_files_in_folder))
+            candidates.size == 1 -> viewModel.inspectBackup(candidates.first().second)
+            else -> pendingImportCandidates = candidates
+        }
+    }
+
     fun shareBackup() {
         val file = runCatching { BackupFileBridge.createExportFile(context) }.getOrNull()
         if (file == null) {
@@ -82,6 +159,34 @@ fun SettingsScreen(
         viewModel.exportConfig(uri.toString()) {
             runCatching { context.startActivity(BackupFileBridge.buildShareIntent(uri)) }
                 .onFailure { viewModel.showUserMessage(context.getString(R.string.settings_backup_share_failed)) }
+        }
+    }
+
+    // Fire-Stick-only: app-private folder on a plugged-in USB OTG drive. Null on every other device
+    // and when no removable drive is attached, which keeps all USB controls hidden elsewhere.
+    val usbStorageDir: File? = remember(context) {
+        if (context.isFireTvDevice()) context.removableAppStorageDirs().firstOrNull() else null
+    }
+
+    fun createBackupToUsb() {
+        val dir = usbStorageDir ?: return
+        val file = runCatching { BackupFileBridge.createExportFile(dir) }.getOrNull()
+        if (file == null) {
+            viewModel.showUserMessage(context.getString(R.string.settings_backup_usb_failed))
+            return
+        }
+        viewModel.exportConfig(Uri.fromFile(file).toString())
+    }
+
+    fun restoreBackupFromUsb() {
+        val dir = usbStorageDir ?: return
+        val candidates = BackupFileBridge.listBackupFiles(dir)
+            .map { (it.name) to Uri.fromFile(it).toString() }
+        when {
+            candidates.isEmpty() ->
+                viewModel.showUserMessage(context.getString(R.string.settings_backup_no_files_in_folder))
+            candidates.size == 1 -> viewModel.inspectBackup(candidates.first().second)
+            else -> pendingImportCandidates = candidates
         }
     }
 
@@ -190,16 +295,79 @@ fun SettingsScreen(
                     onAddProvider = onAddProvider,
                     onEditProvider = onEditProvider,
                     onNavigateToParentalControl = onNavigateToParentalControl,
-                    onChooseRecordingFolder = { recordingFolderLauncher.launch(null) },
-                    onCreateBackup = { createDocumentLauncher.launch("streamvault_backup.json") },
+                    onChooseRecordingFolder = {
+                        try {
+                            recordingFolderLauncher.launch(null)
+                        } catch (e: ActivityNotFoundException) {
+                            viewModel.showUserMessage(
+                                context.getString(R.string.settings_backup_folder_picker_unavailable)
+                            )
+                        }
+                    },
+                    onUseUsbRecordingStorage = usbStorageDir?.let { dir ->
+                        { viewModel.useUsbRecordingStorage(File(dir, "recordings").absolutePath) }
+                    },
+                    onCreateBackupUsb = usbStorageDir?.let { { createBackupToUsb() } },
+                    onRestoreBackupUsb = usbStorageDir?.let { { restoreBackupFromUsb() } },
+                    onCreateBackup = {
+                        val onFireTv = context.isFireTv()
+                        val primary: () -> Unit = if (onFireTv) {
+                            { exportTreeLauncher.launch(null) }
+                        } else {
+                            { createDocumentLauncher.launch("streamvault_backup.json") }
+                        }
+                        val fallback: () -> Unit = if (onFireTv) {
+                            { createDocumentLauncher.launch("streamvault_backup.json") }
+                        } else {
+                            { exportTreeLauncher.launch(null) }
+                        }
+                        try {
+                            primary()
+                        } catch (e: ActivityNotFoundException) {
+                            try {
+                                fallback()
+                            } catch (e2: ActivityNotFoundException) {
+                                viewModel.showUserMessage(
+                                    context.getString(R.string.settings_backup_folder_picker_unavailable)
+                                )
+                            }
+                        }
+                    },
                     onShareBackup = ::shareBackup,
                     onViewCrashReport = viewModel::viewCrashReport,
                     onShareCrashReport = ::shareCrashReport,
                     onDeleteCrashReport = viewModel::deleteCrashReport,
                     onRestoreBackup = {
-                        openDocumentLauncher.launch(
-                            arrayOf("application/json", "text/json", "application/x-json", "application/octet-stream", "*/*")
-                        )
+                        val onFireTv = context.isFireTv()
+                        val primary: () -> Unit = if (onFireTv) {
+                            { importTreeLauncher.launch(null) }
+                        } else {
+                            {
+                                openDocumentLauncher.launch(
+                                    arrayOf("application/json", "text/json", "application/x-json", "application/octet-stream", "*/*")
+                                )
+                            }
+                        }
+                        val fallback: () -> Unit = if (onFireTv) {
+                            {
+                                openDocumentLauncher.launch(
+                                    arrayOf("application/json", "text/json", "application/x-json", "application/octet-stream", "*/*")
+                                )
+                            }
+                        } else {
+                            { importTreeLauncher.launch(null) }
+                        }
+                        try {
+                            primary()
+                        } catch (e: ActivityNotFoundException) {
+                            try {
+                                fallback()
+                            } catch (e2: ActivityNotFoundException) {
+                                viewModel.showUserMessage(
+                                    context.getString(R.string.settings_backup_folder_picker_unavailable)
+                                )
+                            }
+                        }
                     },
                     onDriveSignIn = { viewModel.beginDriveSignIn(driveSignInLauncher) },
                     onDriveSignOut = viewModel::signOutDrive,
@@ -222,6 +390,43 @@ fun SettingsScreen(
         currentRoute = currentRoute,
         modifier = Modifier
     )
+
+    if (pendingImportCandidates.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { pendingImportCandidates = emptyList() },
+            title = {
+                androidx.compose.material3.Text(
+                    text = stringResource(R.string.settings_backup_choose_file_title)
+                )
+            },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    pendingImportCandidates.forEach { (name, uri) ->
+                        TextButton(
+                            onClick = {
+                                pendingImportCandidates = emptyList()
+                                viewModel.inspectBackup(uri)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            androidx.compose.material3.Text(text = name, color = OnSurface)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { pendingImportCandidates = emptyList() }) {
+                    androidx.compose.material3.Text(
+                        text = stringResource(R.string.settings_cancel),
+                        color = OnSurface
+                    )
+                }
+            },
+            containerColor = SurfaceElevated,
+            titleContentColor = OnSurface,
+            textContentColor = TextSecondary
+        )
+    }
 }
 }
 

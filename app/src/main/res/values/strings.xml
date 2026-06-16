@@ -414,6 +414,11 @@
     <string name="settings_fast_retry_on_transient_failures_subtitle" translatable="false">Use 500 ms retries for live playback failures instead of exponential backoff.</string>
     <string name="settings_live_timeshift">Enable Local Live Rewind</string>
     <string name="settings_live_timeshift_subtitle">Keep a temporary local buffer for pausing and rewinding live TV even when the provider has no catch-up support.</string>
+    <string name="settings_live_translation_enabled">Enable Live Translation Subtitles</string>
+    <string name="settings_live_translation_enabled_subtitle">Translate spoken live-channel audio into English subtitles using your local Whisper service.</string>
+    <string name="settings_live_translation_endpoint">Live Translation Service Endpoint</string>
+    <string name="settings_live_translation_endpoint_subtitle">Base URL for the local translation service (emulator default: http://10.0.2.2:8765).</string>
+    <string name="settings_live_translation_endpoint_empty_error">Live translation endpoint cannot be empty.</string>
     <string name="settings_live_timeshift_depth">Local Live Rewind Depth</string>
     <string name="settings_live_timeshift_backend">Live Rewind Backend</string>
     <string name="settings_live_timeshift_backend_value">Automatic</string>
@@ -652,7 +657,17 @@
     <string name="settings_backup_share_data">Share Backup</string>
     <string name="settings_backup_share_subtitle">Send a backup file to a TV file manager or another app.</string>
     <string name="settings_backup_share_prepare_failed">Could not prepare the backup file.</string>
+    <string name="settings_backup_usb_data">Export to USB</string>
+    <string name="settings_backup_usb_subtitle">Save a backup to the connected USB drive.</string>
+    <string name="settings_restore_usb_data">Import from USB</string>
+    <string name="settings_restore_usb_subtitle">Restore a backup from the connected USB drive.</string>
+    <string name="settings_backup_usb_failed">Could not write the backup to the USB drive.</string>
     <string name="settings_backup_share_failed">No app could receive the backup file.</string>
+    <string name="settings_backup_choose_file_title">Choose a backup file</string>
+    <string name="settings_backup_no_files_in_folder">No backup files (.json) found in that folder.</string>
+    <string name="settings_backup_folder_picker_unavailable">No folder picker is available on this device.</string>
+    <string name="settings_backup_folder_create_failed">Could not create the backup file in that folder.</string>
+    <string name="settings_backup_folder_read_failed">Could not read that folder.</string>
     <string name="settings_crash_reports_title">Crash Reports</string>
     <string name="settings_crash_reports_subtitle">Fatal crashes are saved locally only when the app is already crashing. You can review or share the latest report.</string>
     <string name="settings_crash_report_latest">Latest crash</string>
@@ -778,6 +793,7 @@
     <string name="settings_recording_reconcile_failed">Repair failed: %1$s</string>
     <string name="settings_recording_choose_folder">Choose Folder</string>
     <string name="settings_recording_use_app_storage">Use App Storage</string>
+    <string name="settings_recording_use_usb_storage">Use USB Drive</string>
     <string name="settings_recording_storage_updated">Recording storage updated</string>
     <string name="settings_recording_storage_update_failed">Storage update failed: %1$s</string>
     <string name="settings_recording_pattern_title">Filename Pattern</string>
@@ -1094,6 +1110,7 @@
     <string name="player_track_audio">Select Audio Track</string>
     <string name="player_track_subs">Select Subtitles</string>
     <string name="player_track_off">Off</string>
+    <string name="player_track_live_translation">Real-time translation</string>
     <string name="player_video_quality">Video Quality</string>
     <string name="player_stream_format">Stream Format</string>
     <string name="player_channel_variants">Channel Variants</string>

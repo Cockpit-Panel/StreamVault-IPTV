@@ -1,0 +1,34 @@
+services:
+  live-translation:
+    build: .
+    image: live-translation-service
+    container_name: live-translation
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      WHISPER_MODEL: large-v3
+      WHISPER_BACKEND: faster-whisper
+      WHISPER_COMPUTE_TYPE: int8
+      # WHISPER_TRANSLATION_MODE: llm
+      # LLM mode reaches LM Studio / Ollama running on the Mac host:
+      LLM_BASE_URL: http://host.docker.internal:1234/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Keeps the ~3 GB large-v3 download across rebuilds/restarts.
+      - hf-cache:/data/hf-cache
+    # large-v3 int8 on CPU peaks around 3-4 GB; 6 GB leaves room for spikes
+    # while staying inside the 8 GB Docker Desktop VM.
+    mem_limit: 6g
+    memswap_limit: 6g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # First start downloads the model and warms it; don't flag unhealthy early.
+      start_period: 10m
+
+volumes:
+  hf-cache:

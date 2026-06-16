@@ -64,6 +64,8 @@ internal data class SettingsPreferenceSnapshot(
     val subtitleTextScale: Float,
     val subtitleTextColor: Int,
     val subtitleBackgroundColor: Int,
+    val playerLiveTranslationEnabled: Boolean,
+    val playerLiveTranslationEndpoint: String,
     val wifiMaxVideoHeight: Int?,
     val ethernetMaxVideoHeight: Int?,
     val playerTimeshiftEnabled: Boolean,

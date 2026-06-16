@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.FrameLayout
+import androidx.media3.common.text.Cue
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.streamvault.player.PlayerRenderSurfaceType
@@ -16,6 +17,7 @@ class PlayerViewBinder(
 ) {
     private var boundPlayerView: PlayerView? = null
     private var boundResizeMode: PlayerSurfaceResizeMode = PlayerSurfaceResizeMode.FIT
+    private var injectedSubtitleCues: List<Cue> = emptyList()
 
     fun createRenderView(
         context: Context,
@@ -43,12 +45,14 @@ class PlayerViewBinder(
         }
         playerView.applyResizeMode(resizeMode)
         subtitleStyleController.apply(playerView)
+        applyInjectedCues(playerView)
     }
 
     fun attachPlayer(player: androidx.media3.exoplayer.ExoPlayer?) {
         boundPlayerView?.player = player
         boundPlayerView?.applyResizeMode(boundResizeMode)
         subtitleStyleController.apply(boundPlayerView)
+        applyInjectedCues(boundPlayerView)
     }
 
     fun release(renderView: View) {
@@ -67,6 +71,21 @@ class PlayerViewBinder(
 
     fun reapplyStyle() {
         subtitleStyleController.apply(boundPlayerView)
+        applyInjectedCues(boundPlayerView)
+    }
+
+    fun setInjectedSubtitleCues(cues: List<Cue>) {
+        injectedSubtitleCues = cues
+        applyInjectedCues(boundPlayerView)
+    }
+
+    fun clearInjectedSubtitleCues() {
+        injectedSubtitleCues = emptyList()
+        applyInjectedCues(boundPlayerView)
+    }
+
+    private fun applyInjectedCues(playerView: PlayerView?) {
+        playerView?.subtitleView?.setCues(injectedSubtitleCues)
     }
 
     private fun PlayerView.applyResizeMode(surfaceResizeMode: PlayerSurfaceResizeMode) {

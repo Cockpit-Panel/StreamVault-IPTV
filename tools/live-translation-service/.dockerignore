@@ -1,0 +1,7 @@
+.venv/
+.hf-cache/
+__pycache__/
+.claude/
+.gitignore
+Dockerfile
+docker-compose.yml

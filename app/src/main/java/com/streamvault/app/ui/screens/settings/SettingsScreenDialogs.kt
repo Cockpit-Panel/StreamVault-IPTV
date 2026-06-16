@@ -192,6 +192,8 @@ internal fun SettingsScreenDialogs(
         onShowSubtitleTextColorDialogChange = { dialogState.showSubtitleTextColorDialog = it },
         showSubtitleBackgroundDialog = dialogState.showSubtitleBackgroundDialog,
         onShowSubtitleBackgroundDialogChange = { dialogState.showSubtitleBackgroundDialog = it },
+        showLiveTranslationEndpointDialog = dialogState.showLiveTranslationEndpointDialog,
+        onShowLiveTranslationEndpointDialogChange = { dialogState.showLiveTranslationEndpointDialog = it },
         showWifiQualityDialog = dialogState.showWifiQualityDialog,
         onShowWifiQualityDialogChange = { dialogState.showWifiQualityDialog = it },
         showEthernetQualityDialog = dialogState.showEthernetQualityDialog,

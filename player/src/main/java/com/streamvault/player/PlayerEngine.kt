@@ -10,6 +10,7 @@ import com.streamvault.domain.model.DrmScheme
 import com.streamvault.domain.model.StreamInfo
 import com.streamvault.domain.model.VideoFormat
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.text.Cue
 import androidx.media3.datasource.HttpDataSource
 import com.streamvault.player.playback.PlaybackErrorCategory
 import com.streamvault.player.playback.PlayerErrorClassifier
@@ -95,6 +96,10 @@ interface PlayerEngine {
     fun selectVideoTrack(trackId: String)
     fun selectSubtitleTrack(trackId: String?) // null to disable subtitles
     fun addExternalSubtitle(subtitleUri: android.net.Uri, language: String)
+    fun setInjectedSubtitleCues(cues: List<Cue>)
+    fun clearInjectedSubtitleCues()
+    fun setLiveAudioTap(tap: LiveAudioTap?)
+    fun clearLiveAudioTap() = setLiveAudioTap(null)
     fun release()
     fun resetForReuse() = release()
 

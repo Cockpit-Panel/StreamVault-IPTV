@@ -1,0 +1,15 @@
+# Live translation service dependencies.
+# CPU backend (default): faster-whisper / CTranslate2 (CPU-only on macOS).
+fastapi>=0.110
+uvicorn>=0.29
+numpy>=1.24
+faster-whisper>=1.2.1
+
+# Optional GPU (Metal) backend on Apple Silicon. Install to enable WHISPER_BACKEND=mlx:
+#   pip install mlx-whisper
+# mlx-whisper>=0.4
+
+# Optional LLM translation backend (WHISPER_TRANSLATION_MODE=llm), talks to a local
+# OpenAI-compatible endpoint (LM Studio / Ollama):
+openai>=1.40
+httpx>=0.27

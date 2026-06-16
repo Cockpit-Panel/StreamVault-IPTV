@@ -23,7 +23,10 @@ internal fun SettingsContentPane(
     onEditProvider: (Provider) -> Unit,
     onNavigateToParentalControl: (Long) -> Unit,
     onChooseRecordingFolder: () -> Unit,
+    onUseUsbRecordingStorage: (() -> Unit)?,
     onCreateBackup: () -> Unit,
+    onCreateBackupUsb: (() -> Unit)?,
+    onRestoreBackupUsb: (() -> Unit)?,
     onShareBackup: () -> Unit,
     onViewCrashReport: () -> Unit,
     onShareCrashReport: () -> Unit,
@@ -75,6 +78,7 @@ internal fun SettingsContentPane(
                 subtitleSizeLabel = screenLabels.subtitleSizeLabel,
                 subtitleTextColorLabel = screenLabels.subtitleTextColorLabel,
                 subtitleBackgroundLabel = screenLabels.subtitleBackgroundLabel,
+                liveTranslationEndpointLabel = screenLabels.liveTranslationEndpointLabel,
                 wifiQualityLabel = screenLabels.wifiQualityLabel,
                 ethernetQualityLabel = screenLabels.ethernetQualityLabel,
                 lastSpeedTestLabel = screenLabels.lastSpeedTestLabel,
@@ -98,6 +102,7 @@ internal fun SettingsContentPane(
                 onShowSubtitleSizeDialogChange = { dialogState.showSubtitleSizeDialog = it },
                 onShowSubtitleTextColorDialogChange = { dialogState.showSubtitleTextColorDialog = it },
                 onShowSubtitleBackgroundDialogChange = { dialogState.showSubtitleBackgroundDialog = it },
+                onShowLiveTranslationEndpointDialogChange = { dialogState.showLiveTranslationEndpointDialog = it },
                 onShowWifiQualityDialogChange = { dialogState.showWifiQualityDialog = it },
                 onShowEthernetQualityDialogChange = { dialogState.showEthernetQualityDialog = it }
             )
@@ -142,6 +147,7 @@ internal fun SettingsContentPane(
                 uiState = uiState,
                 viewModel = viewModel,
                 onChooseFolder = onChooseRecordingFolder,
+                onUseUsbStorage = onUseUsbRecordingStorage,
                 onShowRecordingPatternDialogChange = { dialogState.showRecordingPatternDialog = it },
                 onShowRecordingRetentionDialogChange = { dialogState.showRecordingRetentionDialog = it },
                 onShowRecordingConcurrencyDialogChange = { dialogState.showRecordingConcurrencyDialog = it },
@@ -152,7 +158,9 @@ internal fun SettingsContentPane(
             settingsBackupSection(
                 onCreateBackup = onCreateBackup,
                 onShareBackup = onShareBackup,
-                onRestoreBackup = onRestoreBackup
+                onRestoreBackup = onRestoreBackup,
+                onCreateBackupUsb = onCreateBackupUsb,
+                onRestoreBackupUsb = onRestoreBackupUsb
             )
         } else if (dialogState.selectedCategory == 6) {
             epgSourcesSection(

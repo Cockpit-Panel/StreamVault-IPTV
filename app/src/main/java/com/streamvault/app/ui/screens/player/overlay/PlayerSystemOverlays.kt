@@ -239,10 +239,13 @@ fun PlayerTrackSelectionDialog(
     audioTracks: List<PlayerTrack>,
     subtitleTracks: List<PlayerTrack>,
     videoTracks: List<PlayerTrack>,
+    liveTranslationAvailable: Boolean = false,
+    liveTranslationActive: Boolean = false,
     onDismiss: () -> Unit,
     onSelectAudio: (String) -> Unit,
     onSelectVideo: (String) -> Unit,
-    onSelectSubtitle: (String?) -> Unit
+    onSelectSubtitle: (String?) -> Unit,
+    onSelectLiveTranslation: () -> Unit = {}
 ) {
     if (trackType == null) return
 
@@ -309,7 +312,7 @@ fun PlayerTrackSelectionDialog(
                         item {
                             TrackSelectionItem(
                                 name = stringResource(R.string.player_track_off),
-                                isSelected = tracks.none { it.isSelected },
+                                isSelected = tracks.none { it.isSelected } && !liveTranslationActive,
                                 onClick = {
                                     onSelectSubtitle(null)
                                     onDismiss()
@@ -322,7 +325,7 @@ fun PlayerTrackSelectionDialog(
                     items(tracks, key = { it.id }) { track ->
                         TrackSelectionItem(
                             name = track.name,
-                            isSelected = track.isSelected,
+                            isSelected = track.isSelected && !(trackType == TrackType.TEXT && liveTranslationActive),
                             onClick = {
                                 when (trackType) {
                                     TrackType.AUDIO -> onSelectAudio(track.id)
@@ -337,6 +340,19 @@ fun PlayerTrackSelectionDialog(
                                 Modifier
                             }
                         )
+                    }
+
+                    if (trackType == TrackType.TEXT && liveTranslationAvailable) {
+                        item {
+                            TrackSelectionItem(
+                                name = stringResource(R.string.player_track_live_translation),
+                                isSelected = liveTranslationActive,
+                                onClick = {
+                                    onSelectLiveTranslation()
+                                    onDismiss()
+                                }
+                            )
+                        }
                     }
                 }
             }

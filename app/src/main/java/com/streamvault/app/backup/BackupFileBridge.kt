@@ -18,13 +18,29 @@ object BackupFileBridge {
 
     fun createExportFile(context: Context): File {
         val documentsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
-        val backupsDir = File(documentsDir, BACKUP_EXPORTS_DIR).apply { mkdirs() }
+        return createExportFile(documentsDir)
+    }
+
+    /**
+     * Creates an empty timestamped backup file under [baseDir]/Backups. Used for app-private folders
+     * on a USB drive, which can be written with a plain `file://` URI (no FileProvider needed since
+     * FileProvider cannot serve secondary external volumes).
+     */
+    fun createExportFile(baseDir: File): File {
+        val backupsDir = File(baseDir, BACKUP_EXPORTS_DIR).apply { mkdirs() }
         return File(backupsDir, "streamvault_backup_${LocalDateTime.now().format(exportNameFormatter)}.json")
             .also { file ->
                 file.parentFile?.mkdirs()
                 if (!file.exists()) file.createNewFile()
             }
     }
+
+    /** Lists previously exported `.json` backups under [baseDir]/Backups, newest first. */
+    fun listBackupFiles(baseDir: File): List<File> =
+        File(baseDir, BACKUP_EXPORTS_DIR).listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".json", ignoreCase = true) }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
 
     fun copyToImportInbox(context: Context, sourceUri: Uri): Uri? {
         pruneImportInbox(context)

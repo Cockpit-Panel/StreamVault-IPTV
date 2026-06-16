@@ -753,6 +753,14 @@ class EpgViewModel @Inject constructor(
     }
 
     fun scheduleRecording(channel: Channel, program: Program, recurrence: RecordingRecurrence = RecordingRecurrence.NONE) {
+        // When the program is airing now, capture starts immediately. Free the provider connection
+        // the guide preview is holding, or on single-connection Xtream accounts the capture would
+        // be a second connection and get a 403. Recording from the guide means "record without
+        // watching", so dropping the preview is intended; it only restarts on an explicit click.
+        // Future programs schedule for later, so leave the preview running.
+        if (program.startTime <= System.currentTimeMillis()) {
+            clearPreview()
+        }
         viewModelScope.launch {
             val command = ScheduleRecordingCommand(
                 contentType = ContentType.LIVE,

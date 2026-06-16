@@ -53,6 +53,9 @@ internal fun RecordingRunWithSchedule.toDomain(): RecordingItem = RecordingItem(
 internal fun RecordingStorageEntity.toDomain(): RecordingStorageState = RecordingStorageState(
     treeUri = treeUri,
     displayName = displayName,
+    // When no SAF tree is selected, outputDirectory holds the resolved local path (default
+    // internal dir or a chosen USB folder), so it doubles as the active localDirectory.
+    localDirectory = if (treeUri.isNullOrBlank()) outputDirectory else null,
     outputDirectory = outputDirectory,
     availableBytes = availableBytes,
     isWritable = isWritable,
@@ -136,10 +139,15 @@ internal fun sanitizeRecordingFileName(
 
 internal fun resolveStorageDetails(
     context: Context,
-    treeUriString: String?
+    treeUriString: String?,
+    localDirectory: String? = null
 ): Triple<String?, Long?, Boolean> {
     if (treeUriString.isNullOrBlank()) {
-        val recordingsDir = defaultRecordingDirectory(context)
+        val recordingsDir = localDirectory
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.also { runCatching { it.mkdirs() } }
+            ?: defaultRecordingDirectory(context)
         val available = runCatching { StatFs(recordingsDir.absolutePath).availableBytes }.getOrNull()
             ?.takeIf { it > 0L }
             ?: recordingsDir.usableSpace.takeIf { it > 0L }

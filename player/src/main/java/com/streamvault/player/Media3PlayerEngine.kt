@@ -12,6 +12,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl
@@ -43,6 +44,7 @@ import com.streamvault.player.playback.AutomaticRecoveryAction
 import com.streamvault.player.playback.DefaultDecoderPreferencePolicy
 import com.streamvault.player.playback.DefaultPlaybackCompatibilityProfile
 import com.streamvault.player.playback.AudioVideoOffsetAudioSink
+import com.streamvault.player.playback.LiveAudioTapAudioSink
 import com.streamvault.player.playback.PlaybackCodecSelector
 import com.streamvault.player.playback.PlaybackCompatibilityProfile
 import com.streamvault.player.playback.PlaybackBufferPolicies
@@ -188,6 +190,8 @@ class Media3PlayerEngine @Inject constructor(
     private var videoStallSafeRecoveryPerformed = false
     private var textureViewSessionFallbackAttempted = false
     private var audioVideoSyncSinkActive = false
+    @Volatile
+    private var liveAudioTap: LiveAudioTap? = null
     private var lastStreamInfo: StreamInfo? = null
     private var lastMediaId: String? = null
     private var currentResolvedStreamType: ResolvedStreamType = ResolvedStreamType.UNKNOWN
@@ -433,6 +437,7 @@ class Media3PlayerEngine @Inject constructor(
         _playbackState.value = PlaybackState.IDLE
         _isPlaying.value = false
         _mediaTitle.value = null
+        clearInjectedSubtitleCues()
         statsCollector.stop()
         statsCollector.reset()
         audioFocusController.onPauseOrStop()
@@ -680,6 +685,18 @@ class Media3PlayerEngine @Inject constructor(
         exoPlayer?.let { trackController.selectSubtitleTrack(it, trackId) }
     }
 
+    override fun setInjectedSubtitleCues(cues: List<Cue>) {
+        viewBinder.setInjectedSubtitleCues(cues)
+    }
+
+    override fun clearInjectedSubtitleCues() {
+        viewBinder.clearInjectedSubtitleCues()
+    }
+
+    override fun setLiveAudioTap(tap: LiveAudioTap?) {
+        liveAudioTap = tap
+    }
+
     override fun addExternalSubtitle(subtitleUri: android.net.Uri, language: String) {
         val player = exoPlayer ?: return
         val streamInfo = lastStreamInfo ?: return
@@ -809,6 +826,7 @@ class Media3PlayerEngine @Inject constructor(
         _playbackState.value = PlaybackState.IDLE
         _isPlaying.value = false
         _mediaTitle.value = null
+        clearInjectedSubtitleCues()
         trackController.resetSelections()
         statsCollector.reset()
         videoStallDetector.reset()
@@ -1095,32 +1113,34 @@ class Media3PlayerEngine @Inject constructor(
         )
         audioVideoSyncSinkActive = false
 
-        val factory = if (rendererPlan.useStockRenderersFactory) {
-            DefaultRenderersFactory(context)
-        } else {
-            object : DefaultRenderersFactory(context) {
-                override fun buildAudioSink(
-                    context: Context,
-                    enableFloatOutput: Boolean,
-                    enableAudioTrackPlaybackParams: Boolean
-                ): AudioSink {
-                    val audioSink = requireNotNull(
-                        super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
-                    ) {
-                        "DefaultRenderersFactory did not provide an AudioSink."
-                    }
-                    if (!rendererPlan.useAudioVideoSyncSink) {
-                        audioVideoSyncSinkActive = false
-                        return audioSink
-                    }
+        val factory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                val audioSink = requireNotNull(
+                    super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+                ) {
+                    "DefaultRenderersFactory did not provide an AudioSink."
+                }
+                val syncAwareSink = if (rendererPlan.useAudioVideoSyncSink) {
                     audioVideoSyncSinkActive = true
-                    return AudioVideoOffsetAudioSink(
+                    AudioVideoOffsetAudioSink(
                         delegate = audioSink,
                         offsetUsProvider = { audioVideoOffsetUs.get() }
                     )
+                } else {
+                    audioVideoSyncSinkActive = false
+                    audioSink
                 }
+                return LiveAudioTapAudioSink(
+                    delegate = syncAwareSink,
+                    tapProvider = { liveAudioTap }
+                )
+            }
 
-                override fun buildVideoRenderers(
+            override fun buildVideoRenderers(
                     context: Context,
                     extensionRendererMode: Int,
                     mediaCodecSelector: MediaCodecSelector,
@@ -1129,45 +1149,44 @@ class Media3PlayerEngine @Inject constructor(
                     eventListener: VideoRendererEventListener,
                     allowedVideoJoiningTimeMs: Long,
                     out: ArrayList<Renderer>
-                ) {
-                    if (!rendererPlan.useVideoRendererWorkaround) {
-                        super.buildVideoRenderers(
-                            context,
-                            extensionRendererMode,
-                            mediaCodecSelector,
-                            enableDecoderFallback,
-                            eventHandler,
-                            eventListener,
-                            allowedVideoJoiningTimeMs,
-                            out
-                        )
-                        return
-                    }
-
-                    out.add(object : MediaCodecVideoRenderer(
+            ) {
+                if (!rendererPlan.useVideoRendererWorkaround) {
+                    super.buildVideoRenderers(
                         context,
+                        extensionRendererMode,
                         mediaCodecSelector,
-                        allowedVideoJoiningTimeMs,
                         enableDecoderFallback,
                         eventHandler,
                         eventListener,
-                        50
-                    ) {
-                        override fun canReuseCodec(
-                            codecInfo: MediaCodecInfo,
-                            oldFormat: Format,
-                            newFormat: Format
-                        ): DecoderReuseEvaluation {
-                            return DecoderReuseEvaluation(
-                                codecInfo.name,
-                                oldFormat,
-                                newFormat,
-                                DecoderReuseEvaluation.REUSE_RESULT_NO,
-                                DecoderReuseEvaluation.DISCARD_REASON_MAX_INPUT_SIZE_EXCEEDED
-                            )
-                        }
-                    })
+                        allowedVideoJoiningTimeMs,
+                        out
+                    )
+                    return
                 }
+
+                out.add(object : MediaCodecVideoRenderer(
+                    context,
+                    mediaCodecSelector,
+                    allowedVideoJoiningTimeMs,
+                    enableDecoderFallback,
+                    eventHandler,
+                    eventListener,
+                    50
+                ) {
+                    override fun canReuseCodec(
+                        codecInfo: MediaCodecInfo,
+                        oldFormat: Format,
+                        newFormat: Format
+                    ): DecoderReuseEvaluation {
+                        return DecoderReuseEvaluation(
+                            codecInfo.name,
+                            oldFormat,
+                            newFormat,
+                            DecoderReuseEvaluation.REUSE_RESULT_NO,
+                            DecoderReuseEvaluation.DISCARD_REASON_MAX_INPUT_SIZE_EXCEEDED
+                        )
+                    }
+                })
             }
         }
 

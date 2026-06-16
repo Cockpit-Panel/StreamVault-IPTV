@@ -31,7 +31,9 @@ import com.streamvault.domain.manager.DriveAuthState
 internal fun LazyListScope.settingsBackupSection(
     onCreateBackup: () -> Unit,
     onShareBackup: () -> Unit,
-    onRestoreBackup: () -> Unit
+    onRestoreBackup: () -> Unit,
+    onCreateBackupUsb: (() -> Unit)? = null,
+    onRestoreBackupUsb: (() -> Unit)? = null
 ) {
     item {
         Column(
@@ -67,6 +69,29 @@ internal fun LazyListScope.settingsBackupSection(
                 onClick = onRestoreBackup,
                 modifier = Modifier.fillMaxWidth()
             )
+            if (onCreateBackupUsb != null && onRestoreBackupUsb != null) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    BackupActionCard(
+                        icon = "\u2191",
+                        title = stringResource(R.string.settings_backup_usb_data),
+                        subtitle = stringResource(R.string.settings_backup_usb_subtitle),
+                        accent = Primary,
+                        onClick = onCreateBackupUsb,
+                        modifier = Modifier.weight(1f)
+                    )
+                    BackupActionCard(
+                        icon = "\u2193",
+                        title = stringResource(R.string.settings_restore_usb_data),
+                        subtitle = stringResource(R.string.settings_restore_usb_subtitle),
+                        accent = Secondary,
+                        onClick = onRestoreBackupUsb,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
         }
     }
 }

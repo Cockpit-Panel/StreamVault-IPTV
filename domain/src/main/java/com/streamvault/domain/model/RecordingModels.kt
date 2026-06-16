@@ -99,6 +99,10 @@ data class RecordingItem(
 data class RecordingStorageConfig(
     val treeUri: String? = null,
     val displayName: String? = null,
+    // Absolute filesystem path to write recordings to when [treeUri] is unset, e.g. an app-private
+    // folder on a USB drive (`/storage/<id>/Android/data/<pkg>/files/...`). Null falls back to the
+    // default internal recordings directory.
+    val localDirectory: String? = null,
     val fileNamePattern: String = "ChannelName_yyyy-MM-dd_HH-mm_ProgramTitle.ts",
     val retentionDays: Int? = null,
     val maxSimultaneousRecordings: Int = 2
@@ -113,6 +117,9 @@ data class RecordingStorageConfig(
 data class RecordingStorageState(
     val treeUri: String? = null,
     val displayName: String? = null,
+    // The explicit local path currently in effect (null when using a SAF tree). Lets the UI tell
+    // whether recordings are going to internal storage vs. a USB drive without re-deriving it.
+    val localDirectory: String? = null,
     val outputDirectory: String? = null,
     val availableBytes: Long? = null,
     val isWritable: Boolean = false,

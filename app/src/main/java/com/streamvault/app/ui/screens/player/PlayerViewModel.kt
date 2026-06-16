@@ -10,6 +10,7 @@ import com.streamvault.app.cast.CastMediaRequest
 import com.streamvault.app.cast.CastStartResult
 import com.streamvault.app.di.MainPlayerEngine
 import com.streamvault.app.player.LivePreviewHandoffManager
+import com.streamvault.app.player.LiveTranslationSession
 import com.streamvault.app.plugins.StreamVaultPluginManager
 import com.streamvault.app.util.isPlaybackComplete
 import com.streamvault.app.tv.LauncherRecommendationsManager
@@ -103,7 +104,7 @@ class PlayerViewModel @Inject constructor(
     internal val livePreviewHandoffManager: LivePreviewHandoffManager,
     internal val syncManager: SyncManager,
     private val downloadManager: DownloadManager,
-    private val okHttpClient: OkHttpClient,
+    internal val okHttpClient: OkHttpClient,
 ) : ViewModel() {
     companion object {
         private const val TAG = "PlayerViewModel"
@@ -358,6 +359,13 @@ class PlayerViewModel @Inject constructor(
     internal var playbackTimerDefaultsApplied = false
     internal var sleepTimerExitEmitted = false
     internal var activeStalkerPlaybackProviderId: Long? = null
+    internal val _liveTranslationAvailable = MutableStateFlow(false)
+    val liveTranslationAvailable: StateFlow<Boolean> = _liveTranslationAvailable.asStateFlow()
+    internal val _liveTranslationActive = MutableStateFlow(false)
+    val liveTranslationActive: StateFlow<Boolean> = _liveTranslationActive.asStateFlow()
+    internal val _liveTranslationDetectedLanguage = MutableStateFlow<String?>(null)
+    val liveTranslationDetectedLanguage: StateFlow<String?> = _liveTranslationDetectedLanguage.asStateFlow()
+    internal var liveTranslationSession: LiveTranslationSession? = null
     private var downloadPlaybackSlotActive = false
     private var currentPlaybackUsesDownloadSlot = false
     private var externalProviderPlaybackHold = false
@@ -538,6 +546,11 @@ class PlayerViewModel @Inject constructor(
                 )
             }.combine(activePlayerEngineFlow) { style, engine -> engine to style }
                 .collect { (engine, style) -> engine.setSubtitleStyle(style) }
+        }
+        viewModelScope.launch {
+            preferencesRepository.playerLiveTranslationEnabled.collect {
+                refreshLiveTranslationAvailability()
+            }
         }
         viewModelScope.launch {
             combine(
@@ -984,6 +997,7 @@ class PlayerViewModel @Inject constructor(
     internal fun beginPlaybackSession(): Long {
         recoveryJob?.cancel()
         thumbnailPreloadJob?.cancel()
+        stopLiveTranslationSession()
         hasRetriedXtreamAuthRefresh = false
         lastRecordedVariantObservationSignature = null
         livePlaybackReadyForCurrentSession = false
@@ -1262,6 +1276,7 @@ class PlayerViewModel @Inject constructor(
         currentResolvedStreamInfo = preparedStreamInfo
         readySideEffectsRequestVersion = requestVersion
         playerEngine.prepare(preparedStreamInfo)
+        refreshLiveTranslationAvailability()
         startTokenRenewalMonitoring(preparedStreamInfo.expirationTime)
         maybeStartLiveTimeshift(preparedStreamInfo)
         return true

@@ -31,6 +31,8 @@ internal fun SettingsUiState.applyPreferenceSnapshot(snapshot: SettingsPreferenc
         subtitleTextScale = snapshot.subtitleTextScale,
         subtitleTextColor = snapshot.subtitleTextColor,
         subtitleBackgroundColor = snapshot.subtitleBackgroundColor,
+        playerLiveTranslationEnabled = snapshot.playerLiveTranslationEnabled,
+        playerLiveTranslationEndpoint = snapshot.playerLiveTranslationEndpoint,
         wifiMaxVideoHeight = snapshot.wifiMaxVideoHeight,
         ethernetMaxVideoHeight = snapshot.ethernetMaxVideoHeight,
         playerTimeshiftEnabled = snapshot.playerTimeshiftEnabled,

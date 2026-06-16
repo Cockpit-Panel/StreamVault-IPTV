@@ -83,6 +83,8 @@ data class SettingsUiState(
     val subtitleTextScale: Float = 1f,
     val subtitleTextColor: Int = 0xFFFFFFFF.toInt(),
     val subtitleBackgroundColor: Int = 0x80000000.toInt(),
+    val playerLiveTranslationEnabled: Boolean = false,
+    val playerLiveTranslationEndpoint: String = "http://10.0.2.2:8765",
     val wifiMaxVideoHeight: Int? = null,
     val ethernetMaxVideoHeight: Int? = null,
     val playerTimeshiftEnabled: Boolean = false,

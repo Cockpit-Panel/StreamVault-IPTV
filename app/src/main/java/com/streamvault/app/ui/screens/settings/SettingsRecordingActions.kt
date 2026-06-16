@@ -157,6 +157,34 @@ internal class SettingsRecordingActions(
         }
     }
 
+    fun updateRecordingLocalDirectory(scope: CoroutineScope, localDirectory: String) {
+        scope.launch {
+            storageConfigMutex.withLock {
+                val current = uiState.value.recordingStorageState
+                val result = recordingManager.updateStorageConfig(
+                    RecordingStorageConfig(
+                        treeUri = null,
+                        displayName = null,
+                        localDirectory = localDirectory,
+                        fileNamePattern = current.fileNamePattern,
+                        retentionDays = current.retentionDays,
+                        maxSimultaneousRecordings = current.maxSimultaneousRecordings
+                    )
+                )
+                uiState.update { state ->
+                    state.copy(
+                        recordingStorageState = if (result is Result.Success) result.data else state.recordingStorageState,
+                        userMessage = if (result is Result.Error) {
+                            appContext.getString(R.string.settings_recording_storage_update_failed, result.message)
+                        } else {
+                            appContext.getString(R.string.settings_recording_storage_updated)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
     fun updateRecordingFileNamePattern(scope: CoroutineScope, pattern: String) {
         scope.launch {
             storageConfigMutex.withLock {
@@ -165,6 +193,7 @@ internal class SettingsRecordingActions(
                     RecordingStorageConfig(
                         treeUri = current.treeUri,
                         displayName = current.displayName,
+                        localDirectory = current.localDirectory,
                         fileNamePattern = pattern,
                         retentionDays = current.retentionDays,
                         maxSimultaneousRecordings = current.maxSimultaneousRecordings
@@ -192,6 +221,7 @@ internal class SettingsRecordingActions(
                     RecordingStorageConfig(
                         treeUri = current.treeUri,
                         displayName = current.displayName,
+                        localDirectory = current.localDirectory,
                         fileNamePattern = current.fileNamePattern,
                         retentionDays = retentionDays,
                         maxSimultaneousRecordings = current.maxSimultaneousRecordings
@@ -219,6 +249,7 @@ internal class SettingsRecordingActions(
                     RecordingStorageConfig(
                         treeUri = current.treeUri,
                         displayName = current.displayName,
+                        localDirectory = current.localDirectory,
                         fileNamePattern = current.fileNamePattern,
                         retentionDays = current.retentionDays,
                         maxSimultaneousRecordings = maxSimultaneousRecordings

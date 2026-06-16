@@ -109,6 +109,7 @@ fun PlayerControlsOverlay(
     duration: Long,
     aspectRatioLabel: String,
     subtitleTrackCount: Int,
+    liveTranslationAvailable: Boolean = false,
     audioTrackCount: Int,
     videoQualityCount: Int,
     currentRecordingStatus: RecordingStatus?,
@@ -201,6 +202,7 @@ fun PlayerControlsOverlay(
                 duration = duration,
                 aspectRatioLabel = aspectRatioLabel,
                 subtitleTrackCount = subtitleTrackCount,
+                liveTranslationAvailable = liveTranslationAvailable,
                 audioTrackCount = audioTrackCount,
                 videoQualityCount = videoQualityCount,
                 currentRecordingStatus = currentRecordingStatus,
@@ -533,6 +535,7 @@ private fun PlayerBottomBar(
     duration: Long,
     aspectRatioLabel: String,
     subtitleTrackCount: Int,
+    liveTranslationAvailable: Boolean = false,
     audioTrackCount: Int,
     videoQualityCount: Int,
     currentRecordingStatus: RecordingStatus?,
@@ -629,6 +632,7 @@ private fun PlayerBottomBar(
                         displayChannelNumber = displayChannelNumber,
                         aspectRatioLabel = aspectRatioLabel,
                         subtitleTrackCount = subtitleTrackCount,
+                        liveTranslationAvailable = liveTranslationAvailable,
                         audioTrackCount = audioTrackCount,
                         videoQualityCount = videoQualityCount,
                         currentRecordingStatus = currentRecordingStatus,
@@ -725,6 +729,7 @@ private fun PlayerLiveInfo(
     displayChannelNumber: Int,
     aspectRatioLabel: String,
     subtitleTrackCount: Int,
+    liveTranslationAvailable: Boolean,
     audioTrackCount: Int,
     videoQualityCount: Int,
     currentRecordingStatus: RecordingStatus?,
@@ -821,7 +826,7 @@ private fun PlayerLiveInfo(
     }
     val secondaryActions = buildList {
         add(PlayerActionSpec(stringResource(R.string.player_aspect_ratio_label, aspectRatioLabel), onToggleAspectRatio))
-        if (subtitleTrackCount > 0) {
+        if (subtitleTrackCount > 0 || liveTranslationAvailable) {
             add(PlayerActionSpec(stringResource(R.string.player_subs), onOpenSubtitleTracks))
         }
         if (audioTrackCount > 0) {

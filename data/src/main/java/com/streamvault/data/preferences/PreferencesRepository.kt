@@ -143,6 +143,8 @@ class PreferencesRepository @Inject constructor(
         val PLAYER_SUBTITLE_TEXT_SCALE = stringPreferencesKey("player_subtitle_text_scale")
         val PLAYER_SUBTITLE_TEXT_COLOR = intPreferencesKey("player_subtitle_text_color")
         val PLAYER_SUBTITLE_BACKGROUND_COLOR = intPreferencesKey("player_subtitle_background_color")
+        val PLAYER_LIVE_TRANSLATION_ENABLED = booleanPreferencesKey("player_live_translation_enabled")
+        val PLAYER_LIVE_TRANSLATION_ENDPOINT = stringPreferencesKey("player_live_translation_endpoint")
         val PLAYER_CONTROLS_TIMEOUT_SECONDS = intPreferencesKey("player_controls_timeout_seconds")
         val PLAYER_LIVE_OVERLAY_TIMEOUT_SECONDS = intPreferencesKey("player_live_overlay_timeout_seconds")
         val PLAYER_NOTICE_TIMEOUT_SECONDS = intPreferencesKey("player_notice_timeout_seconds")
@@ -359,6 +361,17 @@ class PreferencesRepository @Inject constructor(
 
     val playerSubtitleBackgroundColor: Flow<Int> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.PLAYER_SUBTITLE_BACKGROUND_COLOR] ?: 0x80000000.toInt()
+    }
+
+    val playerLiveTranslationEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.PLAYER_LIVE_TRANSLATION_ENABLED] ?: false
+    }
+
+    val playerLiveTranslationEndpoint: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.PLAYER_LIVE_TRANSLATION_ENDPOINT]
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: "http://10.0.2.2:8765"
     }
 
     val playerControlsTimeoutSeconds: Flow<Int> = context.dataStore.data.map { preferences ->
@@ -923,6 +936,23 @@ class PreferencesRepository @Inject constructor(
     suspend fun setPlayerSubtitleBackgroundColor(colorArgb: Int) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.PLAYER_SUBTITLE_BACKGROUND_COLOR] = colorArgb
+        }
+    }
+
+    suspend fun setPlayerLiveTranslationEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_LIVE_TRANSLATION_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setPlayerLiveTranslationEndpoint(endpoint: String) {
+        context.dataStore.edit { preferences ->
+            val normalized = endpoint.trim()
+            if (normalized.isBlank()) {
+                preferences.remove(PreferencesKeys.PLAYER_LIVE_TRANSLATION_ENDPOINT)
+            } else {
+                preferences[PreferencesKeys.PLAYER_LIVE_TRANSLATION_ENDPOINT] = normalized
+            }
         }
     }
 

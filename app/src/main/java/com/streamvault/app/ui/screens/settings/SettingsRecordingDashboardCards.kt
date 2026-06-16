@@ -180,7 +180,8 @@ internal fun RecordingActionsCard(
     onChangeConcurrency: () -> Unit,
     onChangePadding: () -> Unit,
     onOpenBrowser: () -> Unit,
-    onRepairSchedule: () -> Unit
+    onRepairSchedule: () -> Unit,
+    onUseUsbStorage: (() -> Unit)? = null
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -207,6 +208,14 @@ internal fun RecordingActionsCard(
                     modifier = Modifier.weight(1f),
                     onClick = onUseAppStorage
                 )
+                if (onUseUsbStorage != null) {
+                    RecordingActionButton(
+                        label = stringResource(R.string.settings_recording_use_usb_storage),
+                        accent = OnBackground,
+                        modifier = Modifier.weight(1f),
+                        onClick = onUseUsbStorage
+                    )
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),

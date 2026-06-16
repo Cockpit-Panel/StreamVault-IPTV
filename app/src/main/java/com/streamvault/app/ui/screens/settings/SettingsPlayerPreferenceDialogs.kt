@@ -43,7 +43,9 @@ internal fun SettingsPlayerPreferenceDialogs(
     showNoticeTimeoutDialog: Boolean,
     onShowNoticeTimeoutDialogChange: (Boolean) -> Unit,
     showDiagnosticsTimeoutDialog: Boolean,
-    onShowDiagnosticsTimeoutDialogChange: (Boolean) -> Unit
+    onShowDiagnosticsTimeoutDialogChange: (Boolean) -> Unit,
+    showLiveTranslationEndpointDialog: Boolean,
+    onShowLiveTranslationEndpointDialogChange: (Boolean) -> Unit
 ) {
     if (showPlaybackSpeedDialog) {
         val speedOptions = remember { listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f) }
@@ -295,6 +297,25 @@ internal fun SettingsPlayerPreferenceDialogs(
             onSelect = { minutes ->
                 viewModel.setDefaultIdleStandbyTimerMinutes(minutes)
                 onShowDefaultIdleTimerDialogChange(false)
+            }
+        )
+    }
+
+    if (showLiveTranslationEndpointDialog) {
+        SimpleTextValueDialog(
+            title = stringResource(R.string.settings_live_translation_endpoint),
+            subtitle = stringResource(R.string.settings_live_translation_endpoint_subtitle),
+            initialValue = uiState.playerLiveTranslationEndpoint,
+            onDismiss = { onShowLiveTranslationEndpointDialogChange(false) },
+            onConfirm = { endpoint ->
+                if (endpoint.isBlank()) {
+                    viewModel.showUserMessage(
+                        context.getString(R.string.settings_live_translation_endpoint_empty_error)
+                    )
+                } else {
+                    viewModel.setPlayerLiveTranslationEndpoint(endpoint)
+                }
+                onShowLiveTranslationEndpointDialogChange(false)
             }
         )
     }

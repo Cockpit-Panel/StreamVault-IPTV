@@ -62,6 +62,8 @@ internal fun observeSettingsPreferenceSnapshot(
             subtitleTextScale = 1f,
             subtitleTextColor = 0xFFFFFFFF.toInt(),
             subtitleBackgroundColor = 0x80000000.toInt(),
+            playerLiveTranslationEnabled = false,
+            playerLiveTranslationEndpoint = "http://10.0.2.2:8765",
             wifiMaxVideoHeight = null,
             ethernetMaxVideoHeight = null,
             playerTimeshiftEnabled = false,
@@ -152,6 +154,10 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(subtitleTextColor = subtitleTextColor)
     }.combine(preferencesRepository.playerSubtitleBackgroundColor) { snapshot, subtitleBackgroundColor ->
         snapshot.copy(subtitleBackgroundColor = subtitleBackgroundColor)
+    }.combine(preferencesRepository.playerLiveTranslationEnabled) { snapshot, enabled ->
+        snapshot.copy(playerLiveTranslationEnabled = enabled)
+    }.combine(preferencesRepository.playerLiveTranslationEndpoint) { snapshot, endpoint ->
+        snapshot.copy(playerLiveTranslationEndpoint = endpoint)
     }.combine(preferencesRepository.playerWifiMaxVideoHeight) { snapshot, wifiMaxVideoHeight ->
         snapshot.copy(wifiMaxVideoHeight = wifiMaxVideoHeight)
     }.combine(preferencesRepository.playerEthernetMaxVideoHeight) { snapshot, ethernetMaxVideoHeight ->

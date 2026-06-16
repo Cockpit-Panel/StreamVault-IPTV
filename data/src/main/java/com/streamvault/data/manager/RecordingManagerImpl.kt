@@ -433,7 +433,8 @@ class RecordingManagerImpl @Inject constructor(
     override suspend fun updateStorageConfig(config: RecordingStorageConfig): Result<RecordingStorageState> = withContext(Dispatchers.IO) {
         runCatching {
             val existing = recordingStorageDao.get()
-            val (outputDirectory, availableBytes, isWritable) = resolveStorageDetails(context, config.treeUri)
+            val (outputDirectory, availableBytes, isWritable) =
+                resolveStorageDetails(context, config.treeUri, config.localDirectory)
             val entity = config.toEntity(existing, outputDirectory, availableBytes, isWritable)
             recordingStorageDao.upsert(entity)
             reconcileRecordingState()
@@ -656,7 +657,11 @@ class RecordingManagerImpl @Inject constructor(
     private suspend fun ensureStorageStateSync(): RecordingStorageEntity {
         val existing = recordingStorageDao.get()
         if (existing != null) {
-            val (outputDirectory, availableBytes, isWritable) = resolveStorageDetails(context, existing.treeUri)
+            // Preserve an explicitly chosen local path (e.g. a USB folder) across refreshes; without
+            // passing it back in, a null treeUri would reset the destination to internal default.
+            val localDirectory = existing.outputDirectory?.takeIf { existing.treeUri.isNullOrBlank() }
+            val (outputDirectory, availableBytes, isWritable) =
+                resolveStorageDetails(context, existing.treeUri, localDirectory)
             val refreshed = existing.copy(
                 outputDirectory = outputDirectory,
                 availableBytes = availableBytes,
