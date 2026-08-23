@@ -1732,6 +1732,60 @@ class StreamVaultDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate72To73_preservesProvidersWhoseNormalizedIdentitiesCollide() {
+        val name = "streamvault-72-73-normalized-duplicates"
+        migrationTestHelper.createDatabase(name, 72).apply {
+            insertProvider72(1, "Original", "XTREAM_CODES")
+            insertProvider72(2, "Equivalent legacy URL", "XTREAM_CODES")
+            execSQL("UPDATE providers SET server_url='https://host/',username='alice' WHERE id=1")
+            execSQL("UPDATE providers SET server_url='https://host:443',username='alice' WHERE id=2")
+            close()
+        }
+
+        val migrated = migrationTestHelper.runMigrationsAndValidate(
+            name,
+            73,
+            true,
+            StreamVaultDatabase.MIGRATION_72_73
+        )
+
+        assertEquals(2, countRows(migrated, "SELECT COUNT(*) FROM providers"))
+        assertEquals(2, countRows(migrated, "SELECT COUNT(*) FROM provider_configs"))
+        assertEquals(2, countRows(migrated, "SELECT COUNT(DISTINCT identity_key) FROM provider_configs"))
+        assertEquals(2, countRows(migrated, "SELECT COUNT(*) FROM provider_configs WHERE length(identity_key)=64"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrate72To73_canonicalizesAliasesAndUnknownLegacyTypes() {
+        val name = "streamvault-72-73-provider-aliases"
+        migrationTestHelper.createDatabase(name, 72).apply {
+            insertProvider72(1, "Xtream alias", "XTREAM_CODES_API")
+            insertProvider72(2, "Stalker alias", "STB")
+            insertProvider72(3, "Playlist alias", "PLAYLIST")
+            insertProvider72(4, "Unknown playlist", "vendor_specific_playlist")
+            execSQL("UPDATE providers SET server_url='https://x.test',username='alice' WHERE id=1")
+            execSQL("UPDATE providers SET server_url='https://s.test',stalker_mac_address='00:11:22:33:44:55' WHERE id=2")
+            execSQL("UPDATE providers SET m3u_url='https://m.test/one.m3u' WHERE id=3")
+            execSQL("UPDATE providers SET m3u_url='https://m.test/two.m3u' WHERE id=4")
+            close()
+        }
+
+        val migrated = migrationTestHelper.runMigrationsAndValidate(
+            name,
+            73,
+            true,
+            StreamVaultDatabase.MIGRATION_72_73
+        )
+
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM providers WHERE id=1 AND type='XTREAM_CODES'"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM providers WHERE id=2 AND type='STALKER_PORTAL'"))
+        assertEquals(2, countRows(migrated, "SELECT COUNT(*) FROM providers WHERE id IN (3,4) AND type='M3U'"))
+        assertEquals(4, countRows(migrated, "SELECT COUNT(*) FROM provider_configs"))
+        migrated.close()
+    }
+
+    @Test
     fun migrate72To74_rebuildsStableProvidersWithoutCatalogOrForeignKeyLoss() {
         val name = "streamvault-72-74-stable-provider-identity"
         migrationTestHelper.createDatabase(name, 72).apply {
