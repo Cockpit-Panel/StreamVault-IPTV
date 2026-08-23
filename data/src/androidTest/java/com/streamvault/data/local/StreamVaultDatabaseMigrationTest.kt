@@ -1197,6 +1197,117 @@ class StreamVaultDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate14And15To77_preservesLegacyCatalogFavoritesAndHistory() {
+        listOf(14, 15).forEach { startVersion ->
+            val name = "streamvault-$startVersion-77-populated-legacy-chain"
+            migrationTestHelper.createDatabase(name, startVersion).apply {
+                execSQL(
+                    """
+                    INSERT INTO providers (
+                        id, name, type, server_url, username, password, m3u_url, epg_url,
+                        is_active, max_connections, expiration_date, status, last_synced_at, created_at
+                    ) VALUES (1, 'Legacy Provider', 'XTREAM_CODES', 'https://provider.invalid', 'legacy-user', 'legacy-password', '', '', 1, 1, NULL, 'ACTIVE', 123, 456)
+                    """.trimIndent()
+                )
+                execSQL(
+                    """
+                    INSERT INTO categories (
+                        id, category_id, name, parent_id, type, provider_id, is_adult, is_user_protected
+                    ) VALUES (10, 100, 'Legacy protected category', NULL, 'MOVIE', 1, 0, 1)
+                    """.trimIndent()
+                )
+                execSQL(
+                    """
+                    INSERT INTO channels (
+                        id, stream_id, name, stream_url, number, catch_up_supported, catch_up_days,
+                        provider_id, is_adult, is_user_protected, logical_group_id, error_count
+                    ) VALUES (11, 101, 'Legacy protected channel', 'https://stream.invalid/live', 101, 0, 0, 1, 0, 1, '', 0)
+                    """.trimIndent()
+                )
+                execSQL(
+                    "INSERT INTO channel_preferences (id, channel_id, aspect_ratio, updated_at) " +
+                        "VALUES (12, 11, '4:3', 789)"
+                )
+                execSQL(
+                    """
+                    INSERT INTO movies (
+                        id, stream_id, name, stream_url, duration_seconds, rating, provider_id,
+                        watch_progress, last_watched_at, is_adult, is_user_protected
+                    ) VALUES (20, 202, 'Legacy movie', 'https://stream.invalid/movie', 5400, 7.5, 1, 222, 333, 0, 1)
+                    """.trimIndent()
+                )
+                execSQL(
+                    """
+                    INSERT INTO virtual_groups (id, name, icon_emoji, position, created_at, content_type)
+                    VALUES (30, 'Legacy favorites group', '★', 2, 111, 'MOVIE')
+                    """.trimIndent()
+                )
+                execSQL(
+                    """
+                    INSERT INTO favorites (id, content_id, content_type, position, group_id, added_at)
+                    VALUES (31, 20, 'MOVIE', 1, 30, 222)
+                    """.trimIndent()
+                )
+                if (startVersion >= 15) {
+                    execSQL(
+                        """
+                        INSERT INTO playback_history (
+                            id, content_id, content_type, provider_id, title, stream_url,
+                            resume_position_ms, total_duration_ms, last_watched_at, watch_count,
+                            watched_status, series_id, season_number, episode_number
+                        ) VALUES (40, 20, 'MOVIE', 1, 'Legacy movie', 'https://stream.invalid/movie', 222000, 5400000, 333, 2, 'IN_PROGRESS', NULL, NULL, NULL)
+                        """.trimIndent()
+                    )
+                } else {
+                    execSQL(
+                        """
+                        INSERT INTO playback_history (
+                            id, content_id, content_type, provider_id, title, stream_url,
+                            resume_position_ms, total_duration_ms, last_watched_at, watch_count,
+                            series_id, season_number, episode_number
+                        ) VALUES (40, 20, 'MOVIE', 1, 'Legacy movie', 'https://stream.invalid/movie', 222000, 5400000, 333, 2, NULL, NULL, NULL)
+                        """.trimIndent()
+                    )
+                }
+                execSQL(
+                    """
+                    INSERT INTO sync_metadata (
+                        provider_id, last_live_sync, last_movie_sync, last_series_sync, last_epg_sync,
+                        live_count, movie_count, series_count, epg_count, last_sync_status
+                    ) VALUES (1, 11, 22, 33, 44, 1, 2, 3, 4, 'SUCCESS')
+                    """.trimIndent()
+                )
+                close()
+            }
+
+            val migrated = migrationTestHelper.runMigrationsAndValidate(
+                name,
+                StreamVaultDatabaseMigrationRegistry.CURRENT_VERSION,
+                true,
+                *StreamVaultDatabaseMigrationRegistry.all
+                    .filter { migration -> migration.startVersion >= startVersion }
+                    .toTypedArray()
+            )
+
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM providers WHERE id = 1 AND name = 'Legacy Provider'"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM categories WHERE id = 10 AND is_user_protected = 1"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM channels WHERE id = 11 AND is_user_protected = 1"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM channel_preferences WHERE channel_id = 11 AND aspect_ratio = '4:3'"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM movies WHERE id = 20 AND watch_progress = 222 AND is_user_protected = 1"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM virtual_groups WHERE id = 30 AND provider_id = 1"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM favorites WHERE id = 31 AND provider_id = 1 AND content_id = 20 AND group_id IS NOT NULL"))
+            assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM playback_history WHERE id = 40 AND provider_id = 1 AND watched_status = 'IN_PROGRESS'"))
+            assertEquals(11, countRows(migrated, "SELECT last_live_success FROM sync_metadata WHERE provider_id = 1"))
+            assertEquals(22, countRows(migrated, "SELECT last_movie_sync FROM sync_metadata WHERE provider_id = 1"))
+            assertEquals(0, countRows(migrated, "SELECT last_movie_success FROM sync_metadata WHERE provider_id = 1"))
+            assertEquals(33, countRows(migrated, "SELECT last_series_success FROM sync_metadata WHERE provider_id = 1"))
+            assertEquals(44, countRows(migrated, "SELECT last_epg_success FROM sync_metadata WHERE provider_id = 1"))
+            assertEquals(0, countRows(migrated, "SELECT COUNT(*) FROM pragma_foreign_key_check"))
+            migrated.close()
+        }
+    }
+
+    @Test
     fun migrate59To60_addsDownloadSourceColumns() {
         migrationTestHelper.createDatabase("streamvault-59-60-test", 59).close()
 
@@ -1657,6 +1768,140 @@ class StreamVaultDatabaseMigrationTest {
         assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM stalker_portal_state WHERE provider_id=3 AND configuration_generation=4"))
         assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM provider_config_revisions WHERE provider_id=1 AND revision=7 AND state='PENDING' AND config_json='{\"legacy\":true}'"))
         assertEquals(0, countRows(migrated, "SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrate62To77_preservesPopulatedProviderCatalogAndUserStateAcrossFullChain() {
+        val name = "streamvault-62-77-populated-full-chain"
+        migrationTestHelper.createDatabase(name, 62).apply {
+            execSQL(
+                """
+                INSERT INTO providers (
+                    id, name, type, server_url, username, password, m3u_url, epg_url,
+                    http_user_agent, http_headers, stalker_mac_address, stalker_device_profile,
+                    stalker_device_timezone, stalker_device_locale, stalker_serial_number,
+                    stalker_device_id, stalker_device_id2, stalker_signature, stalker_advanced_options_json,
+                    stalker_auth_mode, stalker_portal_profile, stalker_portal_fingerprint,
+                    stalker_mag_preset, stalker_last_bootstrap_recipe, stalker_endpoint_preference,
+                    stalker_cookie_mode, stalker_playback_backend_hint, stalker_last_playback_mode,
+                    stalker_credentials_required, stalker_mac_required, stalker_uses_temp_links,
+                    stalker_module_restricted, stalker_strict_fingerprint_required,
+                    stalker_recipe_fallback_used, stalker_recipe_rediscovery_attempts,
+                    is_active, max_connections, expiration_date, api_version,
+                    allowed_output_formats_json, epg_sync_mode, guide_source_policy,
+                    channel_logo_source_policy, xtream_fast_sync_enabled, xtream_live_sync_mode,
+                    m3u_vod_classification_enabled, status, last_synced_at, created_at
+                ) VALUES (
+                    1, 'Legacy Stalker', 'STALKER_PORTAL', 'https://portal.invalid', '', '', '', '',
+                    '', '', '00:1A:79:00:00:01', 'MAG250', 'Asia/Jerusalem', 'en', '', '', '', '', '',
+                    'AUTO', 'MAG_BASIC', 'BASIC_MAC', 'GENERIC_SAFE', 'GENERIC_SAFE', 'AUTO',
+                    'NONE', 'AUTO', NULL, 0, 1, 0, 0, 0, 0, 0,
+                    1, 1, NULL, NULL, '[]', 'BACKGROUND', 'AUTO', 'SUPPLIER_PREFERRED',
+                    0, 'AUTO', 0, 'ACTIVE', 1234, 5678
+                )
+                """.trimIndent()
+            )
+            execSQL(
+                "INSERT INTO categories (id, category_id, name, parent_id, type, provider_id, is_adult, is_user_protected, sync_fingerprint) " +
+                    "VALUES (10, 100, 'Protected category', NULL, 'LIVE', 1, 0, 1, 'category-v62')"
+            )
+            execSQL(
+                """
+                INSERT INTO channels (
+                    id, stream_id, name, stream_url, number, catch_up_supported, catch_up_days,
+                    provider_id, is_adult, is_user_protected, logical_group_id, error_count, sync_fingerprint
+                ) VALUES (11, 101, 'Protected channel', 'https://stream.invalid/live', 101, 0, 0, 1, 0, 1, '', 0, 'channel-v62')
+                """.trimIndent()
+            )
+            execSQL(
+                "INSERT INTO channel_preferences (id, channel_id, aspect_ratio, audio_video_offset_ms, updated_at) " +
+                    "VALUES (12, 11, '16:9', 250, 9000)"
+            )
+            execSQL(
+                """
+                INSERT INTO movies (
+                    stream_id, name, stream_url, duration_seconds, rating, provider_id,
+                    watch_progress, watch_count, last_watched_at, is_adult, is_user_protected,
+                    sync_fingerprint, added_at, cache_state, detail_hydrated_at, remote_stale_at
+                ) VALUES (99, 'Cached Movie', 'https://stream.invalid/movie', 7200, 8.0, 1, 321, 2, 999, 0, 1, 'movie-v62', 1, 'HYDRATED', 2, 0)
+                """.trimIndent()
+            )
+            execSQL(
+                "INSERT INTO virtual_groups (id, provider_id, name, icon_emoji, position, created_at, content_type) " +
+                    "VALUES (30, 1, 'Legacy group', '⭐', 4, 1000, 'MOVIE')"
+            )
+            execSQL(
+                "INSERT INTO favorites (id, provider_id, content_id, content_type, position, group_id, group_key, added_at) " +
+                    "VALUES (31, 1, 99, 'MOVIE', 2, 30, 30, 100)"
+            )
+            execSQL(
+                """
+                INSERT INTO playback_history (
+                    id, content_id, content_type, provider_id, title, stream_url,
+                    resume_position_ms, total_duration_ms, last_watched_at, watch_count, watched_status
+                ) VALUES (40, 99, 'MOVIE', 1, 'Cached Movie', 'https://stream.invalid/movie', 321000, 7200000, 999, 2, 'IN_PROGRESS')
+                """.trimIndent()
+            )
+            execSQL(
+                "INSERT INTO search_history (id, query, content_scope, provider_id, used_at, use_count) " +
+                    "VALUES (50, 'legacy search', 'MOVIES', 1, 5000, 3)"
+            )
+            execSQL(
+                """
+                INSERT INTO sync_metadata (
+                    provider_id, last_live_sync, last_live_success, last_movie_sync,
+                    last_series_sync, last_series_success, last_epg_sync, last_epg_success,
+                    last_movie_attempt, last_movie_success, last_movie_partial, live_count,
+                    movie_count, series_count, epg_count, last_sync_status, movie_sync_mode,
+                    movie_warnings_count, movie_catalog_stale, live_avoid_full_until,
+                    movie_avoid_full_until, series_avoid_full_until,
+                    live_sequential_failures_remembered, live_healthy_sync_streak,
+                    movie_parallel_failures_remembered, movie_healthy_sync_streak,
+                    series_sequential_failures_remembered, series_healthy_sync_streak
+                ) VALUES (
+                    1, 11, 12, 22, 33, 34, 44, 45, 55, 56, 57, 1, 2, 3, 4,
+                    'SUCCESS', 'FULL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                )
+                """.trimIndent()
+            )
+            execSQL(
+                """
+                INSERT INTO movie_category_hydration (
+                    provider_id, category_id, last_hydrated_at, item_count, last_status,
+                    last_error, last_loaded_page, last_attempted_page, last_successful_page,
+                    total_pages, is_complete, page_size, retry_after_ms, failure_count,
+                    retry_budget_remaining, last_page_fingerprint
+                ) VALUES (1, 10, 1000, 1, 'SUCCESS', NULL, 1, 1, 1, 3, 0, 18, 0, 0, 3, 'page-v62')
+                """.trimIndent()
+            )
+            close()
+        }
+
+        val migrated = migrationTestHelper.runMigrationsAndValidate(
+            name,
+            StreamVaultDatabaseMigrationRegistry.CURRENT_VERSION,
+            true,
+            *StreamVaultDatabaseMigrationRegistry.all
+                .filter { migration -> migration.startVersion >= 62 }
+                .toTypedArray()
+        )
+
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM providers WHERE id = 1 AND type = 'STALKER_PORTAL'"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM categories WHERE id = 10 AND is_user_protected = 1"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM channels WHERE id = 11 AND is_user_protected = 1"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM channel_preferences WHERE channel_id = 11 AND audio_video_offset_ms = 250"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM movies WHERE stream_id = 99 AND watch_progress = 321 AND is_user_protected = 1"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM virtual_groups WHERE id = 30 AND name = 'Legacy group'"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM favorites WHERE id = 31 AND group_id = 30"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM playback_history WHERE id = 40 AND resume_position_ms = 321000"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM search_history WHERE id = 50 AND use_count = 3"))
+        assertEquals(12, countRows(migrated, "SELECT last_live_success FROM sync_metadata WHERE provider_id = 1"))
+        assertEquals(45, countRows(migrated, "SELECT last_epg_success FROM sync_metadata WHERE provider_id = 1"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM movie_category_hydration WHERE provider_id = 1 AND category_id = 10 AND last_page_fingerprint = 'page-v62'"))
+        assertEquals(0, countRows(migrated, "SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_jobs'"))
+        assertEquals(1, countRows(migrated, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_items'"))
         migrated.close()
     }
 
