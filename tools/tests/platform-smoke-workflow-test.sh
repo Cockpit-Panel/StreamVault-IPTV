@@ -30,5 +30,7 @@ grep -F 'app/build/outputs/androidTest-results/' "$smoke_workflow" >/dev/null
 grep -F 'app/build/reports/androidTests/' "$smoke_workflow" >/dev/null
 grep -F 'data/build/outputs/androidTest-results/' "$smoke_workflow" >/dev/null
 grep -F 'data/build/reports/androidTests/' "$smoke_workflow" >/dev/null
+grep -F 'emulator-boot-timeout: 900' "$smoke_workflow" >/dev/null
+grep -F -- '-no-metrics' "$smoke_workflow" >/dev/null
 
 printf 'platform smoke workflow test passed\n'
