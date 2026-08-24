@@ -36,10 +36,16 @@ if grep -F 'runner: macos-' "$smoke_workflow" >/dev/null; then
 fi
 
 grep -F 'name: Enable and verify KVM acceleration' "$smoke_workflow" >/dev/null
-grep -F '99-kvm4all.rules' "$smoke_workflow" >/dev/null
+grep -F 'test -e /dev/kvm' "$smoke_workflow" >/dev/null
+grep -F 'sudo chmod 0666 /dev/kvm' "$smoke_workflow" >/dev/null
 grep -F 'test -r /dev/kvm' "$smoke_workflow" >/dev/null
 grep -F 'test -w /dev/kvm' "$smoke_workflow" >/dev/null
 grep -F 'disable-linux-hw-accel: false' "$smoke_workflow" >/dev/null
+
+if grep -F 'udevadm trigger --name-match=kvm' "$smoke_workflow" >/dev/null; then
+  printf 'platform smoke must configure /dev/kvm directly instead of relying on udev re-triggering\n' >&2
+  exit 1
+fi
 
 grep -F 'platform-smoke-api-${{ matrix.api-level }}-diagnostics' "$smoke_workflow" >/dev/null
 grep -F 'build/platform-smoke-diagnostics/' "$smoke_workflow" >/dev/null
