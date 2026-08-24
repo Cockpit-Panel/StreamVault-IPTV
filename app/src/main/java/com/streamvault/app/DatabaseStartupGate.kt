@@ -6,7 +6,10 @@ import com.streamvault.data.local.StreamVaultDatabase
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +38,8 @@ internal class DatabaseStartupGate(
     private val mutableState = MutableStateFlow<DatabaseStartupState>(DatabaseStartupState.Opening)
     val state: StateFlow<DatabaseStartupState> = mutableState.asStateFlow()
 
+    fun start(scope: CoroutineScope): Job = scope.launch { open() }
+
     suspend fun open() {
         mutex.withLock {
             if (mutableState.value == DatabaseStartupState.Ready) return
@@ -59,6 +64,7 @@ class DatabaseStartupCoordinator @Inject constructor(
     database: Lazy<StreamVaultDatabase>,
     @ApplicationContext context: Context
 ) {
+    private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = DatabaseStartupGate(
         openDatabase = {
             withContext(Dispatchers.IO) {
@@ -71,6 +77,8 @@ class DatabaseStartupCoordinator @Inject constructor(
     )
 
     val state: StateFlow<DatabaseStartupState> = gate.state
+
+    fun start(): Job = gate.start(startupScope)
 
     suspend fun open() = gate.open()
 }

@@ -220,6 +220,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        // Start Room only after the application/test process has finished its lightweight setup.
+        // Compatibility instrumentation does not create this activity, so it cannot be blocked
+        // by a full schema open while Android is still starting the instrumented process.
+        databaseStartupCoordinator.start()
     }
 
     override fun onResume() {
