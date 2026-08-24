@@ -2,9 +2,12 @@ package com.streamvault.app
 
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.async
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class DatabaseStartupGateTest {
     @Test
     fun `successful open transitions to ready`() = runTest {
@@ -12,6 +15,20 @@ class DatabaseStartupGateTest {
 
         gate.open()
 
+        assertThat(gate.state.value).isEqualTo(DatabaseStartupState.Ready)
+    }
+
+    @Test
+    fun `database open is deferred until an explicit startup request`() = runTest {
+        var attempts = 0
+        val gate = DatabaseStartupGate { attempts++ }
+
+        assertThat(attempts).isEqualTo(0)
+
+        gate.start(this)
+        advanceUntilIdle()
+
+        assertThat(attempts).isEqualTo(1)
         assertThat(gate.state.value).isEqualTo(DatabaseStartupState.Ready)
     }
 

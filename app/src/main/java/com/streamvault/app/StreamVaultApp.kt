@@ -87,9 +87,6 @@ class StreamVaultApp : Application(), SingletonImageLoader.Factory {
                 .first()
             runDatabaseReadyStartupTasks()
         }
-        applicationScope.launch {
-            databaseStartupCoordinator.open()
-        }
     }
 
     private suspend fun runDatabaseReadyStartupTasks() {
