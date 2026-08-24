@@ -83,7 +83,7 @@ jobs:
           target: ${{ matrix.target }}
           emulator-boot-timeout: 900
           disable-linux-hw-accel: false
-          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim -no-metrics
+          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim -no-metrics -delay-adb
           profile: tv_1080p
           script: |
             chmod +x gradlew tools/run-platform-smoke.sh tools/wait-for-emulator.sh
