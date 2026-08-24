@@ -42,12 +42,12 @@ jobs:
             target: default
             gpu: swiftshader_indirect
           - api-level: 35
-            runner: macos-15-intel
+            runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
           - api-level: 36
-            runner: macos-15-intel
+            runner: ubuntu-latest
             arch: x86
             target: android-tv
             gpu: software
@@ -64,6 +64,14 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Enable and verify KVM acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+
       - name: Run compatibility instrumentation suite
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -71,6 +79,7 @@ jobs:
           arch: ${{ matrix.arch }}
           target: ${{ matrix.target }}
           emulator-boot-timeout: 900
+          disable-linux-hw-accel: false
           emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim -no-metrics
           profile: tv_1080p
           script: |

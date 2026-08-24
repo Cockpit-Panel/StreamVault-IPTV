@@ -24,6 +24,23 @@ for api_level in 25 26 28 32 33 35 36; do
   grep -F -- "- api-level: $api_level" "$smoke_workflow" >/dev/null
 done
 
+runner_count=$(grep -F -c 'runner: ubuntu-latest' "$smoke_workflow")
+if [ "$runner_count" -ne 7 ]; then
+  printf 'all platform smoke jobs must run on KVM-capable Linux runners\n' >&2
+  exit 1
+fi
+
+if grep -F 'runner: macos-' "$smoke_workflow" >/dev/null; then
+  printf 'platform smoke must not use CPU-constrained macOS emulator runners\n' >&2
+  exit 1
+fi
+
+grep -F 'name: Enable and verify KVM acceleration' "$smoke_workflow" >/dev/null
+grep -F '99-kvm4all.rules' "$smoke_workflow" >/dev/null
+grep -F 'test -r /dev/kvm' "$smoke_workflow" >/dev/null
+grep -F 'test -w /dev/kvm' "$smoke_workflow" >/dev/null
+grep -F 'disable-linux-hw-accel: false' "$smoke_workflow" >/dev/null
+
 grep -F 'platform-smoke-api-${{ matrix.api-level }}-diagnostics' "$smoke_workflow" >/dev/null
 grep -F 'build/platform-smoke-diagnostics/' "$smoke_workflow" >/dev/null
 grep -F 'app/build/outputs/androidTest-results/' "$smoke_workflow" >/dev/null
