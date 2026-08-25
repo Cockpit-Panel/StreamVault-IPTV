@@ -55,6 +55,7 @@ grep -F 'data/build/outputs/androidTest-results/' "$smoke_workflow" >/dev/null
 grep -F 'data/build/reports/androidTests/' "$smoke_workflow" >/dev/null
 grep -F 'emulator-boot-timeout: 900' "$smoke_workflow" >/dev/null
 grep -F -- '-no-metrics' "$smoke_workflow" >/dev/null
-grep -F -- '-delay-adb' "$smoke_workflow" >/dev/null
+grep -F 'adb_delay: -delay-adb' "$smoke_workflow" >/dev/null
+grep -F 'matrix.adb_delay' "$smoke_workflow" >/dev/null
 
 printf 'platform smoke workflow test passed\n'

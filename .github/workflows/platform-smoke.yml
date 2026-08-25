@@ -21,36 +21,43 @@ jobs:
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: ''
           - api-level: 26
             runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: ''
           - api-level: 28
             runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: ''
           - api-level: 32
             runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: ''
           - api-level: 33
             runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: ''
           - api-level: 35
             runner: ubuntu-latest
             arch: x86_64
             target: default
             gpu: swiftshader_indirect
+            adb_delay: -delay-adb
           - api-level: 36
             runner: ubuntu-latest
             arch: x86
             target: android-tv
             gpu: software
+            adb_delay: -delay-adb
 
     runs-on: ${{ matrix.runner }}
 
@@ -83,7 +90,7 @@ jobs:
           target: ${{ matrix.target }}
           emulator-boot-timeout: 900
           disable-linux-hw-accel: false
-          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim -no-metrics -delay-adb
+          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim -no-metrics ${{ matrix.adb_delay }}
           profile: tv_1080p
           script: |
             chmod +x gradlew tools/run-platform-smoke.sh tools/wait-for-emulator.sh

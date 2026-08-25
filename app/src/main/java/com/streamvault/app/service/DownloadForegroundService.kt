@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.content.Intent
 import android.util.Log
 import android.os.Build
@@ -64,8 +65,7 @@ class DownloadForegroundService : Service() {
         beginPendingCommand()
 
         val foregroundStarted = runCatching {
-            startForeground(
-                NOTIFICATION_ID,
+            startDataSyncForeground(
                 buildNotification(
                     downloadItem = null,
                     pendingCommand = true
@@ -231,6 +231,18 @@ class DownloadForegroundService : Service() {
 
     private fun entryPoint(): DownloadServiceEntryPoint =
         EntryPointAccessors.fromApplication(applicationContext, DownloadServiceEntryPoint::class.java)
+
+    private fun startDataSyncForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
 
     private fun ensureDataSyncQuotaLease() {
         if (dataSyncQuotaLease != null) return
