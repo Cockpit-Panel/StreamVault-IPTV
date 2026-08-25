@@ -61,7 +61,6 @@ class DownloadForegroundService : Service() {
         val downloadId = intent?.getStringExtra(EXTRA_DOWNLOAD_ID)
         val startMode = resolveDownloadServiceStartMode(downloadId)
         currentDownloadId = downloadId
-        val entryPoint = entryPoint()
         beginPendingCommand()
 
         val foregroundStarted = runCatching {
@@ -79,6 +78,11 @@ class DownloadForegroundService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        // Promote the service before touching the Hilt graph/Room. Opening the database can
+        // block during a migration, and Android's FGS startup deadline applies until this call
+        // completes. A slow migration must not make the system believe this service never
+        // entered the foreground (which also prevents dataSync timeout callbacks on API 35+).
+        val entryPoint = entryPoint()
         ensureDataSyncQuotaLease()
 
         observeJob?.cancel()
