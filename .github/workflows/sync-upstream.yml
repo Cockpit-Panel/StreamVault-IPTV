@@ -119,7 +119,7 @@ jobs:
         if: steps.overlay.outputs.no_changes != 'true'
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest :app:assembleRelease --no-daemon --console=plain --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --console=plain --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
 
       - name: Collect APK
         if: steps.overlay.outputs.no_changes != 'true'
