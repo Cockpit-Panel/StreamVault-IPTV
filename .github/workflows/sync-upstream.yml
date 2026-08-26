@@ -1,6 +1,8 @@
 name: Upstream Sync and Cockpit Release
 
 on:
+  push:
+    branches: [master]
   schedule:
     - cron: '41 4 * * *'
   workflow_dispatch:
@@ -43,7 +45,7 @@ jobs:
           old_base="$(git merge-base HEAD "upstream/$UPSTREAM_REF")"
           new_upstream="$(git rev-parse "upstream/$UPSTREAM_REF")"
           if [ "$old_base" = "$new_upstream" ]; then
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event_name }}" != "schedule" ]; then
               echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
               echo "manual_build=true" >> "$GITHUB_OUTPUT"
               echo "Manual run requested: building and releasing the current verified Cockpit tree." >> "$GITHUB_STEP_SUMMARY"
