@@ -207,10 +207,15 @@ class ProviderQrPairingManager @Inject constructor(
                         status = ProviderQrPairingStatus.RECEIVING,
                         message = "Phone submitted provider details. Validating..."
                     )
+                    // A provider login can take long enough for the phone browser (and
+                    // some emulator network stacks) to abandon the HTTP connection.
+                    // Acknowledge receipt before validation; the TV remains the source
+                    // of truth for the eventual validation result.
+                    writeHtml(client.getOutputStream(), 200, receivedPage())
+                    runCatching { client.shutdownOutput() }
                     val saveResult = addProviderFromForm(form)
                     when (saveResult) {
                         is ProviderPairingSubmitResult.Success -> {
-                            writeHtml(client.getOutputStream(), 200, successPage(saveResult.providerName))
                             invalidateAfterSuccess(saveResult.providerName)
                         }
                         is ProviderPairingSubmitResult.Error -> {
@@ -218,7 +223,6 @@ class ProviderQrPairingManager @Inject constructor(
                                 status = ProviderQrPairingStatus.READY,
                                 message = saveResult.message
                             )
-                            writeHtml(client.getOutputStream(), 400, errorPage(saveResult.message))
                         }
                     }
                 }
@@ -457,6 +461,12 @@ class ProviderQrPairingManager @Inject constructor(
         <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
         <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101820;color:#f8fafc;padding:28px}main{max-width:520px;margin:auto;background:#172635;border-radius:22px;padding:24px}h1{color:#32d6a0}</style>
         </head><body><main><h1>Sent to TV</h1><p>${providerName.escapeHtml()} was added to StreamVault. You can close this page.</p></main></body></html>
+    """.trimIndent()
+
+    private fun receivedPage(): String = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101820;color:#f8fafc;padding:28px}main{max-width:520px;margin:auto;background:#172635;border-radius:22px;padding:24px}h1{color:#32d6a0}</style>
+        </head><body><main><h1>Sent to TV</h1><p>StreamVault received the details and is validating the service on your TV. You can close this page.</p></main></body></html>
     """.trimIndent()
 
     private fun errorPage(message: String): String = """
