@@ -1,7 +1,7 @@
 package com.streamvault.data.remote.http
 
 import com.google.common.truth.Truth.assertThat
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import okhttp3.Request
 import org.junit.Test

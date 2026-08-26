@@ -49,7 +49,10 @@ fun AddToGroupDialog(
     isQueuedForSplitScreen: Boolean = false,
     onOpenSplitScreenPlanner: (() -> Unit)? = null,
     onRemoveFromRecent: (() -> Unit)? = null,
-    onHideChannel: (() -> Unit)? = null
+    onHideChannel: (() -> Unit)? = null,
+    onMoveToMovies: (() -> Unit)? = null,
+    onMoveToSeries: (() -> Unit)? = null,
+    onMoveBackToLive: (() -> Unit)? = null
 ) {
     var showCreateGroup by remember { mutableStateOf(false) }
     val isTelevisionDevice = rememberIsTelevisionDevice()
@@ -80,6 +83,9 @@ fun AddToGroupDialog(
     val safeOpenSplitScreenPlanner = { if (canInteract) onOpenSplitScreenPlanner?.invoke() }
     val safeRemoveFromRecent = { if (canInteract) onRemoveFromRecent?.invoke() }
     val safeHideChannel = { if (canInteract) onHideChannel?.invoke() }
+    val safeMoveToMovies = { if (canInteract) onMoveToMovies?.invoke() }
+    val safeMoveToSeries = { if (canInteract) onMoveToSeries?.invoke() }
+    val safeMoveBackToLive = { if (canInteract) onMoveBackToLive?.invoke() }
     val safeCreateGroup = { if (canInteract && onCreateGroup != null) showCreateGroup = true }
     val safeAddToGroup: (Category) -> Unit = { group -> if (canInteract) onAddToGroup(group) }
     val safeRemoveFromGroup: (Category) -> Unit = { group -> if (canInteract) onRemoveFromGroup(group) }
@@ -178,6 +184,45 @@ fun AddToGroupDialog(
                                     else stringResource(R.string.add_group_add_favorites),
                                     color = Color.Black
                                 )
+                            }
+                        }
+
+                        if (onMoveToMovies != null) {
+                            item {
+                                Button(
+                                    onClick = safeMoveToMovies,
+                                    modifier = Modifier.fillMaxWidth().mouseClickable(onClick = safeMoveToMovies),
+                                    colors = ButtonDefaults.colors(
+                                        containerColor = AppColors.Brand,
+                                        contentColor = Color.Black
+                                    )
+                                ) { Text(stringResource(R.string.m3u_move_to_movies)) }
+                            }
+                        }
+
+                        if (onMoveToSeries != null) {
+                            item {
+                                Button(
+                                    onClick = safeMoveToSeries,
+                                    modifier = Modifier.fillMaxWidth().mouseClickable(onClick = safeMoveToSeries),
+                                    colors = ButtonDefaults.colors(
+                                        containerColor = AppColors.Success,
+                                        contentColor = Color.Black
+                                    )
+                                ) { Text(stringResource(R.string.m3u_move_to_series)) }
+                            }
+                        }
+
+                        if (onMoveBackToLive != null) {
+                            item {
+                                Button(
+                                    onClick = safeMoveBackToLive,
+                                    modifier = Modifier.fillMaxWidth().mouseClickable(onClick = safeMoveBackToLive),
+                                    colors = ButtonDefaults.colors(
+                                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                ) { Text(stringResource(R.string.m3u_move_back_to_live)) }
                             }
                         }
 

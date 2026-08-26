@@ -3,37 +3,78 @@ package com.streamvault.app.ui.screens.settings
 import android.app.Application
 import com.streamvault.app.R
 import com.streamvault.app.tvinput.TvInputChannelSyncManager
-import com.streamvault.data.sync.SyncManager
+import com.streamvault.app.tvinput.TvInputCatalogRefreshWorker
+import com.streamvault.data.sync.ProviderSyncCommands
 import com.streamvault.data.sync.SyncRepairSection
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Result
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal class SettingsSyncActions(
     private val appContext: Application,
-    private val syncManager: SyncManager,
+    private val syncManager: ProviderSyncCommands,
     private val tvInputChannelSyncManager: TvInputChannelSyncManager,
     private val uiState: MutableStateFlow<SettingsUiState>,
-    private val refreshProvider: (CoroutineScope, Long, SettingsProviderSyncMode) -> Unit
+    private val refreshProvider: (CoroutineScope, Long, SettingsProviderSyncMode, String?, Long, String?, Boolean) -> Job
 ) {
+    private var syncJob: Job? = null
+
+    fun cancelSync() {
+        syncJob?.cancel()
+        syncJob = null
+        uiState.update {
+            it.copy(
+                isSyncing = false,
+                syncProgress = null,
+                syncingProviderName = null,
+                syncStartedAt = 0L,
+                syncSectionLabel = null,
+                syncCanCancel = false,
+                userMessage = appContext.getString(R.string.settings_sync_cancelled)
+            )
+        }
+    }
+
     fun syncProviderSection(scope: CoroutineScope, providerId: Long, selection: ProviderSyncSelection) {
-        scope.launch {
+        if (selection == ProviderSyncSelection.REBUILD_INDEX) {
+            val sectionLabel = selection.label(appContext)
+            val job = refreshProvider(
+                scope,
+                providerId,
+                SettingsProviderSyncMode.REBUILD_INDEX,
+                appContext.getString(R.string.settings_syncing_section, sectionLabel),
+                System.currentTimeMillis(),
+                sectionLabel,
+                true
+            )
+            syncJob = job
+            job.invokeOnCompletion {
+                if (syncJob === job) {
+                    syncJob = null
+                }
+            }
+            return
+        }
+
+        syncJob = scope.launch {
             when (selection) {
                 ProviderSyncSelection.SYNC_NOW -> runSectionSync(
                     providerId = providerId,
                     selections = syncNowSelections(providerId)
                 )
-                ProviderSyncSelection.REBUILD_INDEX -> refreshProvider(scope, providerId, SettingsProviderSyncMode.REBUILD_INDEX)
+                ProviderSyncSelection.REBUILD_INDEX -> Unit
                 else -> runSectionSync(providerId, listOf(selection))
             }
         }
     }
 
     fun syncProviderCustom(scope: CoroutineScope, providerId: Long, selections: Set<ProviderSyncSelection>) {
-        scope.launch {
+        syncJob = scope.launch {
             val orderedSelections = listOf(
                 ProviderSyncSelection.TV,
                 ProviderSyncSelection.MOVIES,
@@ -51,13 +92,21 @@ internal class SettingsSyncActions(
     }
 
     fun retryWarningAction(scope: CoroutineScope, providerId: Long, action: ProviderWarningAction) {
-        scope.launch {
+        syncJob = scope.launch {
             val providerName = uiState.value.providers.firstOrNull { it.id == providerId }?.name
+            val sectionLabel = when (action) {
+                ProviderWarningAction.EPG -> appContext.getString(R.string.settings_sync_option_epg)
+                ProviderWarningAction.MOVIES -> appContext.getString(R.string.settings_sync_option_movies)
+                ProviderWarningAction.SERIES -> appContext.getString(R.string.settings_sync_option_series)
+            }
             uiState.update {
                 it.copy(
                     isSyncing = true,
                     syncProgress = appContext.getString(R.string.settings_syncing_preparing),
-                    syncingProviderName = providerName
+                    syncingProviderName = providerName,
+                    syncStartedAt = System.currentTimeMillis(),
+                    syncSectionLabel = sectionLabel,
+                    syncCanCancel = true
                 )
             }
             val section = when (action) {
@@ -66,7 +115,13 @@ internal class SettingsSyncActions(
                 ProviderWarningAction.SERIES -> SyncRepairSection.SERIES
             }
             val result = syncManager.retrySection(providerId, section) { progress ->
-                uiState.update { state -> state.copy(syncProgress = progress, syncingProviderName = providerName) }
+                uiState.update { state ->
+                    state.copy(
+                        syncProgress = progress,
+                        syncingProviderName = providerName,
+                        syncSectionLabel = sectionLabel
+                    )
+                }
             }
             uiState.update { state ->
                 if (result is Result.Error) {
@@ -74,6 +129,9 @@ internal class SettingsSyncActions(
                         isSyncing = false,
                         syncProgress = null,
                         syncingProviderName = null,
+                        syncStartedAt = 0L,
+                        syncSectionLabel = null,
+                        syncCanCancel = false,
                         userMessage = "Retry failed: ${result.message}"
                     )
                 } else {
@@ -89,6 +147,9 @@ internal class SettingsSyncActions(
                         isSyncing = false,
                         syncProgress = null,
                         syncingProviderName = null,
+                        syncStartedAt = 0L,
+                        syncSectionLabel = null,
+                        syncCanCancel = false,
                         userMessage = if (updatedWarnings.isEmpty()) {
                             "Section retry succeeded. All current warnings cleared."
                         } else {
@@ -100,6 +161,12 @@ internal class SettingsSyncActions(
                             state.syncWarningsByProvider + (providerId to updatedWarnings)
                         }
                     )
+                }
+            }
+        }.also { job ->
+            job.invokeOnCompletion {
+                if (syncJob === job) {
+                    syncJob = null
                 }
             }
         }
@@ -115,7 +182,10 @@ internal class SettingsSyncActions(
             it.copy(
                 isSyncing = true,
                 syncProgress = appContext.getString(R.string.settings_syncing_preparing),
-                syncingProviderName = providerName
+                syncingProviderName = providerName,
+                syncStartedAt = System.currentTimeMillis(),
+                syncSectionLabel = null,
+                syncCanCancel = true
             )
         }
         try {
@@ -123,6 +193,7 @@ internal class SettingsSyncActions(
             val completed = mutableListOf<String>()
 
             selections.forEach { selection ->
+                val sectionLabel = selection.label(appContext)
                 val section = when (selection) {
                     ProviderSyncSelection.TV -> SyncRepairSection.LIVE
                     ProviderSyncSelection.MOVIES -> SyncRepairSection.MOVIES
@@ -135,16 +206,23 @@ internal class SettingsSyncActions(
                     state.copy(
                         syncProgress = appContext.getString(
                             R.string.settings_syncing_section,
-                            selection.label(appContext)
+                            sectionLabel
                         ),
+                        syncSectionLabel = sectionLabel,
                         syncingProviderName = providerName
                     )
                 }
 
                 when (val result = syncManager.retrySection(providerId, section) { progress ->
-                    uiState.update { state -> state.copy(syncProgress = progress, syncingProviderName = providerName) }
+                    uiState.update { state ->
+                        state.copy(
+                            syncProgress = progress,
+                            syncingProviderName = providerName,
+                            syncSectionLabel = sectionLabel
+                        )
+                    }
                 }) {
-                    is Result.Error -> failures += "${selection.label(appContext)}: ${result.message}"
+                    is Result.Error -> failures += "${sectionLabel}: ${result.message}"
                     else -> completed += selection.completionLabel(
                         isXtream = provider?.type == ProviderType.XTREAM_CODES || provider?.type == ProviderType.STALKER_PORTAL
                     )
@@ -155,7 +233,7 @@ internal class SettingsSyncActions(
                     it == appContext.getString(R.string.settings_sync_option_tv)
                 }
             ) {
-                tvInputChannelSyncManager.refreshTvInputCatalog()
+                TvInputCatalogRefreshWorker.enqueue(appContext)
             }
 
             uiState.update { state ->
@@ -163,6 +241,9 @@ internal class SettingsSyncActions(
                     isSyncing = false,
                     syncProgress = null,
                     syncingProviderName = null,
+                    syncStartedAt = 0L,
+                    syncSectionLabel = null,
+                    syncCanCancel = false,
                     userMessage = when {
                         failures.isEmpty() -> appContext.getString(
                             R.string.settings_sync_sections_success,
@@ -180,15 +261,32 @@ internal class SettingsSyncActions(
                     }
                 )
             }
+        } catch (e: CancellationException) {
+            uiState.update {
+                it.copy(
+                    isSyncing = false,
+                    syncProgress = null,
+                    syncingProviderName = null,
+                    syncStartedAt = 0L,
+                    syncSectionLabel = null,
+                    syncCanCancel = false,
+                    userMessage = appContext.getString(R.string.settings_sync_cancelled)
+                )
+            }
         } catch (e: Exception) {
             uiState.update {
                 it.copy(
                     isSyncing = false,
                     syncProgress = null,
                     syncingProviderName = null,
+                    syncStartedAt = 0L,
+                    syncSectionLabel = null,
+                    syncCanCancel = false,
                     userMessage = "Sync failed: ${e.message}"
                 )
             }
+        } finally {
+            syncJob = null
         }
     }
 

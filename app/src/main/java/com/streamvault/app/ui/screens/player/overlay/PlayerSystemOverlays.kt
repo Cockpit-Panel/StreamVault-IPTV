@@ -162,6 +162,7 @@ fun PlayerErrorOverlay(
     hasAlternateStream: Boolean,
     hasLastChannel: Boolean,
     onAction: (PlayerNoticeAction) -> Unit,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val fallbackMessage = when (playerError) {
@@ -214,6 +215,22 @@ fun PlayerErrorOverlay(
                         Text(
                             text = playerNoticeActionLabel(action),
                             color = if (action == PlayerNoticeAction.RETRY) OnBackground else Color.White,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+                onBack?.let { back ->
+                    TvClickableSurface(
+                        onClick = back,
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            focusedContainerColor = Color.White.copy(alpha = 0.18f)
+                        )
+                    ) {
+                        Text(
+                            text = "Back",
+                            color = Color.White,
                             modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
                         )
                     }

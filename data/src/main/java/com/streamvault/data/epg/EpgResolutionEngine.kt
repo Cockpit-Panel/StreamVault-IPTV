@@ -6,6 +6,7 @@ import com.streamvault.data.local.dao.ChannelEpgMappingDao
 import com.streamvault.data.local.dao.EpgChannelDao
 import com.streamvault.data.local.dao.EpgProgrammeDao
 import com.streamvault.data.local.dao.ProgramDao
+import com.streamvault.data.local.dao.ProviderSnapshotDao
 import com.streamvault.data.local.dao.ProviderEpgSourceDao
 import com.streamvault.data.local.entity.ChannelEpgMappingEntity
 import com.streamvault.data.mapper.toDomain
@@ -13,6 +14,7 @@ import com.streamvault.data.mapper.toDomainProgram
 import com.streamvault.domain.model.EpgMatchType
 import com.streamvault.domain.model.EpgResolutionSummary
 import com.streamvault.domain.model.EpgSourceType
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.Program
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -38,7 +40,8 @@ class EpgResolutionEngine @Inject constructor(
     private val providerEpgSourceDao: ProviderEpgSourceDao,
     private val epgChannelDao: EpgChannelDao,
     private val epgProgrammeDao: EpgProgrammeDao,
-    private val programDao: ProgramDao
+    private val programDao: ProgramDao,
+    private val providerSnapshotDao: ProviderSnapshotDao
 ) {
     companion object {
         private const val TAG = "EpgResolutionEngine"
@@ -61,12 +64,20 @@ class EpgResolutionEngine @Inject constructor(
     ): EpgResolutionSummary = withContext(Dispatchers.Default) {
         val channels = channelDao.getByProviderSync(providerId)
             .filterNot { channel -> channel.categoryId != null && channel.categoryId in hiddenLiveCategoryIds }
+        val guideSourcePolicy = providerSnapshotDao.getConfig(providerId)?.guideSourcePolicy ?: GuideSourcePolicy.AUTO
         if (channels.isEmpty()) {
             channelEpgMappingDao.deleteByProvider(providerId)
             return@withContext EpgResolutionSummary()
         }
 
-        val enabledAssignments = providerEpgSourceDao.getEnabledForProviderSync(providerId)
+        val allowExternalMappings = allowsExternalMappings(guideSourcePolicy)
+        val allowProviderNativeMappings = allowsProviderNativeMappings(guideSourcePolicy)
+
+        val enabledAssignments = if (allowExternalMappings) {
+            providerEpgSourceDao.getEnabledForProviderSync(providerId)
+        } else {
+            emptyList()
+        }
         val sourceIds = enabledAssignments.map { it.epgSourceId }
 
         // Load all EPG channels from assigned sources in one query
@@ -120,7 +131,7 @@ class EpgResolutionEngine @Inject constructor(
             val existing = existingMappingsByChannel[channel.id]
             // 1. Check for manual override
             val manual = manualOverrides[channel.id]
-            if (manual != null) {
+            if (manual != null && isMappingAllowed(manual, guideSourcePolicy)) {
                 manualMatches++
                 return@map manual.copy(
                     matchedAt = manual.matchedAt.takeIf { it > 0L } ?: now,
@@ -181,7 +192,7 @@ class EpgResolutionEngine @Inject constructor(
             }
 
             // 4. Fall back to provider-native EPG
-            if (channelEpgId != null && channelEpgId in providerNativeChannelIds) {
+            if (allowProviderNativeMappings && channelEpgId != null && channelEpgId in providerNativeChannelIds) {
                 providerNativeMatches++
                 return@map ChannelEpgMappingEntity(
                     providerChannelId = channel.id,
@@ -221,7 +232,6 @@ class EpgResolutionEngine @Inject constructor(
         }
 
         channelEpgMappingDao.replaceForProvider(providerId, mappings)
-        channelDao.backfillEpgIcons(providerId)
 
         val summary = EpgResolutionSummary(
             totalChannels = channels.size,
@@ -256,6 +266,8 @@ class EpgResolutionEngine @Inject constructor(
         endTime: Long
     ): Map<String, List<Program>> = withContext(Dispatchers.IO) {
         if (channelIds.isEmpty()) return@withContext emptyMap()
+        val guideSourcePolicy = providerSnapshotDao.getConfig(providerId)?.guideSourcePolicy ?: GuideSourcePolicy.AUTO
+        if (guideSourcePolicy == GuideSourcePolicy.DISABLED) return@withContext emptyMap()
 
         val mappings = if (channelIds.size <= 500) {
             channelEpgMappingDao.getForChannels(providerId, channelIds)
@@ -263,7 +275,7 @@ class EpgResolutionEngine @Inject constructor(
             channelIds.chunked(500).flatMap { chunk ->
                 channelEpgMappingDao.getForChannels(providerId, chunk)
             }
-        }
+        }.filter { mapping -> isMappingAllowed(mapping, guideSourcePolicy) }
 
         if (mappings.isEmpty()) return@withContext emptyMap()
 
@@ -312,7 +324,11 @@ class EpgResolutionEngine @Inject constructor(
         // For PROVIDER type, we don't need to query — the existing ProgramDao path
         // in EpgRepositoryImpl handles that. But we can include them here for completeness
         // of the resolved query path.
-        val providerMappings = mappings.filter { it.sourceType == EpgSourceType.PROVIDER.name && it.xmltvChannelId != null }
+        val providerMappings = if (allowsProviderNativeMappings(guideSourcePolicy)) {
+            mappings.filter { it.sourceType == EpgSourceType.PROVIDER.name && it.xmltvChannelId != null }
+        } else {
+            emptyList()
+        }
         if (providerMappings.isNotEmpty()) {
             val providerXmltvIds = providerMappings.mapNotNull { it.xmltvChannelId }.distinct()
             val providerPrograms = if (providerXmltvIds.size <= 500) {
@@ -342,6 +358,19 @@ class EpgResolutionEngine @Inject constructor(
         }
 
         result
+    }
+
+    private fun allowsExternalMappings(policy: GuideSourcePolicy): Boolean =
+        policy == GuideSourcePolicy.AUTO || policy == GuideSourcePolicy.EXTERNAL_ONLY
+
+    private fun allowsProviderNativeMappings(policy: GuideSourcePolicy): Boolean =
+        policy == GuideSourcePolicy.AUTO || policy == GuideSourcePolicy.PROVIDER_ONLY
+
+    private fun isMappingAllowed(mapping: ChannelEpgMappingEntity, policy: GuideSourcePolicy): Boolean = when (mapping.sourceType) {
+        EpgSourceType.EXTERNAL.name -> allowsExternalMappings(policy)
+        EpgSourceType.PROVIDER.name -> allowsProviderNativeMappings(policy)
+        EpgSourceType.NONE.name -> policy != GuideSourcePolicy.DISABLED
+        else -> false
     }
 
     /**

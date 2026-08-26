@@ -28,6 +28,7 @@ class CastRouteChooserActivity : AppCompatActivity() {
     override fun onStop() {
         chooserDialog?.dismiss()
         chooserDialog = null
+        castManager.onRouteChooserClosed()
         super.onStop()
     }
 }

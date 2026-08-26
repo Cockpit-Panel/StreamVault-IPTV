@@ -107,11 +107,18 @@
     <string name="dashboard_subtitle">%1$s is active. Jump back into live, catch up on progress, or browse fresh additions.</string>
     <string name="dashboard_favorite_channels">Favorite Channels</string>
     <string name="dashboard_recent_channels">Recent Channels</string>
+    <string name="dashboard_favorite_movies">Favorite Movies</string>
+    <string name="dashboard_favorite_series">Favorite Series</string>
     <string name="dashboard_recent_movies">Recently Added Movies</string>
     <string name="dashboard_recent_series">Recently Updated Series</string>
+    <string name="dashboard_top_rated_movies">Top Rated Movies</string>
+    <string name="dashboard_recommended_movies">Recommended Movies</string>
     <string name="dashboard_search_library">Search Library</string>
     <string name="dashboard_live_shortcuts">Live Shortcuts</string>
     <string name="dashboard_live_shortcuts_subtitle">Favorites, recent channels, and last group.</string>
+    <string name="dashboard_customize_home">Customize Home</string>
+    <string name="dashboard_customize_home_subtitle">Choose which shelves appear here, add more rows, and reorder them any time.</string>
+    <string name="dashboard_customize_home_action">Customize</string>
     <string name="dashboard_provider_health_title">Provider Health</string>
     <string name="dashboard_provider_status">Status</string>
     <string name="dashboard_provider_source">Source</string>
@@ -126,9 +133,11 @@
     <string name="dashboard_warning_review">Open Provider Details</string>
     <string name="dashboard_update_title">StreamVault %1$s is available</string>
     <string name="dashboard_update_available">A newer app release is cached and ready to review from Settings.</string>
-    <string name="dashboard_update_install_ready">The latest update has already been downloaded. Open Settings to install it.</string>
+    <string name="dashboard_update_install_ready">The latest update has already been downloaded. Open the installer to finish.</string>
+    <string name="dashboard_update_install_permission_required">The update is downloaded. Allow installs from StreamVault, then retry installation.</string>
     <string name="dashboard_update_open_settings">Open Updates</string>
-    <string name="dashboard_update_open_installer">Install From Settings</string>
+    <string name="dashboard_update_open_installer">Install Update</string>
+    <string name="dashboard_update_allow_installs">Allow Installs</string>
     <string name="dashboard_updated_series_badge">Updated series</string>
     <string name="dashboard_stat_live">%1$d live</string>
     <string name="dashboard_stat_favorites">%1$d favorites</string>
@@ -155,6 +164,20 @@
     <string name="category_options_clear_recent">Clear All Recent</string>
     <string name="category_options_pin">Pin Category</string>
     <string name="category_options_unpin">Unpin Category</string>
+    <string name="m3u_organize_items">Organize M3U Items</string>
+    <string name="m3u_move_to_movies">Move to Movies</string>
+    <string name="m3u_move_to_series">Move to Series</string>
+    <string name="m3u_move_back_to_live">Move back to Live TV</string>
+    <string name="m3u_series_name">Series name</string>
+    <string name="m3u_episode_number">Episode number</string>
+    <string name="m3u_season_number">Season number</string>
+    <string name="m3u_classify">Classify</string>
+    <string name="m3u_classification_saved">M3U classification saved</string>
+    <string name="m3u_category_rule_subtitle">Choose a default for this M3U group. Individual channels can still be overridden.</string>
+    <string name="m3u_keep_live">Keep as Live TV</string>
+    <string name="m3u_series_review_title">Organize series in %1$s</string>
+    <string name="m3u_series_review_subtitle">Review the automatic suggestions or assign each entry to a series, season, and episode.</string>
+    <string name="m3u_episode_unresolved">Episode number unresolved — it will remain flagged for correction.</string>
     <string name="category_pinned">Pinned %1$s.</string>
     <string name="category_unpinned">Unpinned %1$s.</string>
 
@@ -201,6 +224,8 @@
     <string name="settings_show_live_source_switcher_subtitle">Display the M3U source switcher inside Live TV browsing.</string>
     <string name="settings_show_all_channels_category">Show All Channels category</string>
     <string name="settings_show_all_channels_category_subtitle">Display the virtual All Channels group in Live TV and the EPG guide.</string>
+    <string name="settings_show_favorites_category">Show Favorites category</string>
+    <string name="settings_show_favorites_category_subtitle">Display the virtual Favorites group in Live TV browsing.</string>
     <string name="settings_show_recent_channels_category">Show Recent Channels category</string>
     <string name="settings_show_recent_channels_category_subtitle">Display recently watched channels in Live TV browsing and on the Home screen.</string>
     <string name="settings_live_channel_grouping_mode">Channel grouping</string>
@@ -209,6 +234,8 @@
     <string name="settings_live_channel_grouping_grouped_desc">Show one logical live channel with selectable variants.</string>
     <string name="settings_live_channel_grouping_raw_variants">Raw Variants</string>
     <string name="settings_live_channel_grouping_raw_variants_desc">Show every imported live stream as its own channel entry.</string>
+    <string name="settings_hide_decorative_live_rows">Hide decorative provider rows</string>
+    <string name="settings_hide_decorative_live_rows_subtitle">Hide non-playable section headers such as `#### GENERAL HD/4K ####` from Live TV lists and counts.</string>
     <string name="settings_grouped_channel_label_mode">Grouped label style</string>
     <string name="settings_grouped_channel_label_mode_subtitle">Control how grouped live channels are named in browse surfaces and overlays.</string>
     <string name="settings_grouped_channel_label_canonical">Canonical</string>
@@ -327,7 +354,7 @@
     <string name="settings_provider_category_controls_subtitle">Lock, unlock, hide, and restore categories for the current playlist from one place.</string>
     <string name="settings_provider_category_controls_search">Search categories...</string>
     <string name="settings_m3u_vod_classification_title">M3U VOD Classification</string>
-    <string name="settings_m3u_vod_classification_summary">Uses the M3U URL and group-title rules to move matching entries into Movies. Refresh after changing this to rearrange the playlist.</string>
+    <string name="settings_m3u_vod_classification_summary">Uses decoded URL evidence first, then localized group and title hints. Live-stream URLs stay in Live TV. Refresh after changing this to reclassify the playlist.</string>
     <string name="settings_m3u_vod_classification_refresh">Refresh Classification</string>
     <string name="settings_categories_title">Category Preferences</string>
     <string name="settings_categories_subtitle">Hide provider categories and keep their sort order exactly how you want it.</string>
@@ -362,8 +389,36 @@
     <string name="settings_browsing">Browsing</string>
     <string name="settings_live_tv_channel_mode">Live TV Channel Mode</string>
     <string name="settings_live_tv_channel_mode_subtitle">Choose how the Live TV browser should present channels and whether it should preview before playback.</string>
+    <string name="settings_top_navigation">Top navigation</string>
+    <string name="settings_top_navigation_dialog_title">Customize top navigation</string>
+    <string name="settings_top_navigation_dialog_subtitle">Choose which tabs appear and arrange them in the order you want. Settings always stays available.</string>
+    <string name="settings_top_navigation_landing_note">Only visible tabs can be used as the startup landing screen.</string>
+    <string name="settings_top_navigation_required">Always visible</string>
+    <string name="settings_top_navigation_visible">Visible</string>
+    <string name="settings_top_navigation_hidden">Hidden</string>
+    <string name="settings_top_navigation_move_up">Up</string>
+    <string name="settings_top_navigation_move_down">Down</string>
+    <string name="settings_top_navigation_default_updated">Default landing screen changed to %1$s because the previous tab is no longer visible.</string>
+    <string name="settings_customize_home">Customize Home</string>
+    <string name="settings_home_dashboard_dialog_title">Customize Home</string>
+    <string name="settings_home_dashboard_dialog_subtitle">Choose which shelves appear on Home and arrange them in the order you want. Empty shelves stay hidden until they have content.</string>
+    <string name="settings_home_dashboard_enabled_section">Visible on Home</string>
+    <string name="settings_home_dashboard_available_section">Available to add</string>
+    <string name="settings_home_dashboard_enabled_empty">Home is currently empty. Add shelves below to build your layout.</string>
+    <string name="settings_home_dashboard_add">Add</string>
+    <string name="settings_home_dashboard_remove">Remove</string>
     <string name="settings_default_landing_screen">Default landing screen</string>
     <string name="settings_select_default_landing_screen">Select default landing screen</string>
+    <string name="settings_startup_first_favorite_live">Play first favorite channel</string>
+    <string name="settings_startup_last_watched_live">Play last watched live channel</string>
+    <plurals name="settings_top_navigation_count">
+        <item quantity="one">%d tab</item>
+        <item quantity="other">%d tabs</item>
+    </plurals>
+    <plurals name="settings_home_dashboard_count">
+        <item quantity="one">%d shelf</item>
+        <item quantity="other">%d shelves</item>
+    </plurals>
     <string name="settings_live_tv_quick_filters">Live TV Quick Filters</string>
     <string name="settings_live_tv_quick_filters_none">None</string>
     <plurals name="settings_live_tv_quick_filters_count">
@@ -422,8 +477,12 @@
     <string name="settings_live_timeshift_depth">Local Live Rewind Depth</string>
     <string name="settings_live_timeshift_backend">Live Rewind Backend</string>
     <string name="settings_live_timeshift_backend_value">Automatic</string>
-    <string name="settings_live_timeshift_backend_subtitle">Prefers app storage for the local ring buffer and falls back to bounded memory when storage is unavailable.</string>
+    <string name="settings_live_timeshift_backend_subtitle">Choose whether local live rewind buffers to app storage or bounded memory. Automatic prefers storage and falls back to memory when the storage backend is constrained.</string>
+    <string name="settings_live_timeshift_backend_auto">Automatic</string>
+    <string name="settings_live_timeshift_backend_storage">Storage</string>
+    <string name="settings_live_timeshift_backend_memory">Memory</string>
     <string name="settings_select_live_timeshift_depth">Select Local Live Rewind Depth</string>
+    <string name="settings_select_live_timeshift_backend">Select Live Rewind Backend</string>
     <string name="settings_live_timeshift_depth_15">15 minutes</string>
     <string name="settings_live_timeshift_depth_30">30 minutes</string>
     <string name="settings_live_timeshift_depth_60">60 minutes</string>
@@ -511,8 +570,33 @@
     <string name="settings_vod_view_mode_classic">Classic</string>
     <string name="settings_vod_view_mode_classic_desc">Category list on the left with a stacked poster grid on the right.</string>
     <string name="settings_vod_infinite_scroll">Infinite scroll</string>
-    <string name="settings_vod_infinite_scroll_on">Auto-load more category rows as you scroll near the end.</string>
-    <string name="settings_vod_infinite_scroll_off">Show a Load more button to fetch the next batch of category rows.</string>
+    <string name="settings_vod_infinite_scroll_on">Load the next page as you scroll near the end.</string>
+    <string name="settings_vod_infinite_scroll_off">Show a Load more button for the next page.</string>
+    <string name="settings_vod_complete_on_open">Load entire VOD category on open</string>
+    <string name="settings_vod_complete_on_open_on">Fetch every Stalker page before finishing the initial load.</string>
+    <string name="settings_vod_complete_on_open_off">Show the first Stalker page immediately, then load more as needed.</string>
+    <string name="settings_vod_duplicate_handling_mode">VOD duplicate handling</string>
+    <string name="settings_vod_duplicate_handling_mode_subtitle">Choose whether movie versions stay separate or appear as grouped title variants.</string>
+    <string name="settings_vod_duplicate_handling_show_all">Show All Versions</string>
+    <string name="settings_vod_duplicate_handling_show_all_desc">Keep every provider movie entry visible exactly as imported.</string>
+    <string name="settings_vod_duplicate_handling_grouped">Group Duplicates</string>
+    <string name="settings_vod_duplicate_handling_grouped_desc">Group strong and likely movie matches into one title with selectable versions.</string>
+    <string name="settings_vod_duplicate_handling_smart">Smart Grouping</string>
+    <string name="settings_vod_duplicate_handling_smart_desc">Only group high-confidence matches so remakes and weak title matches stay separate.</string>
+    <string name="settings_vod_variant_preference_mode">Preferred VOD version</string>
+    <string name="settings_vod_variant_preference_mode_subtitle">Choose which version is selected first when duplicate movies are grouped.</string>
+    <string name="settings_vod_variant_preference_balanced">Balanced</string>
+    <string name="settings_vod_variant_preference_balanced_desc">Balance quality, recency, reliability, metadata, and rating.</string>
+    <string name="settings_vod_variant_preference_force_latest">Force Latest</string>
+    <string name="settings_vod_variant_preference_force_latest_desc">Prefer the newest release or title year first, then quality and reliability.</string>
+    <string name="settings_vod_variant_preference_best_quality">Best Quality</string>
+    <string name="settings_vod_variant_preference_best_quality_desc">Prefer tags like 4K, HDR, Remux, BluRay, HEVC, and high-resolution versions.</string>
+    <string name="settings_vod_variant_preference_latest_best_quality">Latest + Best Quality</string>
+    <string name="settings_vod_variant_preference_latest_best_quality_desc">Give strong weight to both recency and quality before using reliability as a tie-breaker.</string>
+    <string name="settings_vod_variant_preference_most_reliable">Most Reliable</string>
+    <string name="settings_vod_variant_preference_most_reliable_desc">Prefer versions with successful playback history and fewer failures.</string>
+    <string name="settings_vod_variant_preference_manual_last_choice">Manual Last Choice</string>
+    <string name="settings_vod_variant_preference_manual_last_choice_desc">Use the version you manually selected last, then fall back to balanced ranking.</string>
     <string name="vod_classic_categories_title">Categories</string>
     <string name="vod_classic_category_search">Search in categories</string>
     <string name="vod_classic_all">All</string>
@@ -521,10 +605,17 @@
     <string name="vod_classic_results_count">%1$d items</string>
     <string name="vod_classic_empty_category">No titles found in this section.</string>
     <string name="settings_decoder_mode">Decoder Mode</string>
+    <string name="settings_audio_decoder_mode">Audio Decoder Mode</string>
+    <string name="settings_video_decoder_mode">Video Decoder Mode</string>
     <string name="settings_decoder_auto">Auto (HW preferred)</string>
     <string name="settings_decoder_hardware">Hardware Only</string>
     <string name="settings_decoder_software">Prefer Software Decoder</string>
     <string name="settings_decoder_compatibility">Compatibility Mode</string>
+    <string name="settings_live_buffer_size">Live buffer size</string>
+    <string name="settings_live_buffer_auto">Auto</string>
+    <string name="settings_live_buffer_small">Small</string>
+    <string name="settings_live_buffer_medium">Medium</string>
+    <string name="settings_live_buffer_large">Large</string>
     <string name="settings_audio_output_mode">Audio Output</string>
     <string name="settings_audio_output_auto">Auto</string>
     <string name="settings_audio_output_prefer_passthrough">Prefer passthrough</string>
@@ -543,6 +634,8 @@
     <string name="settings_vod_http_protocol_auto">Auto (HTTP/2 when supported)</string>
     <string name="settings_close_app">Close app</string>
     <string name="settings_select_decoder_mode">Select Decoder Mode</string>
+    <string name="settings_select_audio_decoder_mode">Select Audio Decoder Mode</string>
+    <string name="settings_select_video_decoder_mode">Select Video Decoder Mode</string>
     <string name="settings_buffer_duration">Buffer Duration</string>
     <string name="settings_buffer_5s">5 seconds</string>
     <string name="settings_about">About</string>
@@ -578,6 +671,7 @@
     <string name="settings_update_download_started">Update download started. Install will be available when it finishes.</string>
     <string name="settings_update_download_unavailable">No downloadable update package is available for this release.</string>
     <string name="settings_update_install_action">Install update</string>
+    <string name="settings_update_install_permission_action">Allow installs, then retry</string>
     <string name="settings_update_install_started">Opening the package installer.</string>
     <string name="settings_update_view_release">Open latest release</string>
     <string name="settings_update_release_notes">Release page</string>
@@ -588,6 +682,7 @@
     <string name="settings_update_status_check_failed">Last check failed</string>
     <string name="settings_update_status_downloading">Downloading update</string>
     <string name="settings_update_status_ready_to_install">Ready to install</string>
+    <string name="settings_update_status_permission_required">Install permission required</string>
     <string name="settings_update_available_message">StreamVault %1$s is available.</string>
     <string name="settings_update_current_message">You already have the latest StreamVault release.</string>
     <string name="settings_syncing">Syncing data, please wait...</string>
@@ -641,6 +736,8 @@
     <string name="settings_sync_sections_success">Synced: %1$s.</string>
     <string name="settings_sync_sections_failed">Sync failed: %1$s.</string>
     <string name="settings_sync_sections_partial">Synced: %1$s. Failed: %2$s.</string>
+    <string name="settings_sync_cancelled">Sync cancelled.</string>
+    <string name="settings_sync_elapsed">Elapsed: %1$s</string>
     <string name="settings_edit">Edit</string>
     <string name="settings_delete">Delete</string>
     <string name="settings_pc_btn">Parental Control</string>
@@ -665,9 +762,19 @@
     <string name="settings_backup_share_failed">No app could receive the backup file.</string>
     <string name="settings_backup_choose_file_title">Choose a backup file</string>
     <string name="settings_backup_no_files_in_folder">No backup files (.json) found in that folder.</string>
+    <string name="settings_backup_no_local_files">No local StreamVault backups found. Export one first or open a backup file with StreamVault.</string>
     <string name="settings_backup_folder_picker_unavailable">No folder picker is available on this device.</string>
     <string name="settings_backup_folder_create_failed">Could not create the backup file in that folder.</string>
     <string name="settings_backup_folder_read_failed">Could not read that folder.</string>
+    <string name="settings_backup_picker_free_saved">Backup saved locally. On supported TVs it is in Downloads/StreamVault; open it with a file manager.</string>
+    <string name="settings_backup_picker_free_failed">Could not save the backup without a file picker.</string>
+    <string name="settings_manage_local_backups">Manage local backups</string>
+    <string name="settings_manage_local_backups_subtitle">Review and delete backups created by StreamVault.</string>
+    <string name="settings_backup_no_managed_files">No StreamVault-created local backups found.</string>
+    <string name="settings_backup_delete_title">Delete backup?</string>
+    <string name="settings_backup_delete_body">Delete “%1$s” permanently?</string>
+    <string name="settings_backup_deleted">Local backup deleted.</string>
+    <string name="settings_backup_delete_failed">Could not delete that backup file.</string>
     <string name="settings_crash_reports_title">Crash Reports</string>
     <string name="settings_crash_reports_subtitle">Fatal crashes are saved locally only when the app is already crashing. You can review or share the latest report.</string>
     <string name="settings_crash_report_latest">Latest crash</string>
@@ -687,6 +794,7 @@
     <string name="settings_restore_subtitle">Choose a backup file, or open a backup with StreamVault from a file manager.</string>
     <string name="settings_backup_preview_title">Review Backup Import</string>
     <string name="settings_backup_preview_subtitle">Backup version %1$d detected. Choose what to import before making changes.</string>
+    <string name="settings_backup_preview_scroll_hint">Use ↑/↓ on the remote to scroll</string>
     <string name="settings_backup_conflict_strategy">Conflict strategy</string>
     <string name="settings_backup_keep_existing">Keep Existing</string>
     <string name="settings_backup_replace_existing">Replace Existing</string>
@@ -721,6 +829,7 @@
     <string name="settings_retry_series">Retry Series</string>
     <string name="settings_status_active">Active</string>
     <string name="settings_status_partial">Partial</string>
+    <string name="settings_status_requires_attention">Requires attention</string>
     <string name="settings_status_error">Error</string>
     <string name="settings_status_expired">Expired</string>
     <string name="settings_status_disabled">Disabled</string>
@@ -908,6 +1017,11 @@
     <string name="search_no_provider_title">No active provider</string>
     <string name="search_no_provider_subtitle">Add or activate a provider before searching the library.</string>
     <string name="search_results_title">%1$d results</string>
+    <string name="search_catalog_downloaded_only">Downloaded items only. Build the complete search index to search the full portal catalog.</string>
+    <string name="search_catalog_indexing">The complete search index is being built. Results are still partial.</string>
+    <string name="search_catalog_truncated">The portal catalog was truncated. Results may be incomplete.</string>
+    <string name="search_catalog_complete">Complete catalog index</string>
+    <string name="search_build_complete_index">Build complete search index once</string>
     <string name="search_results_count">%1$s %2$d</string>
     <string name="search_live_tv">Live TV</string>
     <string name="search_all">All</string>
@@ -943,7 +1057,7 @@
     <string name="setup_update_desc">Update your IPTV provider details</string>
     <string name="setup_add_desc">Add your IPTV provider</string>
     <string name="setup_shell_eyebrow">Provider Onboarding</string>
-    <string name="setup_shell_subtitle">Use Xtream or M3U. You can change it later.</string>
+    <string name="setup_shell_subtitle">Choose an available service. You can change it later.</string>
     <string name="setup_form_subtitle">Choose a source, enter the details, and continue. You can manage it later from Settings.</string>
     <string name="setup_source_type_label">Source Type</string>
     <string name="setup_info_xtream_title">Use Xtream when credentials are available</string>
@@ -984,7 +1098,7 @@
     <string name="setup_advanced_options_show">Show</string>
     <string name="setup_advanced_options_hide">Hide</string>
     <string name="setup_m3u_vod_classification_label">M3U VOD Classification</string>
-    <string name="setup_m3u_vod_classification_helper">M3U only. Use playlist URL and group-title heuristics to sort matching entries into Movies instead of Live TV.</string>
+    <string name="setup_m3u_vod_classification_helper">M3U only. Classify decoded movie URLs and localized group or title hints as Movies; recognized live-stream URLs remain in Live TV.</string>
     <string name="setup_xtream_live_sync_mode_label">Xtream Live Sync</string>
     <string name="setup_xtream_live_sync_mode_helper">Choose how Live TV channels are fetched. Auto protects weak devices and routine refreshes while keeping categories populated.</string>
     <string name="setup_xtream_live_sync_mode_auto_title">Auto</string>
@@ -1020,6 +1134,15 @@
     <string name="setup_discard_draft_cancel">Keep editing</string>
     <string name="setup_validating">Validating...</string>
     <string name="setup_add">Add Playlist</string>
+    <string name="setup_tab_jellyfin">Jellyfin</string>
+    <string name="setup_jellyfin_quick_connect">Quick Connect</string>
+    <string name="setup_jellyfin_quick_connect_code">Code: %s</string>
+    <string name="setup_jellyfin_quick_connect_code_instructions">Open your Jellyfin server in a browser and enter this code, or scan the QR code with your phone.</string>
+    <string name="setup_server_url">Server URL</string>
+    <string name="setup_username">Username</string>
+    <string name="setup_password">Password</string>
+    <string name="setup_name">Name</string>
+    <string name="setup_name_placeholder">My Jellyfin Server</string>
 
     
     <string name="player_buffering">Buffering...</string>
@@ -1092,6 +1215,24 @@
     <string name="player_muted_badge">Muted</string>
     <string name="player_cast">Cast</string>
     <string name="player_stop_casting">Stop Casting</string>
+    <string name="cast_button_label">Cast</string>
+    <string name="cast_launching">Casting...</string>
+    <string name="cast_started">Casting to the connected device.</string>
+    <string name="cast_disconnected">Cast session disconnected.</string>
+    <string name="cast_unavailable">Google Cast is unavailable on this device.</string>
+    <string name="cast_stream_unsupported">This stream format is not supported by Google Cast.</string>
+    <string name="cast_protocol_unsupported">RTSP and RTMP streams are not supported for casting.</string>
+    <string name="cast_drm_unsupported">DRM-protected streams are not supported by Google Cast in this app.</string>
+    <string name="cast_item_unavailable">This item cannot be sent to a Cast receiver.</string>
+    <string name="cast_local_url_unsupported">This stream uses a local or device-only URL that Chromecast cannot reach directly.</string>
+    <string name="cast_headers_unsupported">This stream needs HTTP headers or cookies that Chromecast cannot use directly.</string>
+    <string name="cast_user_agent_unsupported">This stream needs a custom User-Agent that Chromecast cannot use directly.</string>
+    <string name="cast_proxy_unsupported">This stream needs the app proxy settings, so Chromecast cannot use it directly.</string>
+    <string name="cast_invalid_ssl_unsupported">This stream uses SSL handling that Chromecast cannot use directly.</string>
+    <string name="cast_session_failed">The Cast session could not be started.</string>
+    <string name="cast_load_failed">The Cast receiver could not load this stream.</string>
+    <string name="cast_receiver_unavailable">The connected Cast receiver is not ready for playback.</string>
+    <string name="cast_selection_cancelled">Cast device selection was cancelled.</string>
     <string name="player_unmute">Unmute</string>
     <string name="player_picture_in_picture">Picture in picture</string>
     <string name="player_pip_short">PiP</string>
@@ -1150,6 +1291,8 @@
     <string name="player_diagnostics_provider">Provider</string>
     <string name="player_diagnostics_source">Source</string>
     <string name="player_diagnostics_decoder">Decoder</string>
+    <string name="player_diagnostics_audio_decoder_mode">Audio Decoder Mode</string>
+    <string name="player_diagnostics_video_decoder_mode">Video Decoder Mode</string>
     <string name="player_diagnostics_active_decoder">Active Decoder</string>
     <string name="player_diagnostics_surface">Surface</string>
     <string name="player_diagnostics_policy_guard">Policy Guard</string>
@@ -1302,6 +1445,7 @@
     <string name="epg_filter_hint">Choose another category or refresh the guide.</string>
     <string name="epg_title">TV Guide</string>
     <string name="epg_catchup_available">Catch-up available (%1$d days)</string>
+    <string name="epg_catchup_available_unknown">Catch-up available</string>
     <string name="epg_archive_ready_hint">Archive or catch-up playback should be available for this program.</string>
     <string name="epg_archive_provider_hint">This provider supports catch-up for the channel, but this program is not marked archive-ready in the current guide window.</string>
     <string name="epg_archive_unavailable_hint">Archive playback is not available for this channel.</string>
@@ -1327,6 +1471,10 @@
     <string name="epg_provider_troubleshooting_no_archive">This channel is not flagged as archive-ready by the provider.</string>
     <string name="epg_provider_troubleshooting_missing_template">Replay may fail because the provider exposed catch-up support without a usable replay template.</string>
     <string name="epg_provider_troubleshooting_missing_stream_id">Replay may fail because the provider did not expose a replay stream identifier.</string>
+    <string name="epg_provider_troubleshooting_incomplete_metadata">Replay may fail because the provider advertises catch-up without enough playback metadata.</string>
+    <string name="epg_provider_troubleshooting_xtream_ready">Xtream replay metadata is present; playback will use the channel stream id and selected archive window.</string>
+    <string name="epg_provider_troubleshooting_stalker_ready">Portal archive metadata is present; playback will request an archive link for the selected window.</string>
+    <string name="epg_provider_troubleshooting_m3u_best_effort">M3U replay is best effort and depends on the playlist catch-up template.</string>
     <string name="epg_provider_troubleshooting_ready">Replay metadata is present, but the provider may still reject this specific program window.</string>
     <string name="epg_provider_troubleshooting_stale">Guide freshness is low, so replay mapping may still be incomplete until the guide refreshes.</string>
 
@@ -1375,6 +1523,7 @@
     <string name="series_unwatched_badge">%1$d left to finish</string>
     <string name="series_detail_resume">Resume · Season %1$d Ep %2$d · %3$s</string>
     <string name="series_detail_play_episode">Play · Season %1$d Ep %2$d</string>
+    <string name="series_detail_versions">Versions</string>
     <string name="stream_url_copy">Copy URL</string>
     <string name="stream_url_copied">Stream URL copied</string>
     <string name="stream_url_copy_failed">Could not resolve stream URL</string>
@@ -1389,6 +1538,7 @@
     <string name="movie_detail_back">Back to library</string>
     <string name="movie_detail_play">Play</string>
     <string name="movie_detail_resume_from">Resume from %1$s</string>
+    <string name="movie_detail_versions">Versions</string>
     <string name="movie_detail_trailer">Trailer</string>
     <string name="movie_detail_related">More Like This</string>
     <string name="favorites_add">Add to favourites</string>
@@ -1528,6 +1678,8 @@
     <string name="dashboard_resume_episode">Resume episode</string>
     <string name="dashboard_resume_live">Resume</string>
     <string name="dashboard_continue_watching">Continue Watching</string>
+    <string name="dashboard_continue_watching_movies">Continue Watching Movies</string>
+    <string name="dashboard_continue_watching_series">Continue Watching Series</string>
     <string name="dashboard_jump_back_live">Jump back into live TV</string>
     <string name="dashboard_watch_live">Watch Live</string>
     <string name="dashboard_fresh_movie_pick">Fresh movie pick</string>
@@ -1594,7 +1746,17 @@
     <string name="settings_drive_push">Send to Drive</string>
     <string name="settings_drive_push_subtitle">Upload the current configuration to your Drive backup.</string>
     <string name="settings_drive_pull">Restore from Drive</string>
-    <string name="settings_drive_pull_subtitle">Download the latest Drive backup and preview the import.</string>
+    <string name="settings_drive_pull_subtitle">Choose a Drive backup and preview the import.</string>
+    <string name="settings_drive_choose_backup_title">Choose a Drive backup</string>
+    <string name="settings_drive_choose_backup_subtitle">Select a saved snapshot to preview and restore.</string>
+    <string name="settings_drive_cancel_backup_choice">Cancel backup choice</string>
+    <string name="settings_drive_cancel_backup_choice_subtitle">Return to the Drive backup actions.</string>
+    <string name="settings_drive_unknown_backup_date">Date unavailable</string>
+    <string name="settings_drive_backup_size_unknown">Size unavailable</string>
+    <string name="settings_manage_drive_backups">Manage Drive backups</string>
+    <string name="settings_manage_drive_backups_subtitle">Review or delete saved Drive snapshots.</string>
+    <string name="settings_drive_manage_title">Saved Drive backups</string>
+    <string name="settings_drive_manage_subtitle">Delete only snapshots you no longer need.</string>
     <string name="settings_drive_last_push">Pushed: %1$s</string>
     <string name="settings_drive_last_pull">Pulled: %1$s</string>
     <string name="settings_drive_never_synced">Never synced yet</string>
@@ -1663,4 +1825,19 @@
     <string name="settings_remote_selection_global_default">Use global default: %1$s</string>
     <string name="settings_remote_dialog_title">%1$s action</string>
     <string name="settings_remote_dialog_subtitle">Choose what this colored button should do in %1$s.</string>
+    <string name="stalker_transport_invalid_tls_title" translatable="false">This provider\'s security certificate can\'t be verified</string>
+    <string name="stalker_transport_invalid_tls_body" translatable="false">The connection to %1$s may still be encrypted, but the app can\'t confirm it is really this provider. Someone on the network could read your login or stream details.</string>
+    <string name="stalker_transport_http_title" translatable="false">This provider uses an unencrypted connection</string>
+    <string name="stalker_transport_http_body" translatable="false">Your login and viewing requests to %1$s can be read or changed by someone on the network.</string>
+    <string name="stalker_transport_origin_changed_title" translatable="false">This provider wants to use a different address</string>
+    <string name="stalker_transport_origin_changed_body" translatable="false">The provider redirected the connection to %1$s. Continue only if you recognize this address.</string>
+    <string name="stalker_transport_go_back" translatable="false">Go back</string>
+    <string name="stalker_transport_connect_anyway" translatable="false">Connect anyway</string>
+    <string name="stalker_verification_inconclusive_title" translatable="false">Live TV could not be verified</string>
+    <string name="stalker_verification_inconclusive_body" translatable="false">The provider accepted your login, but the Live TV check did not finish. You can save it with verification pending; it will remain inactive until a sync confirms playable Live TV.</string>
+    <string name="stalker_save_without_verification" translatable="false">Save without verification</string>
+    <string name="stalker_repair_connection" translatable="false">Repair connection</string>
+    <string name="nav_vod">VOD</string>
+    <string name="vod_unavailable_title">VOD is unavailable</string>
+    <string name="vod_unavailable_subtitle">This provider exposes separate Movies and Series catalogs.</string>
 </resources>

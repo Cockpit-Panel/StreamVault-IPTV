@@ -14,28 +14,48 @@ import com.streamvault.domain.model.StalkerMagPreset
 import com.streamvault.domain.model.StalkerPlaybackBackendHint
 import com.streamvault.domain.model.StalkerPortalFingerprint
 import com.streamvault.domain.model.StalkerPortalProfile
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerTransportGrant
+import com.streamvault.domain.model.DiscoveryBudget
 import com.streamvault.domain.util.StreamEntryUrlPolicy
+import com.streamvault.data.util.runSuspendCatching
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.URI
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
+import java.time.ZonedDateTime
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeFormatterBuilder
 import java.time.format.ResolverStyle
 import java.util.Base64
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -50,38 +70,116 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 @Singleton
 class OkHttpStalkerApiService @Inject constructor(
     private val okHttpClient: OkHttpClient,
-    private val json: Json
+    private val json: Json,
+    private val transportFactory: StalkerTransportFactory = StalkerTransportFactory(okHttpClient),
+    private val requestCoordinator: StalkerRequestCoordinator = StalkerRequestCoordinator()
 ) : StalkerApiService {
-    private val cookieJar = InMemoryStalkerCookieJar()
-    private val stalkerHttpClient: OkHttpClient = okHttpClient.newBuilder()
-        .cookieJar(cookieJar)
-        .build()
+    private class DirectCreateLinkResponse(val playbackUrl: String) : IOException()
+
+    private data class SessionScope(
+        val cookieJar: InMemoryStalkerCookieJar = InMemoryStalkerCookieJar(),
+        @Volatile var macQueryRequired: Boolean = false,
+        @Volatile var lastAccessAt: Long = System.currentTimeMillis()
+    )
+
+    private val sessionScopes = ConcurrentHashMap<String, SessionScope>()
+    private val stalkerHttpClients = ConcurrentHashMap<String, OkHttpClient>()
+    private val resolvedLoadUrls = ConcurrentHashMap<String, String>()
+    private val scopeAliases = ConcurrentHashMap<String, String>()
+    private val nextAuthEpoch = AtomicLong(System.currentTimeMillis())
 
     override suspend fun authenticate(profile: StalkerDeviceProfile): Result<Pair<StalkerSession, StalkerProviderProfile>> {
+        profile.discoveryRuntime.begin()
+        val authProfile = profile.copy(authEpoch = nextAuthEpoch.incrementAndGet())
+        return try {
+            // Each network call is capped by the remaining wall-time and consumeRequest checks
+            // elapsed time before dispatch. Avoid a second coroutine timer here: virtual-time
+            // dispatchers can otherwise race an already-completed OkHttp callback.
+            authenticateWithinBudget(authProfile).also { result ->
+                if (result is Result.Success) {
+                    scopeAliases[sessionScopeAliasKey(profile)] = result.data.first.sessionScopeKey
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: StalkerApiError) {
+            Result.error(error.message.orEmpty(), error)
+        } catch (error: IOException) {
+            Result.error(error.message ?: "Failed to connect to portal.", error)
+        } finally {
+            profile.discoveryRuntime.end()
+        }
+    }
+
+    private suspend fun authenticateWithinBudget(
+        profile: StalkerDeviceProfile
+    ): Result<Pair<StalkerSession, StalkerProviderProfile>> {
         var lastError: Throwable? = null
+        val failedHandshakeAttempts = mutableSetOf<String>()
+        val hintedLoadUrls = probePortalBaseHintCandidates(profile)
         val authModes = candidateAuthModes(profile)
         for (effectiveAuthMode in authModes) {
-            for (attempt in candidateAuthAttempts(profile, effectiveAuthMode)) {
+            val attempts = ArrayDeque(candidateAuthAttempts(profile, effectiveAuthMode, hintedLoadUrls))
+            val retriedPartialAuthorization = mutableSetOf<String>()
+            while (attempts.isNotEmpty()) {
+                val attempt = attempts.removeFirst()
                 val recipeIndex = attempt.recipeIndex
                 val recipe = attempt.recipe
-                val loadUrl = attempt.loadUrl
-                    cookieJar.clear()
-                    val referer = StalkerUrlFactory.portalReferer(loadUrl)
+                var loadUrl = attempt.loadUrl
+                var endpointFamily = endpointPreferenceFor(loadUrl).name
+                val profileLabel = StalkerCompatibilityRegistry.find(recipe.compatibilityProfileId)
+                    ?.displayName ?: recipe.compatibilityProfileId
+                profile.onProgress?.invoke("Trying $profileLabel")
+                StalkerTelemetry.authenticationAttempt(
+                    profile.providerId,
+                    recipe.compatibilityProfileId,
+                    endpointFamily,
+                    "HANDSHAKE",
+                    "STARTED"
+                )
+                val handshakeAttemptKey = listOf(
+                    loadUrl,
+                    effectiveAuthMode.name,
+                    recipe.recipe.name,
+                    recipe.compatibilityProfileId,
+                    profile.cookieMode.name,
+                    profile.endpointPreference.name,
+                    hashDiscoveryHeaderPolicy(profile),
+                    profile.transportGrant?.origin?.authority.orEmpty(),
+                    profile.transportGrant?.spkiSha256.orEmpty(),
+                    profile.transportGrant?.consentedAt?.toString().orEmpty()
+                ).joinToString("|")
+                if (handshakeAttemptKey in failedHandshakeAttempts) {
+                    continue
+                }
+                    var referer = StalkerUrlFactory.portalReferer(loadUrl)
                     val evidence = mutableListOf<String>()
                     val recipeEvidence = mutableListOf("recipe:${recipe.recipe.name}", "preset:${recipe.magPreset.name}")
                     val attemptProfile = profile.withRecipe(recipe, effectiveAuthMode)
-                    val handshakePayload = runCatching {
+                    val sessionScope = sessionScopeFor(attemptProfile)
+                    sessionScope.cookieJar.clear()
+                    val cookieJar = sessionScope.cookieJar
+                    // Compatibility discovery is per authentication scope. A portal may
+                    // change its request contract between profiles/endpoints, so do not
+                    // carry a MAC-query decision across a fresh authentication attempt.
+                    sessionScope.macQueryRequired = false
+                    val handshakePayload = runSuspendCatching {
                         requestJson(
                             url = loadUrl,
                             profile = attemptProfile,
@@ -94,44 +192,81 @@ class OkHttpStalkerApiService @Inject constructor(
                             )
                         )
                     }.getOrElse { error ->
-                        lastError = error
+                        if (error is CancellationException) throw error
+                        failedHandshakeAttempts += handshakeAttemptKey
+                        StalkerTelemetry.authenticationAttempt(
+                            profile.providerId,
+                            recipe.compatibilityProfileId,
+                            endpointFamily,
+                            "HANDSHAKE",
+                            authenticationFailureOutcome(error)
+                        )
+                        if (error.isTerminalStalkerDiscoveryFailure()) return Result.error(error.message.orEmpty(), error)
+                        lastError = preferredAuthenticationFailure(lastError, error)
                         continue
                     }
-                    evidence += "handshake"
                     val token = handshakePayload.findString("token")
                         ?.takeIf { it.isNotBlank() }
                         ?: run {
                             lastError = IOException("Portal handshake did not return a token.")
                             continue
                         }
+                    val handshakeRandom = handshakePayload.findString("random").orEmpty()
+                    resolvedLoadUrl(loadUrl, attemptProfile)?.let { redirectedLoadUrl ->
+                        loadUrl = redirectedLoadUrl
+                        referer = StalkerUrlFactory.portalReferer(redirectedLoadUrl)
+                        endpointFamily = endpointPreferenceFor(redirectedLoadUrl).name
+                        evidence += "endpoint_redirect"
+                    }
+                    evidence += "handshake"
+                    profile.onProgress?.invoke("Handshake accepted")
+                    StalkerTelemetry.authenticationAttempt(
+                        profile.providerId,
+                        recipe.compatibilityProfileId,
+                        endpointFamily,
+                        "HANDSHAKE",
+                        "ACCEPTED"
+                    )
 
                     if (recipe.authMode.requiresCredentials()) {
                         if (attemptProfile.username.isBlank()) {
                             lastError = IOException("Portal requires account credentials for this connection.")
                             continue
                         }
-                        val authPayload = runCatching {
+                        val authPayload = runSuspendCatching {
                             requestCredentialAuth(
                                 url = loadUrl,
                                 profile = attemptProfile,
                                 referer = referer,
-                                token = token
+                                token = token,
+                                allowAlternateEndpointRetry = false
                             )
                         }.getOrElse { error ->
-                            lastError = error
+                            if (error is CancellationException) throw error
+                            StalkerTelemetry.authenticationAttempt(
+                                profile.providerId,
+                                recipe.compatibilityProfileId,
+                                endpointFamily,
+                                "CREDENTIALS",
+                                authenticationFailureOutcome(error)
+                            )
+                            if (error.isTerminalStalkerDiscoveryFailure()) return Result.error(error.message.orEmpty(), error)
+                            lastError = preferredAuthenticationFailure(lastError, error)
                             continue
                         }
-                        evidence += "do_auth"
                         authPayload.ensureNoPortalError()
+                        evidence += "do_auth"
                     }
 
                     var session = StalkerSession(
                         loadUrl = loadUrl,
                         portalReferer = referer,
-                        token = token
+                        token = token,
+                        authEpoch = attemptProfile.authEpoch,
+                        sessionScopeKey = sessionScopeKey(attemptProfile)
                     )
                     if (recipe.preferLocalizationBeforeProfile) {
-                        runCatching {
+                        runSuspendCatching {
                             requestJson(
                                 url = loadUrl,
                                 profile = attemptProfile,
@@ -143,25 +278,52 @@ class OkHttpStalkerApiService @Inject constructor(
                                     "JsHttpRequest" to "1-xml"
                                 )
                             )
-                        }.getOrNull()?.let {
+                        }.getOrNullPreservingCancellation()?.let {
                             evidence += "get_localization"
                         }
                     }
-                    val profilePayload = runCatching {
+                    val profilePayload = runSuspendCatching {
                         requestJson(
                             url = loadUrl,
                             profile = attemptProfile,
                             referer = referer,
                             token = token,
-                            query = buildProfileQuery(attemptProfile)
+                            query = buildProfileQuery(
+                                profile = attemptProfile,
+                                handshakeRandom = handshakeRandom
+                            )
                         )
                     }.getOrElse { error ->
-                        lastError = error
+                        if (error is CancellationException) throw error
+                        StalkerTelemetry.authenticationAttempt(
+                            profile.providerId,
+                            recipe.compatibilityProfileId,
+                            endpointFamily,
+                            "PROFILE",
+                            authenticationFailureOutcome(error)
+                        )
+                        if (error.isTerminalStalkerDiscoveryFailure()) return Result.error(error.message.orEmpty(), error)
+                        lastError = preferredAuthenticationFailure(lastError, error)
                         continue
                     }
+                    profilePayload.ensureNoPortalError()
                     evidence += "get_profile"
+                    profile.onProgress?.invoke(
+                        if (profile.requireCatalogValidation) {
+                            "Profile accepted; checking catalog"
+                        } else {
+                            "Profile accepted"
+                        }
+                    )
+                    StalkerTelemetry.authenticationAttempt(
+                        profile.providerId,
+                        recipe.compatibilityProfileId,
+                        endpointFamily,
+                        "PROFILE",
+                        "ACCEPTED"
+                    )
 
-                    var providerProfile = profilePayload.toProviderProfile()
+                    var providerProfile = profilePayload.toProviderProfile(profile.timezone)
                     var bootstrapStrategy = when (recipe.recipe) {
                         StalkerBootstrapRecipe.GENERIC_SAFE -> StalkerBootstrapStrategy.AUTO
                         StalkerBootstrapRecipe.LEGACY_MAG -> StalkerBootstrapStrategy.MAC_ONLY
@@ -173,7 +335,7 @@ class OkHttpStalkerApiService @Inject constructor(
                         StalkerBootstrapRecipe.MODULE_GATED -> StalkerBootstrapStrategy.MAC_WITH_MODULES
                     }
                     if (recipe.requestAccountInfo || providerProfile.shouldRequestAccountInfo()) {
-                        runCatching {
+                        runSuspendCatching {
                             requestJson(
                                 url = loadUrl,
                                 profile = attemptProfile,
@@ -185,14 +347,14 @@ class OkHttpStalkerApiService @Inject constructor(
                                     "JsHttpRequest" to "1-xml"
                                 )
                             )
-                        }.getOrNull()?.let { accountInfoPayload ->
-                            providerProfile = providerProfile.merge(accountInfoPayload.toProviderProfile())
+                        }.getOrNullPreservingCancellation()?.let { accountInfoPayload ->
+                            providerProfile = providerProfile.merge(accountInfoPayload.toProviderProfile(profile.timezone))
                             bootstrapStrategy = StalkerBootstrapStrategy.MAC_WITH_ACCOUNT_INFO
                             evidence += "get_account_info"
                         }
                     }
                     if (recipe.requestLocalization && "get_localization" !in evidence) {
-                        runCatching {
+                        runSuspendCatching {
                             requestJson(
                                 url = loadUrl,
                                 profile = attemptProfile,
@@ -204,12 +366,12 @@ class OkHttpStalkerApiService @Inject constructor(
                                     "JsHttpRequest" to "1-xml"
                                 )
                             )
-                        }.getOrNull()?.let {
+                        }.getOrNullPreservingCancellation()?.let {
                             evidence += "get_localization"
                         }
                     }
                     if (recipe.requestModules || providerProfile.shouldRequestModules()) {
-                        runCatching {
+                        runSuspendCatching {
                             requestJson(
                                 url = loadUrl,
                                 profile = attemptProfile,
@@ -221,7 +383,7 @@ class OkHttpStalkerApiService @Inject constructor(
                                     "JsHttpRequest" to "1-xml"
                                 )
                             )
-                        }.getOrNull()?.let { modulesPayload ->
+                        }.getOrNullPreservingCancellation()?.let { modulesPayload ->
                             val modules = modulesPayload.toModuleNames()
                             if (modules.isNotEmpty()) {
                                 bootstrapStrategy = StalkerBootstrapStrategy.MAC_WITH_MODULES
@@ -233,7 +395,7 @@ class OkHttpStalkerApiService @Inject constructor(
                     if ((recipe.strictIdentityRequired || recipe.playbackBackendHint == StalkerPlaybackBackendHint.TEMP_LINK_STRICT) &&
                         "get_events" !in evidence
                     ) {
-                        runCatching {
+                        runSuspendCatching {
                             requestJson(
                                 url = loadUrl,
                                 profile = attemptProfile,
@@ -245,9 +407,103 @@ class OkHttpStalkerApiService @Inject constructor(
                                     "JsHttpRequest" to "1-xml"
                                 )
                             )
-                        }.getOrNull()?.let {
+                        }.getOrNullPreservingCancellation()?.let {
                             evidence += "get_events"
                         }
+                    }
+
+                    if (profile.requireCatalogValidation) {
+                        val catalogEvidence = runSuspendCatching {
+                            validateCatalogAcceptance(session, attemptProfile)
+                        }.getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            if (error is StalkerApiError.PartialAuthorization) {
+                                val retryKey = "${effectiveAuthMode.name}|${attempt.recipe.compatibilityProfileId}|$loadUrl"
+                                val reportedProfile = StalkerCompatibilityRegistry.findVerifiedByModelSignal(
+                                    providerProfile.reportedStbType
+                                )
+                                if (profile.allowCompatibilityDiscovery &&
+                                    reportedProfile != null &&
+                                    reportedProfile.id != recipe.compatibilityProfileId
+                                ) {
+                                    promoteCompatibilityAttempt(
+                                        attempts = attempts,
+                                        compatibilityProfileId = reportedProfile.id,
+                                        loadUrl = attempt.loadUrl
+                                    )
+                                    profile.onProgress?.invoke(
+                                        "Portal reports ${reportedProfile.displayName}; validating that profile"
+                                    )
+                                    StalkerTelemetry.authenticationAttempt(
+                                        profile.providerId,
+                                        recipe.compatibilityProfileId,
+                                        endpointFamily,
+                                        "CATALOG",
+                                        "MODEL_SIGNAL"
+                                    )
+                                    lastError = preferredAuthenticationFailure(lastError, error)
+                                    continue
+                                }
+                                if (error.requiresFreshSessionRetry() &&
+                                    retriedPartialAuthorization.add(retryKey)
+                                ) {
+                                    attempts.addFirst(attempt)
+                                    profile.onProgress?.invoke("Catalog authorization rejected; retrying fresh session")
+                                    StalkerTelemetry.authenticationAttempt(
+                                        profile.providerId,
+                                        recipe.compatibilityProfileId,
+                                        endpointFamily,
+                                        "CATALOG",
+                                        "FRESH_SESSION_RETRY"
+                                    )
+                                    lastError = preferredAuthenticationFailure(lastError, error)
+                                    continue
+                                }
+                                Log.w(
+                                    TAG,
+                                    "Stalker partial authorization host=${runCatching { URI(loadUrl).host }.getOrNull().orEmpty()} " +
+                                        "profile=${attempt.recipe.compatibilityProfileId}; fresh-session retry rejected"
+                                )
+                                StalkerTelemetry.authenticationAttempt(
+                                    profile.providerId,
+                                    recipe.compatibilityProfileId,
+                                    endpointFamily,
+                                    "CATALOG",
+                                    "PARTIAL_AUTHORIZATION"
+                                )
+                                lastError = preferredAuthenticationFailure(lastError, error)
+                                if (profile.allowCompatibilityDiscovery) {
+                                    profile.onProgress?.invoke(
+                                        "Catalog rejected $profileLabel; trying another compatibility profile"
+                                    )
+                                    continue
+                                }
+                                return Result.error(error.message.orEmpty(), error)
+                            }
+                            if (error.isInconclusiveLiveReadinessFailure()) {
+                                val inconclusive = StalkerApiError.ReadinessInconclusive(
+                                    evidenceCode = error.liveReadinessEvidenceCode(),
+                                    cause = error
+                                )
+                                return Result.error(inconclusive.message.orEmpty(), inconclusive)
+                            }
+                            if (error.isDefinitiveLiveReadinessFailure()) {
+                                return Result.error(error.message.orEmpty(), error)
+                            }
+                            if (error.isTerminalStalkerDiscoveryFailure()) {
+                                return Result.error(error.message.orEmpty(), error)
+                            }
+                            lastError = preferredAuthenticationFailure(lastError, error)
+                            continue
+                        }
+                        evidence += catalogEvidence
+                        StalkerTelemetry.authenticationAttempt(
+                            profile.providerId,
+                            recipe.compatibilityProfileId,
+                            endpointFamily,
+                            "CATALOG",
+                            "ACCEPTED"
+                        )
                     }
 
                     val fingerprint = detectPortalFingerprint(
@@ -327,10 +583,20 @@ class OkHttpStalkerApiService @Inject constructor(
                             moduleRestricted = providerProfile.moduleNames.isNotEmpty(),
                             ambiguousAccountState = ambiguousState
                         ),
-                        ambiguousState = ambiguousState
+                        ambiguousState = ambiguousState,
+                        compatibilityProfileId = recipe.compatibilityProfileId,
+                        profileRevision = StalkerCompatibilityRegistry.REVISION,
+                        profileVerification = StalkerCompatibilityRegistry.find(recipe.compatibilityProfileId)
+                            ?.verification ?: com.streamvault.domain.model.StalkerProfileVerification.UNVERIFIED,
+                        protocolFamily = com.streamvault.domain.model.StalkerProtocolFamily.CLASSIC_MAG
                     )
                     session = session.copy(
                         serverCookieHeader = cookieJar.cookieHeaderFor(loadUrl),
+                        authenticatedAtMillis = System.currentTimeMillis(),
+                        expiresAtMillis = listOfNotNull(
+                            System.currentTimeMillis() + STALKER_SESSION_MAX_AGE_MILLIS,
+                            providerProfile.expirationDate?.takeIf { it > System.currentTimeMillis() }
+                        ).minOrNull(),
                         effectiveAuthMode = effectiveAuthMode,
                         portalProfile = portalProfile,
                         portalFingerprint = fingerprint,
@@ -339,7 +605,8 @@ class OkHttpStalkerApiService @Inject constructor(
                         fingerprintEvidence = fingerprintEvidence,
                         bootstrapEvidence = evidence.toList(),
                         recipeEvidence = recipeEvidence.toList(),
-                        rediscoveryAttempted = rediscoveryAttempted
+                        rediscoveryAttempted = rediscoveryAttempted,
+                        compatibilityProfileId = recipe.compatibilityProfileId
                     )
                     Log.i(
                         TAG,
@@ -458,7 +725,7 @@ class OkHttpStalkerApiService @Inject constructor(
                 put("JsHttpRequest", "1-xml")
                 categoryId?.takeIf { it.isNotBlank() }?.let { put("category", it) }
             }
-        ).filterNot { it.isSeries }
+        )
     }
 
     override suspend fun getVodStreamsPage(
@@ -477,7 +744,7 @@ class OkHttpStalkerApiService @Inject constructor(
                 put("JsHttpRequest", "1-xml")
                 categoryId?.takeIf { it.isNotBlank() }?.let { put("category", it) }
             }
-        ).let { paged -> paged.copy(items = paged.items.filterNot { it.isSeries }) }
+        )
     }
 
     override suspend fun getSeriesCategories(
@@ -537,6 +804,29 @@ class OkHttpStalkerApiService @Inject constructor(
         session: StalkerSession,
         profile: StalkerDeviceProfile,
         seriesId: String
+    ): Result<StalkerSeriesDetails> = getSeriesDetailsForType(
+        session = session,
+        profile = profile,
+        seriesId = seriesId,
+        contentType = "series"
+    )
+
+    override suspend fun getVodSeriesDetails(
+        session: StalkerSession,
+        profile: StalkerDeviceProfile,
+        seriesId: String
+    ): Result<StalkerSeriesDetails> = getSeriesDetailsForType(
+        session = session,
+        profile = profile,
+        seriesId = seriesId,
+        contentType = "vod"
+    )
+
+    private suspend fun getSeriesDetailsForType(
+        session: StalkerSession,
+        profile: StalkerDeviceProfile,
+        seriesId: String,
+        contentType: String
     ): Result<StalkerSeriesDetails> = runApiCall("Failed to load series details") {
         val seriesPayload = requestJson(
             url = session.loadUrl,
@@ -544,7 +834,7 @@ class OkHttpStalkerApiService @Inject constructor(
             referer = session.portalReferer,
             token = session.token,
             query = mapOf(
-                "type" to "series",
+                "type" to contentType,
                 "action" to "get_ordered_list",
                 "JsHttpRequest" to "1-xml",
                 "movie_id" to seriesId,
@@ -552,8 +842,50 @@ class OkHttpStalkerApiService @Inject constructor(
                 "episode_id" to "0"
             )
         )
-        val seedEntries = seriesPayload.extractItemEntries()
-        val seriesItems = seriesPayload.toItemRecords()
+        val seedEntries = seriesPayload.extractItemEntries().toMutableList()
+        if (contentType == "vod") {
+            val seedFingerprints = mutableSetOf(
+                seedEntries.joinToString("|") { it.findString("id").orEmpty() }
+            )
+            val seedTotalPages = seriesPayload.totalPages()
+            if (seedTotalPages > MAX_PAGE_COUNT) {
+                throw StalkerApiError.CatalogTruncated(
+                    advertisedTotalPages = seedTotalPages,
+                    pageLimit = MAX_PAGE_COUNT
+                )
+            }
+            for (page in 2..seedTotalPages) {
+                val pagePayload = requestJson(
+                    url = session.loadUrl,
+                    profile = profile,
+                    referer = session.portalReferer,
+                    token = session.token,
+                    query = mapOf(
+                        "type" to contentType,
+                        "action" to "get_ordered_list",
+                        "JsHttpRequest" to "1-xml",
+                        "movie_id" to seriesId,
+                        "season_id" to "0",
+                        "episode_id" to "0",
+                        "p" to page.toString()
+                    )
+                )
+                val pageEntries = pagePayload.extractItemEntries()
+                val fingerprint = pageEntries.joinToString("|") { it.findString("id").orEmpty() }
+                if (fingerprint.isNotEmpty() && !seedFingerprints.add(fingerprint)) {
+                    throw StalkerApiError.Malformed(
+                        "Portal repeated a series-detail page while loading page $page."
+                    )
+                }
+                if (pageEntries.isEmpty() && page < seedTotalPages) {
+                    throw StalkerApiError.Malformed(
+                        "Portal returned an empty series-detail page before its advertised end."
+                    )
+                }
+                seedEntries += pageEntries
+            }
+        }
+        val seriesItems = seriesPayload.toItemRecords(profile.timezone.toPortalZoneId())
         val series = seriesItems.firstOrNull { item -> !item.looksLikeSeasonShell() }
             ?: StalkerItemRecord(
                 id = seriesId,
@@ -561,11 +893,12 @@ class OkHttpStalkerApiService @Inject constructor(
             )
         val seasonRows = seedEntries
             .mapNotNull { entry ->
-                entry.findString("season_id")
-                    ?.takeIf { it.isNotBlank() && it != "0" }
-                    ?.let { seasonId ->
-                        seasonId to entry
-                    }
+                val seasonId = if (contentType == "vod") {
+                    entry.findString("id")?.takeIf { entry.looksLikeVodSeasonShell() }
+                } else {
+                    entry.findString("season_id")?.takeIf { it.isNotBlank() && it != "0" }
+                }
+                seasonId?.let { it to entry }
             }
             .distinctBy { it.first }
         val shellSeasonRows = seedEntries.mapIndexedNotNull { index, entry ->
@@ -573,25 +906,33 @@ class OkHttpStalkerApiService @Inject constructor(
                 ?.let { season -> season.seasonNumber.toString() to entry }
         }
 
+        val paginationEvidence = mutableListOf<StalkerEpisodePaginationEvidence>()
         val seasons = if (seasonRows.isNotEmpty()) {
-            seasonRows.map { (seasonId, entry) ->
-                val episodesPayload = requestJson(
-                    url = session.loadUrl,
+            seasonRows.mapIndexed { index, (seasonId, entry) ->
+                val pages = fetchSeriesEpisodePages(
+                    session = session,
                     profile = profile,
-                    referer = session.portalReferer,
-                    token = session.token,
-                    query = mapOf(
-                        "type" to "series",
-                        "action" to "get_ordered_list",
-                        "JsHttpRequest" to "1-xml",
-                        "movie_id" to seriesId,
-                        "season_id" to seasonId,
-                        "episode_id" to "0"
-                    )
+                    contentType = contentType,
+                    seriesId = seriesId,
+                    seasonSelector = seasonId
                 )
+                if (pages.evidence.pageLimitReached) {
+                    throw StalkerApiError.CatalogTruncated(
+                        advertisedTotalPages = pages.evidence.advertisedTotalPages ?: (MAX_PAGE_COUNT + 1),
+                        pageLimit = MAX_PAGE_COUNT
+                    )
+                }
+                if (pages.evidence.repeatedPageDetected || pages.evidence.malformedPagination) {
+                    throw StalkerApiError.Malformed(
+                        "Portal returned non-progressing or inconsistent episode pagination for season $seasonId."
+                    )
+                }
+                paginationEvidence += pages.evidence
                 entry.toSeasonRecord(
-                    episodeEntries = episodesPayload.extractItemEntries(),
-                    fallbackSeasonNumber = seasonId.toIntOrNull()
+                    episodeEntries = pages.entries,
+                    fallbackSeasonNumber = entry.findString("season_number")?.toIntOrNull()
+                        ?: entry.findString("season_id")?.toIntOrNull()
+                        ?: index + 1
                 )
             }
         } else if (shellSeasonRows.isNotEmpty()) {
@@ -602,7 +943,7 @@ class OkHttpStalkerApiService @Inject constructor(
                     referer = session.portalReferer,
                     token = session.token,
                     query = mapOf(
-                        "type" to "series",
+                        "type" to contentType,
                         "action" to "get_ordered_list",
                         "JsHttpRequest" to "1-xml",
                         "movie_id" to seriesId,
@@ -627,7 +968,93 @@ class OkHttpStalkerApiService @Inject constructor(
             ).filter { it.episodes.isNotEmpty() }
         }
 
-        StalkerSeriesDetails(series = series, seasons = seasons)
+        StalkerSeriesDetails(
+            series = series,
+            seasons = seasons,
+            paginationEvidence = paginationEvidence
+        )
+    }
+
+    private data class EpisodePages(
+        val entries: List<JsonObject>,
+        val evidence: StalkerEpisodePaginationEvidence
+    )
+
+    private suspend fun fetchSeriesEpisodePages(
+        session: StalkerSession,
+        profile: StalkerDeviceProfile,
+        contentType: String,
+        seriesId: String,
+        seasonSelector: String
+    ): EpisodePages {
+        val entries = mutableListOf<JsonObject>()
+        val fingerprints = mutableSetOf<String>()
+        var page = 1
+        var successfulPages = 0
+        var advertisedPages: Int? = null
+        var repeated = false
+        var malformed = false
+        var pageLimitReached = false
+        while (page <= MAX_PAGE_COUNT) {
+            val payload = requestJson(
+                url = session.loadUrl,
+                profile = profile,
+                referer = session.portalReferer,
+                token = session.token,
+                query = mapOf(
+                    "type" to contentType,
+                    "action" to "get_ordered_list",
+                    "JsHttpRequest" to "1-xml",
+                    "movie_id" to seriesId,
+                    "season_id" to seasonSelector,
+                    "episode_id" to "0",
+                    "p" to page.toString()
+                )
+            )
+            val pageEntries = payload.extractItemEntries()
+            val fingerprint = pageEntries.joinToString("|") { entry ->
+                listOf(
+                    entry.findString("id").orEmpty(),
+                    entry.findString("series_number").orEmpty(),
+                    entry.findString("name").orEmpty()
+                ).joinToString(":")
+            }
+            if (page > 1 && fingerprint.isNotEmpty() && !fingerprints.add(fingerprint)) {
+                repeated = true
+                break
+            }
+            if (fingerprint.isNotEmpty()) fingerprints += fingerprint
+            entries += pageEntries
+            successfulPages += 1
+            val reported = payload.advertisedTotalPages()
+            if (reported != null) {
+                if (advertisedPages != null && advertisedPages != reported) malformed = true
+                advertisedPages = maxOf(advertisedPages ?: 1, reported)
+            }
+            if (pageEntries.isEmpty()) {
+                if (page < (advertisedPages ?: 1)) malformed = true
+                break
+            }
+            if (advertisedPages != null && page >= advertisedPages!!) break
+            if (page == MAX_PAGE_COUNT) {
+                pageLimitReached = true
+                break
+            }
+            page += 1
+        }
+        if (page > MAX_PAGE_COUNT) pageLimitReached = true
+        return EpisodePages(
+            entries = entries,
+            evidence = StalkerEpisodePaginationEvidence(
+                seasonSelector = seasonSelector,
+                attemptedPages = page,
+                successfulPages = successfulPages,
+                advertisedTotalPages = advertisedPages,
+                repeatedPageDetected = repeated,
+                malformedPagination = malformed,
+                pageLimitReached = pageLimitReached
+            )
+        )
     }
 
     override suspend fun getShortEpg(
@@ -648,7 +1075,7 @@ class OkHttpStalkerApiService @Inject constructor(
                 "ch_id" to channelId,
                 "size" to limit.coerceAtLeast(1).toString()
             )
-        ).toProgramRecords(channelId)
+        ).toProgramRecords(channelId, profile.timezone)
     }
 
     override suspend fun getEpg(
@@ -772,23 +1199,40 @@ class OkHttpStalkerApiService @Inject constructor(
             StalkerStreamKind.MOVIE,
             StalkerStreamKind.EPISODE -> "0"
         }
-        val playbackLoadUrl = createLinkLoadUrl(session, kind)
-        val payload = requestJson(
-            url = playbackLoadUrl,
-            profile = profile,
-            referer = session.portalReferer,
-            token = session.token,
-            query = mapOf(
-                "type" to type,
-                "action" to "create_link",
-                "JsHttpRequest" to "1-xml",
-                "cmd" to cmd,
-                "series" to seriesSelector,
-                "forced_storage" to forcedStorage,
-                "disable_ad" to "0",
-                "download" to "0"
+        val playbackLoadUrl = createLinkLoadUrl(session)
+        val payload = try {
+            requestJson(
+                url = playbackLoadUrl,
+                profile = profile,
+                referer = session.portalReferer,
+                token = session.token,
+                query = mapOf(
+                    "type" to type,
+                    "action" to "create_link",
+                    "JsHttpRequest" to "1-xml",
+                    "cmd" to cmd,
+                    "series" to seriesSelector,
+                    "forced_storage" to forcedStorage,
+                    "disable_ad" to "0",
+                    "download" to "0"
+                )
             )
-        )
+        } catch (direct: DirectCreateLinkResponse) {
+            return@runApiCall direct.playbackUrl
+        }
+        val portalError = payload.findString("error")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && !it.equals("false", ignoreCase = true) && it != "0" }
+        if (portalError != null) {
+            val normalized = portalError.lowercase(Locale.ROOT)
+            if (normalized == "nothing_to_play" || normalized.contains("nothing to play")) {
+                throw StalkerApiError.ContentUnavailable(portalReason = "nothing_to_play")
+            }
+            if (isStalkerAuthorizationFailure(portalError, null)) {
+                throw StalkerApiError.Authorization(portalReason = normalized)
+            }
+            throw StalkerApiError.Malformed("Portal returned a playback error.")
+        }
         payload.findString("cmd")
             ?.substringAfter(' ', missingDelimiterValue = payload.findString("cmd").orEmpty())
             ?.trim()
@@ -804,51 +1248,50 @@ class OkHttpStalkerApiService @Inject constructor(
                     resolved
                 }
                 if (!StreamEntryUrlPolicy.isAllowed(playbackUrl)) {
-                    throw IOException("Portal returned an unsupported playback URL scheme for create_link.")
+                    throw StalkerApiError.UnsupportedProtocol(
+                        "Portal returned an unsupported playback URL scheme."
+                    )
                 }
                 playbackUrl
             }
-            ?: throw IOException("Portal did not return a playable URL.")
+            ?: throw StalkerApiError.Malformed("Portal did not return a playable URL.")
     }
 
-    private fun createLinkLoadUrl(
-        session: StalkerSession,
-        kind: StalkerStreamKind
-    ): String {
-        if (kind != StalkerStreamKind.LIVE && kind != StalkerStreamKind.ARCHIVE) {
-            return session.loadUrl
-        }
-        if (session.fingerprintEvidence.playbackBackendHint != StalkerPlaybackBackendHint.TEMP_LINK_STRICT) {
-            return session.loadUrl
-        }
-        val normalized = StalkerUrlFactory.normalizePortalUrl(session.loadUrl)
-        if (!normalized.lowercase(Locale.ROOT).endsWith("/server/load.php")) {
-            return session.loadUrl
-        }
-        return siblingLoadUrl(normalized)
-            ?.takeIf { it.lowercase(Locale.ROOT).endsWith("/portal.php") }
-            ?: session.loadUrl
+    private fun createLinkLoadUrl(session: StalkerSession): String {
+        return session.loadUrl
     }
 
     override fun currentCookieHeader(session: StalkerSession): String =
-        cookieJar.cookieHeaderFor(session.loadUrl).ifBlank { session.serverCookieHeader }
+        sessionScopes[session.sessionScopeKey]
+            ?.also { scope -> scope.lastAccessAt = System.currentTimeMillis() }
+            ?.cookieJar
+            ?.cookieHeaderFor(session.loadUrl)
+            .orEmpty()
+            .ifBlank { session.serverCookieHeader }
+
+    override fun invalidateSessionScopes(providerId: Long) {
+        val prefix = "provider:$providerId|"
+        sessionScopes.keys.filter { it.startsWith(prefix) }.forEach { key ->
+            sessionScopes.remove(key)
+            stalkerHttpClients.keys.removeIf { clientKey -> clientKey.startsWith("$key|") }
+            resolvedLoadUrls.keys.removeIf { resolvedKey -> resolvedKey.startsWith("$key|") }
+        }
+        scopeAliases.keys.filter { it.startsWith(prefix) }.forEach(scopeAliases::remove)
+    }
 
     private suspend fun fetchPagedItems(
         session: StalkerSession,
         profile: StalkerDeviceProfile,
         baseQuery: Map<String, String>
     ): List<StalkerItemRecord> {
-        val firstPage = requestJson(
-            url = session.loadUrl,
-            profile = profile,
-            referer = session.portalReferer,
-            token = session.token,
-            query = baseQuery + ("p" to "1")
-        )
         val items = mutableListOf<StalkerItemRecord>()
-        items += firstPage.toItemRecords()
-        val totalPages = firstPage.totalPages()
-        for (page in 2..totalPages) {
+        val zoneId = profile.timezone.toPortalZoneId()
+        val fingerprints = mutableSetOf<String>()
+        var page = 1
+        var advertisedTotalPages: Int? = null
+        var reachedEnd = false
+
+        while (page <= MAX_PAGE_COUNT) {
             val pagePayload = requestJson(
                 url = session.loadUrl,
                 profile = profile,
@@ -856,7 +1299,52 @@ class OkHttpStalkerApiService @Inject constructor(
                 token = session.token,
                 query = baseQuery + ("p" to page.toString())
             )
-            items += pagePayload.toItemRecords()
+            val pageEntries = pagePayload.extractItemEntries()
+            val fingerprint = pageEntries.joinToString("|") { entry ->
+                listOf(
+                    entry.findString("id").orEmpty(),
+                    entry.findString("ch_id").orEmpty(),
+                    entry.findString("video_id").orEmpty(),
+                    entry.findString("name").orEmpty()
+                ).joinToString(":")
+            }
+            if (page > 1 && fingerprint.isNotEmpty() && !fingerprints.add(fingerprint)) {
+                throw StalkerApiError.Malformed(
+                    "Portal repeated a catalog page while loading page $page."
+                )
+            }
+            if (fingerprint.isNotEmpty()) fingerprints += fingerprint
+
+            val reportedTotalPages = pagePayload.advertisedTotalPages()
+            if (advertisedTotalPages != null && reportedTotalPages != null &&
+                advertisedTotalPages != reportedTotalPages
+            ) {
+                throw StalkerApiError.Malformed(
+                    "Portal changed its advertised catalog page count while loading page $page."
+                )
+            }
+            advertisedTotalPages = advertisedTotalPages ?: reportedTotalPages
+            if (pageEntries.isEmpty() && reportedTotalPages != null && page < reportedTotalPages) {
+                throw StalkerApiError.Malformed(
+                    "Portal returned an empty catalog page before its advertised end."
+                )
+            }
+
+            items += pageEntries.mapNotNull { it.toItemRecord(zoneId) }
+            reachedEnd = when {
+                pageEntries.isEmpty() -> true
+                reportedTotalPages != null -> page >= reportedTotalPages
+                else -> false
+            }
+            if (reachedEnd) break
+            page += 1
+        }
+
+        if (!reachedEnd) {
+            throw StalkerApiError.CatalogTruncated(
+                advertisedTotalPages = (advertisedTotalPages ?: page).coerceAtLeast(page),
+                pageLimit = MAX_PAGE_COUNT
+            )
         }
         return items
     }
@@ -867,7 +1355,9 @@ class OkHttpStalkerApiService @Inject constructor(
         baseQuery: Map<String, String>,
         page: Int
     ): StalkerPagedItems {
-        val safePage = page.coerceAtLeast(1).coerceAtMost(MAX_PAGE_COUNT)
+        // The aggregate safety limit belongs to bulk loads. A single-page request must preserve
+        // the requested cursor so a resumed catalog can move past the historical page-200 cap.
+        val safePage = page.coerceAtLeast(1)
         val payload = requestJson(
             url = session.loadUrl,
             profile = profile,
@@ -875,12 +1365,23 @@ class OkHttpStalkerApiService @Inject constructor(
             token = session.token,
             query = baseQuery + ("p" to safePage.toString())
         )
-        val items = payload.toItemRecords()
+        val items = payload.toItemRecords(profile.timezone.toPortalZoneId())
+        val pageSize = payload.pageSize(items.size)
+        val advertisedTotalItems = payload.advertisedTotalItems()
+        val advertisedTotalPages = payload.advertisedTotalPages()
+        if (items.isEmpty() && advertisedTotalPages != null && safePage < advertisedTotalPages) {
+            throw StalkerApiError.Malformed(
+                "Portal returned an empty catalog page before its advertised end."
+            )
+        }
         return StalkerPagedItems(
             items = items,
             page = safePage,
-            totalPages = payload.totalPages(),
-            pageSize = payload.pageSize(items.size)
+            totalPages = payload.totalPages(safePage),
+            pageSize = pageSize,
+            advertisedTotalItems = advertisedTotalItems,
+            advertisedTotalPages = advertisedTotalPages,
+            hasAdvertisedTotal = advertisedTotalPages != null
         )
     }
 
@@ -888,7 +1389,7 @@ class OkHttpStalkerApiService @Inject constructor(
         session: StalkerSession,
         profile: StalkerDeviceProfile
     ): List<StalkerItemRecord>? {
-        return runCatching {
+        return runSuspendCatching {
             requestJson(
                 url = session.loadUrl,
                 profile = profile,
@@ -899,8 +1400,9 @@ class OkHttpStalkerApiService @Inject constructor(
                     "action" to "get_all_channels",
                     "JsHttpRequest" to "1-xml"
                 )
-            ).toItemRecords()
+            ).toItemRecords(profile.timezone.toPortalZoneId())
         }.onFailure { error ->
+            if (error is CancellationException) throw error
             Log.w(TAG, "Stalker get_all_channels failed; falling back to paged live catalog", error)
         }.getOrNull()?.takeIf { it.isNotEmpty() }
     }
@@ -911,58 +1413,168 @@ class OkHttpStalkerApiService @Inject constructor(
         referer: String,
         query: Map<String, String>,
         token: String? = null,
+        allowAlternateEndpointRetry: Boolean = false,
         method: String = "GET",
         body: String? = null
     ): JsonElement = withContext(Dispatchers.IO) {
-        val action = query["action"]
-        val canRetryAlternateEndpoint = !token.isNullOrBlank()
-        val fullUrl = buildUrl(url, query)
-        val requestBuilder = Request.Builder()
-            .url(fullUrl)
-            .header("User-Agent", profile.userAgent)
-            .header("X-User-Agent", profile.xUserAgent)
-            .header("Referer", referer)
-            .header("Accept", "*/*")
-            .header("Cookie", buildCookieHeader(fullUrl, profile))
-            .apply {
-                token?.takeIf { it.isNotBlank() }?.let { header("Authorization", "Bearer $it") }
-            }
+        val effectiveQuery = prepareQuery(profile, query)
         val requestBody = body?.toRequestBody(FORM_URL_ENCODED_MEDIA_TYPE)
-        val request = requestBuilder
-            .method(method, requestBody)
-            .build()
+        val action = effectiveQuery["action"]
+        val sessionScope = sessionScopeFor(profile)
 
-        runCatching {
-            executeJsonRequest(request, action)
-        }.recoverCatching { error ->
-            if (!canRetryAlternateEndpoint) throw error
-            val alternateUrl = siblingLoadUrl(url)
-                ?.takeIf { it != url }
-                ?: throw error
-            Log.w(
-                TAG,
-                "Retrying Stalker ${action.orEmpty()} via alternate endpoint $alternateUrl after ${error.message}"
-            )
-            val alternateRequest = request.newBuilder()
-                .url(buildUrl(alternateUrl, query))
-                .header("Referer", StalkerUrlFactory.portalReferer(alternateUrl))
-                .header("Cookie", buildCookieHeader(buildUrl(alternateUrl, query), profile))
+        suspend fun executeRequest(requestQuery: Map<String, String>): JsonElement {
+            val fullUrl = buildUrl(url, requestQuery)
+            val requestBuilder = Request.Builder()
+                .url(fullUrl)
+                .header("User-Agent", profile.userAgent)
+                .header("X-User-Agent", profile.xUserAgent)
+                .header("Referer", referer)
+                .header("Accept", "*/*")
+                .header("Cookie", buildCookieHeader(fullUrl, profile))
+                .apply {
+                    token?.takeIf { it.isNotBlank() }?.let { header("Authorization", "Bearer $it") }
+                }
+                .applyStalkerHeaderOverrides(
+                    headerOverrides = profile.headerOverrides,
+                    preserveUserAgent = profile.advancedOptions.apiUserAgent.isNotBlank()
+                )
+            val request = requestBuilder
                 .method(method, requestBody)
                 .build()
-            executeJsonRequest(alternateRequest, action)
-        }.getOrElse { throw it }
+
+            return runSuspendCatching {
+                executeJsonRequest(request, action, profile)
+            }.recoverCatching { error ->
+                if (error is CancellationException) throw error
+                if (!allowAlternateEndpointRetry) throw error
+                val alternateUrl = siblingLoadUrl(url)
+                    ?.takeIf { it != url }
+                    ?: throw error
+                Log.w(
+                    TAG,
+                    "Retrying Stalker ${action.orEmpty()} via alternate endpoint $alternateUrl after ${error.message}"
+                )
+                val alternateFullUrl = buildUrl(alternateUrl, requestQuery)
+                val alternateRequest = request.newBuilder()
+                    .url(alternateFullUrl)
+                    .header("Referer", StalkerUrlFactory.portalReferer(alternateUrl))
+                    .header("Cookie", buildCookieHeader(alternateFullUrl, profile))
+                    .applyStalkerHeaderOverrides(
+                        headerOverrides = profile.headerOverrides,
+                        preserveUserAgent = profile.advancedOptions.apiUserAgent.isNotBlank()
+                    )
+                    .method(method, requestBody)
+                    .build()
+                executeJsonRequest(alternateRequest, action, profile)
+            }.getOrElse { throw it }
+        }
+
+        val initialQuery = if (
+            sessionScope.macQueryRequired &&
+            profile.macAddress.isNotBlank() &&
+            !effectiveQuery.containsKey("mac")
+        ) {
+            effectiveQuery.withMacQuery(profile)
+        } else {
+            effectiveQuery
+        }
+
+        try {
+            executeRequest(initialQuery)
+        } catch (error: StalkerApiError.EmptyBody) {
+            // A few MAG/Ministra deployments reject the normal MAG cookie-only form by
+            // returning HTTP 200 with an empty body, while accepting the same request when
+            // the MAC is also present as a query parameter. Retry only this unambiguous
+            // signal, learn it for the current auth scope, and leave other portal behavior
+            // untouched.
+            if (
+                profile.macAddress.isBlank() ||
+                initialQuery.containsKey("mac") ||
+                sessionScope.macQueryRequired ||
+                !shouldRetryWithMacQuery(action)
+            ) {
+                throw error
+            }
+            sessionScope.macQueryRequired = true
+            Log.i(
+                TAG,
+                "Stalker portal requires MAC query authentication; retrying action=${action.orEmpty()}"
+            )
+            executeRequest(effectiveQuery.withMacQuery(profile))
+        }
     }
 
-    private fun executeJsonRequest(request: Request, action: String?): JsonElement {
-        return stalkerHttpClient.newCall(request).execute().use { response ->
-            captureResponseCookies(response)
+    private fun Map<String, String>.withMacQuery(profile: StalkerDeviceProfile): Map<String, String> =
+        LinkedHashMap(this).apply { put("mac", profile.macAddress) }
+
+    private fun shouldRetryWithMacQuery(action: String?): Boolean =
+        action.equals("handshake", ignoreCase = true) ||
+            action.equals("get_profile", ignoreCase = true) ||
+            action.equals("get_account_info", ignoreCase = true) ||
+            action.equals("do_auth", ignoreCase = true) ||
+            action.equals("create_link", ignoreCase = true)
+
+    private suspend fun executeJsonRequest(request: Request, action: String?, profile: StalkerDeviceProfile): JsonElement {
+        profile.discoveryRuntime.consumeRequest()
+        val startedAt = System.currentTimeMillis()
+        return withTransportAwareStalkerCall(request, profile) { response ->
             if (!response.isSuccessful) {
+                StalkerTelemetry.httpResponse(
+                    providerId = profile.providerId,
+                    endpointFamily = endpointFamily(request),
+                    action = action,
+                    durationMillis = System.currentTimeMillis() - startedAt,
+                    responseBytes = response.body?.contentLength()?.coerceAtLeast(0L) ?: 0L,
+                    status = response.code,
+                    outcome = "HTTP_ERROR"
+                )
+                // A 401/403 served as an HTML page comes from an edge/WAF (e.g. Cloudflare)
+                // or a misconfigured endpoint, not from the portal's JSON auth layer; do not
+                // classify it as a portal authorization verdict.
+                val errorBody = runCatching {
+                    response.peekBody(HTML_ERROR_SNIFF_BYTES).string()
+                }.getOrDefault("")
+                val htmlErrorPage = looksLikeHtml(errorBody)
                 response.body?.close()
-                throw IOException("Portal request failed with HTTP ${response.code}.")
+                throw response.toStalkerHttpError(htmlErrorPage, errorBody)
             }
             val responseBody = response.body
-                ?: throw IOException("Portal returned an empty response${actionSuffix(action)}.")
+                ?: throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
+            if (responseBody.contentLength() == 0L) {
+                responseBody.close()
+                throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
+            }
+            if (action.equals("create_link", ignoreCase = true) && response.isDirectMediaResponse()) {
+                Log.i(
+                    TAG,
+                    "Stalker create_link returned a direct media response; handing the authenticated endpoint to playback " +
+                        "type=${response.header("Content-Type").orEmpty().substringBefore(';').ifBlank { "unknown" }}"
+                )
+                throw DirectCreateLinkResponse(request.url.toString())
+            }
             val charset = responseBody.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+            if (action.equals("create_link", ignoreCase = true)) {
+                // Some Ministra portals put the small, authoritative `js` result first and
+                // then append a very large diagnostic `text` field (stack traces, storage
+                // timeout details, and repeated backend output). Parsing the entire document
+                // both delays playback resolution and can hide `nothing_to_play` behind the
+                // generic response-size guard. Read only the `js` value and close the response;
+                // the trailing diagnostic text is not part of the playback contract.
+                val parsed = parseCreateLinkEnvelope(responseBody.byteStream(), charset.name(), action)
+                parsed.ensureNoPortalError()
+                recordResolvedLoadUrl(request, response, profile)
+                captureResponseCookies(response, profile)
+                StalkerTelemetry.httpResponse(
+                    providerId = profile.providerId,
+                    endpointFamily = endpointFamily(request),
+                    action = action,
+                    durationMillis = System.currentTimeMillis() - startedAt,
+                    responseBytes = responseBody.contentLength().coerceAtLeast(0L),
+                    status = response.code,
+                    outcome = "SUCCESS"
+                )
+                return@withTransportAwareStalkerCall parsed
+            }
             val raw = readBodyBounded(
                 stream = responseBody.byteStream(),
                 charsetName = charset.name(),
@@ -970,11 +1582,71 @@ class OkHttpStalkerApiService @Inject constructor(
                 action = action
             )
             if (raw.isBlank()) {
-                throw IOException("Portal returned an empty response${actionSuffix(action)}.")
+                throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
             }
             val parsed = parsePortalJson(raw, action)
             parsed.ensureNoPortalError()
+            recordResolvedLoadUrl(request, response, profile)
+            captureResponseCookies(response, profile)
+            StalkerTelemetry.httpResponse(
+                providerId = profile.providerId,
+                endpointFamily = endpointFamily(request),
+                action = action,
+                durationMillis = System.currentTimeMillis() - startedAt,
+                responseBytes = raw.toByteArray(charset).size.toLong(),
+                status = response.code,
+                outcome = "SUCCESS"
+            )
             parsed
+        }
+    }
+
+    private fun parseCreateLinkEnvelope(
+        stream: InputStream,
+        charsetName: String,
+        action: String?
+    ): JsonElement {
+        val charset = runCatching { java.nio.charset.Charset.forName(charsetName) }
+            .getOrDefault(Charsets.UTF_8)
+        val reader = JsonReader(InputStreamReader(stream, charset)).apply { isLenient = true }
+        try {
+            if (reader.peek() == JsonToken.END_DOCUMENT) {
+                throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
+            }
+            if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+                throw StalkerApiError.Malformed(
+                    "Portal returned an unreadable playback response${actionSuffix(action)}."
+                )
+            }
+            reader.beginObject()
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "js" -> {
+                        val jsValue = JsonParser.parseReader(reader)
+                        return parsePortalJson("{\"js\":${jsValue}}", action)
+                    }
+                    "error" -> {
+                        val rawError = reader.nextStringOrSkip()
+                        rawError?.let(::portalError)?.let { throw it }
+                    }
+                    "not_valid_token" -> {
+                        val marker = reader.nextStringOrSkip()
+                        if (marker != null && !isPlaceholderErrorValue(marker)) {
+                            throw invalidTokenError()
+                        }
+                    }
+                    else -> reader.skipValue()
+                }
+            }
+            throw StalkerApiError.Malformed("Portal did not return a playback result.")
+        } catch (error: StalkerApiError) {
+            throw error
+        } catch (error: IOException) {
+            throw error
+        } catch (error: RuntimeException) {
+            throw StalkerApiError.Malformed(
+                "Portal returned an unreadable playback response${actionSuffix(action)}."
+            )
         }
     }
 
@@ -997,7 +1669,7 @@ class OkHttpStalkerApiService @Inject constructor(
             totalRead += n
             if (totalRead > maxBytes) {
                 val limitKb = maxBytes / 1024
-                throw IOException(
+                throw StalkerApiError.ResponseTooLarge(
                     "Portal response for '${action ?: "request"}' exceeded the ${limitKb}KB limit; " +
                         "portal may be misbehaving."
                 )
@@ -1034,8 +1706,9 @@ class OkHttpStalkerApiService @Inject constructor(
         token: String,
         onItem: suspend (StalkerItemRecord) -> Unit
     ): Int = withContext(Dispatchers.IO) {
-        val action = query["action"]
-        val fullUrl = buildUrl(url, query)
+        val effectiveQuery = prepareQuery(profile, query)
+        val action = effectiveQuery["action"]
+        val fullUrl = buildUrl(url, effectiveQuery)
         val request = Request.Builder()
             .url(fullUrl)
             .header("User-Agent", profile.userAgent)
@@ -1044,44 +1717,46 @@ class OkHttpStalkerApiService @Inject constructor(
             .header("Accept", "*/*")
             .header("Cookie", buildCookieHeader(fullUrl, profile))
             .header("Authorization", "Bearer $token")
+            .applyStalkerHeaderOverrides(
+                headerOverrides = profile.headerOverrides,
+                preserveUserAgent = profile.advancedOptions.apiUserAgent.isNotBlank()
+            )
             .get()
             .build()
 
-        runCatching {
-            executeStreamingRequest(request, action, onItem)
-        }.recoverCatching { error ->
-            val alternateUrl = siblingLoadUrl(url)
-                ?.takeIf { it != url }
-                ?: throw error
-            Log.w(
-                TAG,
-                "Retrying streamed Stalker ${action.orEmpty()} via alternate endpoint $alternateUrl after ${error.message}"
-            )
-            val alternateRequest = request.newBuilder()
-                .url(buildUrl(alternateUrl, query))
-                .header("Referer", StalkerUrlFactory.portalReferer(alternateUrl))
-                .header("Cookie", buildCookieHeader(buildUrl(alternateUrl, query), profile))
-                .build()
-            executeStreamingRequest(alternateRequest, action, onItem)
-        }.getOrElse { throw it }
+        executeStreamingRequest(request, action, profile, onItem)
     }
 
     private suspend fun executeStreamingRequest(
         request: Request,
         action: String?,
+        profile: StalkerDeviceProfile,
         onItem: suspend (StalkerItemRecord) -> Unit
     ): Int {
-        return stalkerHttpClient.newCall(request).execute().use { response ->
-            captureResponseCookies(response)
+        profile.discoveryRuntime.consumeRequest()
+        val startedAt = System.currentTimeMillis()
+        return withTransportAwareStalkerCall(request, profile) { response ->
             if (!response.isSuccessful) {
-                throw IOException("Portal request failed with HTTP ${response.code}.")
+                throw response.toStalkerHttpError()
             }
-            val body = response.body ?: throw IOException("Portal returned an empty response${actionSuffix(action)}.")
+            val body = response.body ?: throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
             val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
             val reader = JsonReader(InputStreamReader(body.byteStream(), charset))
             reader.isLenient = true
             try {
-                streamStalkerItems(reader, onItem)
+                streamStalkerItems(reader, profile.timezone.toPortalZoneId(), onItem).also { itemCount ->
+                    recordResolvedLoadUrl(request, response, profile)
+                    captureResponseCookies(response, profile)
+                    StalkerTelemetry.httpResponse(
+                        providerId = profile.providerId,
+                        endpointFamily = endpointFamily(request),
+                        action = action,
+                        durationMillis = System.currentTimeMillis() - startedAt,
+                        responseBytes = body.contentLength().coerceAtLeast(0L),
+                        status = response.code,
+                        outcome = if (itemCount > 0) "SUCCESS" else "EMPTY"
+                    )
+                }
             } catch (error: IllegalStateException) {
                 throw IOException("Portal returned unreadable JSON${actionSuffix(action)}.", error)
             }
@@ -1090,11 +1765,12 @@ class OkHttpStalkerApiService @Inject constructor(
 
     private suspend fun streamStalkerItems(
         reader: JsonReader,
+        zoneId: ZoneId,
         onItem: suspend (StalkerItemRecord) -> Unit
     ): Int {
         return when (reader.peek()) {
-            JsonToken.BEGIN_ARRAY -> streamItemArray(reader, onItem)
-            JsonToken.BEGIN_OBJECT -> streamItemObject(reader, onItem)
+            JsonToken.BEGIN_ARRAY -> streamItemArray(reader, zoneId, onItem)
+            JsonToken.BEGIN_OBJECT -> streamItemObject(reader, zoneId, onItem)
             JsonToken.NULL -> {
                 reader.nextNull()
                 0
@@ -1108,6 +1784,7 @@ class OkHttpStalkerApiService @Inject constructor(
 
     private suspend fun streamItemObject(
         reader: JsonReader,
+        zoneId: ZoneId,
         onItem: suspend (StalkerItemRecord) -> Unit
     ): Int {
         var count = 0
@@ -1116,14 +1793,15 @@ class OkHttpStalkerApiService @Inject constructor(
             when (reader.nextName()) {
                 "error" -> {
                     val error = reader.nextStringOrSkip()
-                    // Use the same placeholder filter as ensureNoPortalError so that
-                    // "null", "0", "false", and "ok" from loose portals are not treated
-                    // as real errors in the streamed item path either.
-                    if (!error.isNullOrBlank() && !isPlaceholderErrorValue(error)) {
-                        throw IOException(error)
+                    error?.let(::portalError)?.let { throw it }
+                }
+                "not_valid_token" -> {
+                    val marker = reader.nextStringOrSkip()
+                    if (marker != null && !isPlaceholderErrorValue(marker)) {
+                        throw invalidTokenError()
                     }
                 }
-                "js", "data", "items" -> count += streamStalkerItems(reader, onItem)
+                "js", "data", "items" -> count += streamStalkerItems(reader, zoneId, onItem)
                 else -> {
                     // Object-keyed catalogs (e.g. `{"data":{"100":{...},"200":{...}}}`) use
                     // numeric string keys for each item. Attempt to parse any object value as
@@ -1131,7 +1809,7 @@ class OkHttpStalkerApiService @Inject constructor(
                     // silently dropped on the streaming path.
                     if (reader.peek() == JsonToken.BEGIN_OBJECT) {
                         val element = JsonParser.parseReader(reader)
-                        val item = element.asJsonObjectOrNull()?.toItemRecord()
+                        val item = element.asJsonObjectOrNull()?.toItemRecord(zoneId)
                         if (item != null) {
                             onItem(item)
                             count++
@@ -1148,6 +1826,7 @@ class OkHttpStalkerApiService @Inject constructor(
 
     private suspend fun streamItemArray(
         reader: JsonReader,
+        zoneId: ZoneId,
         onItem: suspend (StalkerItemRecord) -> Unit
     ): Int {
         var count = 0
@@ -1155,13 +1834,13 @@ class OkHttpStalkerApiService @Inject constructor(
         while (reader.hasNext()) {
             if (reader.peek() == JsonToken.BEGIN_OBJECT) {
                 val element = JsonParser.parseReader(reader)
-                val item = element.asJsonObjectOrNull()?.toItemRecord()
+                val item = element.asJsonObjectOrNull()?.toItemRecord(zoneId)
                 if (item != null) {
                     onItem(item)
                     count++
                 }
             } else {
-                count += streamStalkerItems(reader, onItem)
+                count += streamStalkerItems(reader, zoneId, onItem)
             }
         }
         reader.endArray()
@@ -1182,8 +1861,9 @@ class OkHttpStalkerApiService @Inject constructor(
         channelIdOverride: String?,
         onProgram: suspend (StalkerProgramRecord) -> Unit
     ): Int = withContext(Dispatchers.IO) {
-        val action = query["action"]
-        val fullUrl = buildUrl(url, query)
+        val effectiveQuery = prepareQuery(profile, query)
+        val action = effectiveQuery["action"]
+        val fullUrl = buildUrl(url, effectiveQuery)
         val request = Request.Builder()
             .url(fullUrl)
             .header("User-Agent", profile.userAgent)
@@ -1192,40 +1872,29 @@ class OkHttpStalkerApiService @Inject constructor(
             .header("Accept", "*/*")
             .header("Cookie", buildCookieHeader(fullUrl, profile))
             .header("Authorization", "Bearer $token")
+            .applyStalkerHeaderOverrides(
+                headerOverrides = profile.headerOverrides,
+                preserveUserAgent = profile.advancedOptions.apiUserAgent.isNotBlank()
+            )
             .get()
             .build()
 
-        runCatching {
-            executeStreamingPrograms(request, action, channelIdOverride, onProgram)
-        }.recoverCatching { error ->
-            val alternateUrl = siblingLoadUrl(url)
-                ?.takeIf { it != url }
-                ?: throw error
-            Log.w(
-                TAG,
-                "Retrying streamed Stalker EPG ${action.orEmpty()} via alternate endpoint $alternateUrl after ${error.message}"
-            )
-            val alternateRequest = request.newBuilder()
-                .url(buildUrl(alternateUrl, query))
-                .header("Referer", StalkerUrlFactory.portalReferer(alternateUrl))
-                .header("Cookie", buildCookieHeader(buildUrl(alternateUrl, query), profile))
-                .build()
-            executeStreamingPrograms(alternateRequest, action, channelIdOverride, onProgram)
-        }.getOrElse { throw it }
+        executeStreamingPrograms(request, action, profile, channelIdOverride, onProgram)
     }
 
     private suspend fun executeStreamingPrograms(
         request: Request,
         action: String?,
+        profile: StalkerDeviceProfile,
         channelIdOverride: String?,
         onProgram: suspend (StalkerProgramRecord) -> Unit
     ): Int {
-        return stalkerHttpClient.newCall(request).execute().use { response ->
-            captureResponseCookies(response)
+        profile.discoveryRuntime.consumeRequest()
+        return withTransportAwareStalkerCall(request, profile) { response ->
             if (!response.isSuccessful) {
-                throw IOException("Portal request failed with HTTP ${response.code}.")
+                throw response.toStalkerHttpError()
             }
-            val body = response.body ?: throw IOException("Portal returned an empty response${actionSuffix(action)}.")
+            val body = response.body ?: throw StalkerApiError.EmptyBody("Portal returned an empty response${actionSuffix(action)}.")
             val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
             val limited = ByteSizeLimitInputStream(
                 delegate = body.byteStream(),
@@ -1237,7 +1906,10 @@ class OkHttpStalkerApiService @Inject constructor(
             val reader = JsonReader(InputStreamReader(limited, charset))
             reader.isLenient = true
             try {
-                streamStalkerPrograms(reader, channelIdOverride, onProgram)
+                streamStalkerPrograms(reader, channelIdOverride, profile.timezone.toPortalZoneId(), onProgram).also {
+                    recordResolvedLoadUrl(request, response, profile)
+                    captureResponseCookies(response, profile)
+                }
             } catch (error: IllegalStateException) {
                 throw IOException("Portal returned unreadable JSON${actionSuffix(action)}.", error)
             }
@@ -1247,11 +1919,12 @@ class OkHttpStalkerApiService @Inject constructor(
     private suspend fun streamStalkerPrograms(
         reader: JsonReader,
         channelIdOverride: String?,
+        zoneId: ZoneId,
         onProgram: suspend (StalkerProgramRecord) -> Unit
     ): Int {
         return when (reader.peek()) {
-            JsonToken.BEGIN_ARRAY -> streamProgramArray(reader, channelIdOverride, onProgram)
-            JsonToken.BEGIN_OBJECT -> streamProgramObject(reader, channelIdOverride, onProgram)
+            JsonToken.BEGIN_ARRAY -> streamProgramArray(reader, channelIdOverride, zoneId, onProgram)
+            JsonToken.BEGIN_OBJECT -> streamProgramObject(reader, channelIdOverride, zoneId, onProgram)
             JsonToken.NULL -> {
                 reader.nextNull()
                 0
@@ -1266,6 +1939,7 @@ class OkHttpStalkerApiService @Inject constructor(
     private suspend fun streamProgramObject(
         reader: JsonReader,
         channelIdOverride: String?,
+        zoneId: ZoneId,
         onProgram: suspend (StalkerProgramRecord) -> Unit
     ): Int {
         var count = 0
@@ -1276,13 +1950,17 @@ class OkHttpStalkerApiService @Inject constructor(
             when (name) {
                 "error" -> {
                     val error = reader.nextStringOrSkip()
-                    if (!error.isNullOrBlank() && !error.equals("null", ignoreCase = true)) {
-                        throw IOException(error)
+                    error?.let(::portalError)?.let { throw it }
+                }
+                "not_valid_token" -> {
+                    val marker = reader.nextStringOrSkip()
+                    if (marker != null && !isPlaceholderErrorValue(marker)) {
+                        throw invalidTokenError()
                     }
                 }
                 "js", "data", "items" -> {
                     sawEnvelope = true
-                    count += streamStalkerPrograms(reader, channelIdOverride, onProgram)
+                    count += streamStalkerPrograms(reader, channelIdOverride, zoneId, onProgram)
                 }
                 else -> {
                     // Some portals return the bulk EPG as an object whose keys are channel IDs
@@ -1290,7 +1968,7 @@ class OkHttpStalkerApiService @Inject constructor(
                     // into an envelope key and there is no caller-supplied override, treat the
                     // key as the channel ID and walk the array.
                     if (!sawEnvelope && channelIdOverride == null && reader.peek() == JsonToken.BEGIN_ARRAY) {
-                        count += streamProgramArray(reader, name, onProgram)
+                        count += streamProgramArray(reader, name, zoneId, onProgram)
                     } else {
                         reader.skipValue()
                     }
@@ -1304,6 +1982,7 @@ class OkHttpStalkerApiService @Inject constructor(
     private suspend fun streamProgramArray(
         reader: JsonReader,
         channelIdOverride: String?,
+        zoneId: ZoneId,
         onProgram: suspend (StalkerProgramRecord) -> Unit
     ): Int {
         var count = 0
@@ -1311,20 +1990,20 @@ class OkHttpStalkerApiService @Inject constructor(
         while (reader.hasNext()) {
             if (reader.peek() == JsonToken.BEGIN_OBJECT) {
                 val element = JsonParser.parseReader(reader)
-                val program = element.asJsonObjectOrNull()?.toProgramRecord(channelIdOverride)
+                val program = element.asJsonObjectOrNull()?.toProgramRecord(channelIdOverride, zoneId)
                 if (program != null) {
                     onProgram(program)
                     count++
                 }
             } else {
-                count += streamStalkerPrograms(reader, channelIdOverride, onProgram)
+                count += streamStalkerPrograms(reader, channelIdOverride, zoneId, onProgram)
             }
         }
         reader.endArray()
         return count
     }
 
-    private fun GsonJsonObject.toProgramRecord(channelIdOverride: String?): StalkerProgramRecord? {
+    private fun GsonJsonObject.toProgramRecord(channelIdOverride: String?, zoneId: ZoneId): StalkerProgramRecord? {
         val resolvedChannelId = channelIdOverride
             ?: findString("ch_id")
             ?: findString("channel_id")
@@ -1333,10 +2012,10 @@ class OkHttpStalkerApiService @Inject constructor(
             ?: findString("epg_id")
             ?: return null
         val startMillis = findString("start_timestamp")?.toLongOrNull()?.times(1000L)
-            ?: findString("time")?.let(::parseDateTime)
+            ?: findString("time")?.let { parseDateTime(it, zoneId) }
             ?: return null
         val endMillis = findString("stop_timestamp")?.toLongOrNull()?.times(1000L)
-            ?: findString("time_to")?.let(::parseDateTime)
+            ?: findString("time_to")?.let { parseDateTime(it, zoneId) }
             ?: (startMillis + (findString("duration")?.toLongOrNull()?.times(60_000L) ?: DEFAULT_PROGRAM_DURATION_MILLIS))
         val title = findString("name") ?: findString("title") ?: return null
         return StalkerProgramRecord(
@@ -1370,9 +2049,14 @@ class OkHttpStalkerApiService @Inject constructor(
         if (looksLikeHtml(normalized)) {
             val lower = normalized.lowercase(Locale.ROOT)
             if (lower.contains("access denied") || lower.contains("forbidden")) {
-                throw IOException("Portal denied the request${actionSuffix(action)}.")
+                throw StalkerApiError.Authorization(
+                    message = "Portal denied the request${actionSuffix(action)}.",
+                    portalReason = "access denied"
+                )
             }
         }
+
+        authorizationMessage(normalized)?.let { throw it }
 
         extractEmbeddedJson(normalized)?.let { candidate ->
             runCatching { json.parseToJsonElement(candidate) }
@@ -1382,18 +2066,308 @@ class OkHttpStalkerApiService @Inject constructor(
 
         throw runCatching { json.parseToJsonElement(normalized) }
             .fold(
-                onSuccess = { IOException("Portal returned unreadable JSON${actionSuffix(action)}.") },
-                onFailure = { error -> IOException("Portal returned unreadable JSON${actionSuffix(action)}.", error) }
+                onSuccess = { StalkerApiError.Malformed("Portal returned unreadable JSON${actionSuffix(action)}.") },
+                onFailure = { error -> StalkerApiError.Malformed("Portal returned unreadable JSON${actionSuffix(action)}.", error) }
             )
     }
 
     private fun JsonElement.ensureNoPortalError() {
+        if (findBoolean("not_valid_token") == true) {
+            throw invalidTokenError()
+        }
+        // Some Ministra/Stalker families return workflow failures as a scalar `js`
+        // payload instead of the usual `{ "js": { "error": ... } }` envelope.
+        // Treat that scalar as a portal outcome so create_link cannot degrade
+        // `nothing_to_play` into the misleading "no playable URL" error.
+        rootObjectOrNull()
+            ?.get("js")
+            ?.let { it as? JsonPrimitive }
+            ?.contentOrNull
+            ?.let { portalError(it)?.let { error -> throw error } }
         val raw = rootObjectOrNull()?.findString("error")
             ?: findString("error")
-            ?: return
-        // Ignore well-known placeholder values that some portals emit even on success.
-        if (raw.isBlank() || isPlaceholderErrorValue(raw)) return
-        throw IOException(raw)
+        raw?.let { portalError(it)?.let { error -> throw error } }
+
+        statusEnvelopeError()?.let { throw it }
+
+        val message = rootObjectOrNull()?.findString("msg")
+            ?: findString("msg")
+        message?.let { authorizationMessage(it)?.let { error -> throw error } }
+    }
+
+    /**
+     * Ministra reports workflow failures as HTTP 200 with a `status`/`msg`/`block_msg`
+     * envelope instead of an HTTP error or an `error` field. Well-known examples:
+     * `status:1` + "Device conflict - device_id mismatch" (MAC locked to another device
+     * identity), `status:1` + "Time out of sync" (device clock outside tolerance) and
+     * `status:2` + "Authentication request" (device not registered; launcher auth required).
+     * These must never be treated as accepted payloads.
+     */
+    private fun JsonElement.statusEnvelopeError(): StalkerApiError? {
+        val payload = payloadObjectOrNull() ?: return null
+        val status = payload.findInt("status") ?: return null
+        if (status == 0) return null
+        val msg = payload.findString("msg")
+        val blockMsg = payload.findString("block_msg")?.let(::stripPortalHtml)
+        if (msg == null && blockMsg == null) return null
+        val detail = listOfNotNull(msg, blockMsg)
+            .flatMap { it.lineSequence() }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        val normalizedMsg = (msg ?: "").lowercase(Locale.ROOT)
+        return when {
+            status == 2 -> StalkerApiError.DeviceNotRegistered(
+                message = "Portal does not recognize this device (registration is required). " +
+                    "Portal message: $detail",
+                reason = msg
+            )
+            normalizedMsg.contains("device conflict") ||
+                normalizedMsg.contains("device_id mismatch") ||
+                normalizedMsg.contains("device id mismatch") ->
+                StalkerApiError.DeviceConflict(
+                    message = "Portal reports \"$detail\". This MAC is locked to a different " +
+                        "device identity; enter the registered serial number, device IDs and " +
+                        "signature, or ask your provider to reset the device binding.",
+                    reason = msg
+                )
+            normalizedMsg.contains("time out of sync") ||
+                normalizedMsg.contains("not synchronized") ->
+                StalkerApiError.ClockSkew(
+                    message = "Portal rejected the login because this device's clock is out of " +
+                        "sync. Correct the device date/time and retry. Portal message: $detail",
+                    reason = msg
+                )
+            normalizedMsg.contains("not valid mac") || normalizedMsg.contains("invalid mac") ->
+                StalkerApiError.InvalidMac(
+                    detail.ifBlank { "Portal reported an invalid MAC address." },
+                    msg
+                )
+            normalizedMsg.contains("not_valid_token") ||
+                normalizedMsg.contains("invalid token") ||
+                normalizedMsg.contains("empty token") ->
+                StalkerApiError.TokenRejected(detail, msg)
+            normalizedMsg.contains("blocked") ||
+                normalizedMsg.contains("disabled") ||
+                normalizedMsg.contains("banned") ||
+                normalizedMsg.contains("not allowed") ->
+                StalkerApiError.AccountBlocked(detail, msg)
+            else -> StalkerApiError.Authorization(
+                message = "Portal rejected the device profile: $detail",
+                portalReason = msg
+            )
+        }
+    }
+
+    private fun stripPortalHtml(raw: String): String {
+        val withBreaks = raw.replace(Regex("<\\s*br\\s*/?\\s*>", RegexOption.IGNORE_CASE), " ")
+        val withoutTags = withBreaks.replace(Regex("<[^>]*>"), " ")
+        val decoded = withoutTags
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+        return decoded.replace(Regex("\\s+"), " ").trim()
+    }
+
+    /**
+     * A handshake/profile HTTP 200 is not acceptance. Add-provider discovery requires the
+     * minimum workflow the app actually needs: live genres, a non-empty channel page, and either
+     * an already resolved stream URL or a successful create_link response.
+     */
+    private suspend fun validateCatalogAcceptance(
+        session: StalkerSession,
+        profile: StalkerDeviceProfile
+    ): List<String> {
+        profile.onProgress?.invoke("Validating Live TV categories")
+        val categoriesPayload = runSuspendCatching {
+            requestJson(
+                url = session.loadUrl,
+                profile = profile,
+                referer = session.portalReferer,
+                token = session.token,
+                query = mapOf(
+                    "type" to "itv",
+                    "action" to "get_genres",
+                    "JsHttpRequest" to "1-xml"
+                )
+            ).also { payload ->
+                payload.ensureNoPortalError()
+                if (!payload.isRecognizedCatalogPayload()) {
+                    throw StalkerApiError.Malformed(
+                        "Portal returned a malformed live category wrapper."
+                    )
+                }
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            throwCatalogValidationFailure(error)
+        }
+        val categories = categoriesPayload.toCategoryRecords()
+        if (categories.isEmpty()) {
+            throw IOException("Portal accepted the profile but returned no live channel categories.")
+        }
+
+        profile.onProgress?.invoke("Validating Live TV channel list")
+        var lastPageFailure: Throwable? = null
+        var channels = emptyList<StalkerItemRecord>()
+        val categoryStrategies = buildList<String?> {
+            add(null) // Bulk list without a category filter.
+            add("*") // Common Ministra wildcard accepted by some classic portals.
+            addAll(
+                sampleLiveDiscoveryCategories(categories, MAX_DISCOVERY_CATEGORY_PROBES)
+                    .map(StalkerCategoryRecord::id)
+            )
+        }.distinct()
+        for (categoryId in categoryStrategies) {
+            val pagePayload = runSuspendCatching {
+                val query = linkedMapOf(
+                    "type" to "itv",
+                    "action" to "get_ordered_list",
+                    "p" to "1",
+                    "JsHttpRequest" to "1-xml"
+                )
+                categoryId?.let { query["genre"] = it }
+                requestJson(
+                    url = session.loadUrl,
+                    profile = profile,
+                    referer = session.portalReferer,
+                    token = session.token,
+                    query = query
+                ).also { payload ->
+                    payload.ensureNoPortalError()
+                    if (!payload.isRecognizedCatalogPayload()) {
+                        throw StalkerApiError.Malformed(
+                            "Portal returned a malformed live channel page."
+                        )
+                    }
+                }
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                if (error.isStalkerAuthorizationFailure()) throwCatalogValidationFailure(error)
+                lastPageFailure = error
+                continue
+            }
+            channels = pagePayload.toItemRecords(profile.timezone.toPortalZoneId())
+            if (channels.isNotEmpty()) break
+        }
+        if (channels.isEmpty()) {
+            throw IOException(
+                "Portal accepted the profile but returned no live channels in the validation pages.",
+                lastPageFailure
+            )
+        }
+
+        val playable = channels.firstOrNull { channel ->
+            channel.cmd?.isNotBlank() == true ||
+                channel.streamUrl?.isNotBlank() == true ||
+                channel.commandVariants.any { it.cmd.isNotBlank() }
+        } ?: throw IOException("Portal returned live channels without a playback command.")
+        val command = playable.cmd
+            ?.takeIf(String::isNotBlank)
+            ?: playable.commandVariants.firstOrNull { it.cmd.isNotBlank() }?.cmd
+            ?: playable.streamUrl.orEmpty()
+
+        profile.onProgress?.invoke("Validating Live TV playback link")
+        val playbackEvidence = if (command.isResolvedPlaybackUrl()) {
+            "playback:live:direct"
+        } else {
+            when (
+                val result = createLink(
+                    session = session,
+                    profile = profile,
+                    kind = StalkerStreamKind.LIVE,
+                    cmd = command
+                )
+            ) {
+                is Result.Success -> "playback:live:create_link"
+                is Result.Error -> {
+                    val cause = result.exception ?: IOException(result.message)
+                    if (cause.isStalkerAuthorizationFailure()) throwCatalogValidationFailure(cause)
+                    throw IOException("Portal returned channels but could not resolve a live playback link.", cause)
+                }
+                is Result.Loading -> throw IOException("Unexpected loading state while validating playback.")
+            }
+        }
+
+        return listOf(
+            "catalog:itv:categories_valid",
+            "catalog:itv:page_valid",
+            playbackEvidence
+        )
+    }
+
+    private fun throwCatalogValidationFailure(cause: Throwable): Nothing {
+        if (cause.isStalkerAuthorizationFailure()) {
+            throw StalkerApiError.PartialAuthorization(
+                cause = cause,
+                reason = (cause as? StalkerApiError)?.portalReason
+            )
+        }
+        throw cause
+    }
+
+    private fun String.isResolvedPlaybackUrl(): Boolean {
+        val candidate = trim().substringAfter(' ', missingDelimiterValue = trim()).trim()
+        if (!StreamEntryUrlPolicy.isAllowed(candidate)) return false
+        val uri = runCatching { URI(candidate) }.getOrNull() ?: return false
+        val host = uri.host.orEmpty().lowercase(Locale.ROOT)
+        if (host in setOf("", "localhost", "127.0.0.1", "::1")) return false
+        return !uri.path.orEmpty().contains("/ch/")
+    }
+
+    private fun authorizationMessage(raw: String): StalkerApiError.Authorization? {
+        val normalized = raw.trim().lowercase(Locale.ROOT)
+        val isAuthorizationFailure = listOf(
+            "authorization failed",
+            "unauthorized",
+            "not valid mac",
+            "invalid mac",
+            "not_valid_token",
+            "invalid token",
+            "empty token",
+            "access denied",
+            "permission denied"
+        ).any(normalized::contains)
+        return if (isAuthorizationFailure) {
+            val message = raw.trim().ifBlank { "Portal authorization failed." }
+            val reason = raw.trim().takeIf(String::isNotBlank)
+            when {
+                normalized.contains("mac") -> StalkerApiError.InvalidMac(message, reason)
+                normalized.contains("token") -> StalkerApiError.TokenRejected(message, reason)
+                else -> StalkerApiError.Authorization(message = message, portalReason = reason)
+            }
+        } else {
+            null
+        }
+    }
+
+    private fun invalidTokenError(): StalkerApiError.Authorization =
+        StalkerApiError.TokenRejected(
+            message = "Portal token is invalid.",
+            reason = "not_valid_token"
+        )
+
+    private fun portalError(raw: String): StalkerApiError? {
+        if (raw.isBlank() || isPlaceholderErrorValue(raw)) return null
+        val normalized = raw.lowercase(Locale.ROOT)
+        return when {
+            normalized == "nothing_to_play" || normalized.contains("nothing to play") ->
+                StalkerApiError.ContentUnavailable(portalReason = "nothing_to_play")
+            listOf("not valid mac", "invalid mac").any(normalized::contains) ->
+                StalkerApiError.InvalidMac(raw, raw)
+            listOf("not_valid_token", "invalid token", "empty token").any(normalized::contains) ->
+                StalkerApiError.TokenRejected(raw, raw)
+            listOf("unsupported model", "invalid model", "device rejected", "stb type").any(normalized::contains) ->
+                StalkerApiError.ModelRejected(raw, raw)
+            listOf("access denied", "authorization", "unauthorized").any(normalized::contains) ->
+                StalkerApiError.Authorization(message = raw, portalReason = raw)
+            listOf("blocked", "disabled", "banned", "not allowed").any(normalized::contains) ->
+                StalkerApiError.AccountBlocked(message = raw, portalReason = raw)
+            else -> StalkerApiError.Server(message = raw, portalReason = raw)
+        }
     }
 
     /**
@@ -1410,10 +2384,152 @@ class OkHttpStalkerApiService @Inject constructor(
     private suspend inline fun <T> runApiCall(
         message: String,
         crossinline block: suspend () -> T
-    ): Result<T> = try {
-        Result.success(block())
-    } catch (error: Exception) {
-        Result.error(error.message ?: message, error)
+    ): Result<T> {
+        var attempt = 0
+        while (true) {
+            try {
+                return Result.success(block())
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val typed = when (error) {
+                    is StalkerApiError -> error
+                    is IOException -> StalkerApiError.Transport(error.message ?: message, error)
+                    else -> error
+                }
+                attempt += 1
+                // A 429 opens the provider-wide circuit breaker. Retrying inside the
+                // individual API operation would defeat that cooldown.
+                val retryable = typed is StalkerApiError.Transport ||
+                    (typed is StalkerApiError.Server && (typed.httpStatus ?: 500) >= 500)
+                if (!retryable || attempt >= MAX_OPERATION_ATTEMPTS) {
+                    return Result.error(typed.message ?: message, typed)
+                }
+                val exponential = 250L shl (attempt - 1)
+                val jitter = kotlin.random.Random.nextLong(100L, 401L)
+                delay((exponential + jitter).coerceIn(100L, MAX_RETRY_DELAY_MILLIS))
+            }
+        }
+    }
+
+    private fun Throwable.isTerminalStalkerDiscoveryFailure(): Boolean =
+        this is StalkerApiError.AccountBlocked ||
+            this is StalkerApiError.InvalidMac ||
+            this is StalkerApiError.DeviceConflict ||
+            this is StalkerApiError.DeviceNotRegistered ||
+            this is StalkerApiError.ClockSkew ||
+            this is StalkerApiError.RateLimited ||
+            this is StalkerApiError.TransportConsentRequired ||
+            this is StalkerApiError.DiscoveryBudgetExceeded
+
+    private fun Throwable.isInconclusiveLiveReadinessFailure(): Boolean {
+        val chain = generateSequence<Throwable>(this) { it.cause }.toList()
+        if (chain.any {
+                it is StalkerApiError.Authorization ||
+                    it is StalkerApiError.AccountBlocked ||
+                    it is StalkerApiError.ModelRejected ||
+                    it is StalkerApiError.BlockedOrConfiguration ||
+                    it is StalkerApiError.TransportConsentRequired ||
+                    it is StalkerApiError.RateLimited
+            }
+        ) {
+            return false
+        }
+        val normalizedMessage = chain.joinToString(" ") { it.message.orEmpty() }.lowercase()
+        val definitiveEmptyEvidence = listOf(
+            "returned no live channel categories",
+            "returned no live channels",
+            "live channels without a playback command"
+        ).any(normalizedMessage::contains)
+        return !definitiveEmptyEvidence && chain.any {
+            it is IOException ||
+                it is StalkerApiError.Server ||
+                it is StalkerApiError.Malformed ||
+                it is StalkerApiError.ResponseTooLarge ||
+                it is StalkerApiError.DiscoveryBudgetExceeded
+        }
+    }
+
+    private fun Throwable.isDefinitiveLiveReadinessFailure(): Boolean {
+        val normalizedMessage = generateSequence<Throwable>(this) { it.cause }
+            .joinToString(" ") { it.message.orEmpty() }
+            .lowercase()
+        return listOf(
+            "returned no live channel categories",
+            "returned no live channels",
+            "live channels without a playback command"
+        ).any(normalizedMessage::contains)
+    }
+
+    private fun Throwable.liveReadinessEvidenceCode(): String {
+        val chain = generateSequence<Throwable>(this) { it.cause }.toList()
+        return when {
+            chain.any { it is StalkerApiError.DiscoveryBudgetExceeded } -> "LIVE_BUDGET_EXHAUSTED"
+            chain.any { it is StalkerApiError.ResponseTooLarge } -> "LIVE_RESPONSE_TOO_LARGE"
+            chain.any { it is StalkerApiError.Malformed } -> "LIVE_MALFORMED_RESPONSE"
+            chain.any { it is StalkerApiError.Server } -> "LIVE_SERVER_ERROR"
+            chain.any { it is StalkerApiError.Transport } -> "LIVE_TRANSPORT_ERROR"
+            else -> "LIVE_INCONCLUSIVE"
+        }
+    }
+
+    private fun StalkerApiError.PartialAuthorization.requiresFreshSessionRetry(): Boolean =
+        generateSequence<Throwable>(this) { it.cause }
+            .any { cause ->
+                cause is StalkerApiError.TokenRejected ||
+                    cause.message.orEmpty().contains("token", ignoreCase = true)
+            }
+
+    private fun preferredAuthenticationFailure(current: Throwable?, candidate: Throwable): Throwable =
+        if (current == null || authenticationFailureRank(candidate) > authenticationFailureRank(current)) {
+            candidate
+        } else {
+            current
+        }
+
+    private fun authenticationFailureRank(error: Throwable): Int = when (error) {
+        is StalkerApiError.DeviceConflict -> 115
+        is StalkerApiError.DeviceNotRegistered -> 110
+        is StalkerApiError.ClockSkew -> 105
+        is StalkerApiError.PartialAuthorization -> 100
+        is StalkerApiError.AccountBlocked -> 95
+        is StalkerApiError.RateLimited -> 90
+        is StalkerApiError.TokenRejected -> 85
+        is StalkerApiError.InvalidMac -> 80
+        is StalkerApiError.Authorization -> 75
+        is StalkerApiError.ModelRejected -> 60
+        is StalkerApiError.Server -> 50
+        is StalkerApiError.Transport -> 40
+        is StalkerApiError.Malformed -> 30
+        else -> 20
+    }
+
+    private fun authenticationFailureOutcome(error: Throwable): String = when (error) {
+        is StalkerApiError.DeviceConflict -> "DEVICE_CONFLICT"
+        is StalkerApiError.DeviceNotRegistered -> "DEVICE_NOT_REGISTERED"
+        is StalkerApiError.ClockSkew -> "CLOCK_SKEW"
+        is StalkerApiError.PartialAuthorization -> "PARTIAL_AUTHORIZATION"
+        is StalkerApiError.AccountBlocked -> "ACCOUNT_BLOCKED"
+        is StalkerApiError.RateLimited -> "RATE_LIMITED"
+        is StalkerApiError.TokenRejected -> "TOKEN_REJECTED"
+        is StalkerApiError.InvalidMac -> "INVALID_MAC"
+        is StalkerApiError.Authorization -> "AUTHORIZATION_REJECTED"
+        is StalkerApiError.ModelRejected -> "MODEL_REJECTED"
+        is StalkerApiError.Server -> "SERVER_ERROR"
+        is StalkerApiError.Transport -> "TRANSPORT_ERROR"
+        is StalkerApiError.EmptyBody -> "EMPTY_BODY"
+        is StalkerApiError.TransportConsentRequired -> "TRANSPORT_CONSENT"
+        is StalkerApiError.Malformed -> "MALFORMED_RESPONSE"
+        is SocketTimeoutException -> "TIMEOUT"
+        is UnknownHostException -> "DNS_ERROR"
+        is IOException -> "IO_ERROR"
+        else -> "FAILED"
+    }
+
+    private fun endpointFamily(request: Request): String = when {
+        request.url.encodedPath.endsWith("/portal.php", ignoreCase = true) -> "PORTAL_PHP"
+        request.url.encodedPath.endsWith("/server/load.php", ignoreCase = true) -> "SERVER_LOAD"
+        else -> "OTHER"
     }
 
     private fun buildUrl(baseUrl: String, query: Map<String, String>): String {
@@ -1423,14 +2539,153 @@ class OkHttpStalkerApiService @Inject constructor(
         return "${baseUrl.trimEnd('/')}?$encodedQuery"
     }
 
-    private fun buildProfileQuery(profile: StalkerDeviceProfile): Map<String, String> {
+    private fun prepareQuery(
+        profile: StalkerDeviceProfile,
+        query: Map<String, String>
+    ): LinkedHashMap<String, String> {
+        val action = query["action"].orEmpty()
+        val matchingRule = profile.advancedOptions.requestRules
+            .firstOrNull { it.action.trim() == action }
+        if (matchingRule?.blockRequest == true) {
+            throw IOException("Stalker request '$action' was blocked by advanced settings.")
+        }
+        val prepared = LinkedHashMap<String, String>()
+        query.forEach { (key, value) -> prepared[key] = value }
+        matchingRule?.paramOverrides.orEmpty().forEach { override ->
+            val name = override.name.trim()
+            if (name.isBlank()) return@forEach
+            val value = override.value
+            if (value.isBlank()) {
+                prepared.remove(name)
+            } else {
+                prepared[name] = value
+            }
+        }
+        if (action == "get_profile" && prepared.containsKey("JsHttpRequest")) {
+            val jsValue = prepared.remove("JsHttpRequest")
+            if (jsValue != null) {
+                prepared["JsHttpRequest"] = jsValue
+            }
+        }
+        return prepared
+    }
+
+    private suspend fun <T> withTransportAwareStalkerCall(
+        request: Request,
+        profile: StalkerDeviceProfile,
+        block: suspend (Response) -> T
+    ): T {
+        val requestPriority = when {
+            request.url.queryParameter("action").equals("create_link", ignoreCase = true) ->
+                StalkerNetworkPriority.INTERACTIVE
+            currentCoroutineContext()[StalkerRequestPriorityContext]?.priority in setOf(
+                com.streamvault.domain.model.StalkerRequestPriority.EPG,
+                com.streamvault.domain.model.StalkerRequestPriority.BACKGROUND_INDEX
+            ) -> StalkerNetworkPriority.BACKGROUND
+            currentCoroutineContext()[StalkerRequestPriorityContext]?.priority ==
+                com.streamvault.domain.model.StalkerRequestPriority.VISIBLE_PREVIEW ->
+                StalkerNetworkPriority.PREFETCH
+            request.url.queryParameter("action").equals("get_epg_info", ignoreCase = true) ->
+                StalkerNetworkPriority.BACKGROUND
+            else -> StalkerNetworkPriority.FOREGROUND
+        }
+        val permit = requestCoordinator.acquireNetworkPermit(profile.providerId, requestPriority)
+        var nonRateLimitedResponseObserved = false
+        return try {
+            val baseClient = stalkerHttpClientFor(profile, request.url.toString())
+            val remainingMillis = profile.discoveryRuntime.remainingMillis()
+            val client = if (remainingMillis == Long.MAX_VALUE) {
+                baseClient
+            } else {
+                baseClient.newBuilder()
+                    .callTimeout(remainingMillis, TimeUnit.MILLISECONDS)
+                    .build()
+            }
+            withCancellableStalkerCall(client.newCall(request)) { response ->
+                if (response.code != 429) {
+                    nonRateLimitedResponseObserved = true
+                    requestCoordinator.recordNetworkSuccess(permit)
+                }
+                block(response)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (!nonRateLimitedResponseObserved) {
+                requestCoordinator.recordNetworkFailure(permit, error)
+            }
+            if (error is StalkerApiError.TransportConsentRequired) throw error
+            transportFactory.challengeForTlsFailure(request.url.toString(), error)?.let { challenge ->
+                throw StalkerApiError.TransportConsentRequired(challenge)
+            }
+            throw error
+        } finally {
+            requestCoordinator.releaseNetworkPermit(permit)
+        }
+    }
+
+    private fun Response.isDirectMediaResponse(): Boolean {
+        val prefix = runCatching { peekBody(CREATE_LINK_SNIFF_BYTES).bytes() }.getOrDefault(byteArrayOf())
+        val firstNonWhitespace = prefix.firstOrNull { byte ->
+            byte.toInt().toChar() !in setOf(' ', '\t', '\r', '\n')
+        }?.toInt()?.and(0xff)
+        // Incorrect application/octet-stream headers are common. JSON, XML, and HTML
+        // envelopes must still go through the semantic parser.
+        if (firstNonWhitespace in setOf('{'.code, '['.code, '<'.code)) return false
+
+        val mime = header("Content-Type").orEmpty().substringBefore(';').trim().lowercase(Locale.ROOT)
+        if (mime.startsWith("video/") || mime.startsWith("audio/") || mime in setOf(
+                "application/octet-stream",
+                "application/vnd.apple.mpegurl",
+                "application/x-mpegurl"
+            )
+        ) return true
+
+        fun startsWith(vararg expected: Int): Boolean = expected.indices.all { index ->
+            prefix.getOrNull(index)?.toInt()?.and(0xff) == expected[index]
+        }
+        val mpegProgramStream = startsWith(0x00, 0x00, 0x01, 0xba)
+        val matroska = startsWith(0x1a, 0x45, 0xdf, 0xa3)
+        val mp4 = prefix.size >= 8 && prefix.copyOfRange(4, 8).contentEquals("ftyp".toByteArray())
+        val transportStream = prefix.firstOrNull()?.toInt()?.and(0xff) == 0x47 &&
+            (prefix.getOrNull(188)?.toInt()?.and(0xff) == 0x47 || prefix.size < 189)
+        return mpegProgramStream || matroska || mp4 || transportStream
+    }
+
+    private fun stalkerHttpClientFor(profile: StalkerDeviceProfile, url: String): OkHttpClient {
+        val proxy = profile.advancedOptions.proxy
+        val scopeKey = sessionScopeKey(profile)
+        val grantKey = profile.transportGrant?.let { grant ->
+            "${grant.mode}:${grant.origin.authority}:${grant.spkiSha256.orEmpty()}"
+        } ?: "AUTO_STRICT"
+        val key = "$scopeKey|$grantKey|${proxy?.let { "${it.host}:${it.port}" } ?: "<direct>"}"
+        val transportClient = transportFactory.clientFor(url, profile.transportGrant)
+        return stalkerHttpClients.computeIfAbsent(key) {
+            transportClient.newBuilder()
+                // Stalker requests need one deterministic Cookie header containing both
+                // durable MAG identity cookies and server-issued affinity/session cookies.
+                // OkHttp's automatic cookie bridge would replace that merged header.
+                .cookieJar(CookieJar.NO_COOKIES)
+                .apply {
+                    if (proxy != null) {
+                        proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(proxy.host, proxy.port)))
+                    }
+                }
+                .build()
+        }
+    }
+
+    private fun buildProfileQuery(
+        profile: StalkerDeviceProfile,
+        handshakeRandom: String
+    ): Map<String, String> {
         val timestamp = (System.currentTimeMillis() / 1000L).toString()
         val preset = stalkerMagPresetSpec(profile.magPreset)
-        val metrics = buildMetricsJson(profile, preset)
-        return mapOf(
+        val metrics = buildMetricsJson(profile, handshakeRandom)
+        val hwVersion = profile.advancedOptions.hwVersion.trim().ifBlank { preset.hwVersion }
+        return linkedMapOf(
             "type" to "stb",
             "action" to "get_profile",
-            "JsHttpRequest" to "1-xml",
             "hd" to "1",
             "ver" to preset.versionString,
             "sn" to profile.serialNumber,
@@ -1441,31 +2696,30 @@ class OkHttpStalkerApiService @Inject constructor(
             "device_id" to profile.deviceId,
             "device_id2" to profile.deviceId2,
             "signature" to profile.signature,
-            "auth_second_step" to "1",
-            "hw_version" to preset.hwVersion,
+            "auth_second_step" to if (profile.authMode.requiresCredentials()) "1" else "0",
+            "hw_version" to hwVersion,
             "not_valid_token" to "0",
             "metrics" to metrics,
-            "hw_version_2" to preset.hwVersion,
+            // Real MAG hardware computes this with gSTB.GetHashVersion1(metrics, random).
+            // An empty value is truthful; substituting the hardware version is not a valid hash.
+            "hw_version_2" to "",
             "timestamp" to timestamp,
             "api_signature" to preset.apiSignature,
-            "prehash" to if (preset.requireStrictIdentity) "1" else "0",
+            "prehash" to "false",
             "num_banks" to "2",
             "player_version" to preset.imageVersion,
             "stb_lang" to profile.locale.ifBlank { preset.localization.substringBefore('.') },
-            "locale" to preset.localization
+            "locale" to preset.localization,
+            "JsHttpRequest" to "1-xml"
         )
     }
 
     private fun buildCookieHeader(url: String, profile: StalkerDeviceProfile): String {
         val cookies = linkedMapOf<String, String>()
-        profile.macAddress.takeIf { it.isNotBlank() }?.let { cookies["mac"] = it }
-        profile.locale.takeIf { it.isNotBlank() }?.let { cookies["stb_lang"] = it }
-        profile.timezone.takeIf { it.isNotBlank() }?.let { cookies["timezone"] = it }
-        profile.serialNumber.takeIf { it.isNotBlank() }?.let { cookies["sn"] = it }
-        profile.deviceId.takeIf { it.isNotBlank() }?.let { cookies["device_id"] = it }
-        profile.deviceId2.takeIf { it.isNotBlank() }?.let { cookies["device_id2"] = it }
-        profile.signature.takeIf { it.isNotBlank() }?.let { cookies["signature"] = it }
-        cookieJar.cookieHeaderFor(url).split(';')
+        profile.macAddress.takeIf { it.isNotBlank() }?.let { cookies["mac"] = encode(it) }
+        profile.locale.takeIf { it.isNotBlank() }?.let { cookies["stb_lang"] = encode(it) }
+        profile.timezone.takeIf { it.isNotBlank() }?.let { cookies["timezone"] = encode(it) }
+        cookieJarFor(profile).cookieHeaderFor(url).split(';')
             .mapNotNull { part ->
                 val key = part.substringBefore('=', missingDelimiterValue = "").trim()
                 val value = part.substringAfter('=', missingDelimiterValue = "").trim()
@@ -1480,7 +2734,8 @@ class OkHttpStalkerApiService @Inject constructor(
         url: String,
         profile: StalkerDeviceProfile,
         referer: String,
-        token: String
+        token: String,
+        allowAlternateEndpointRetry: Boolean = false
     ): JsonElement {
         val formBody = listOf(
             "login" to profile.username,
@@ -1491,12 +2746,13 @@ class OkHttpStalkerApiService @Inject constructor(
             "action" to "do_auth",
             "JsHttpRequest" to "1-xml"
         )
-        return runCatching {
+        return runSuspendCatching {
             requestJson(
                 url = url,
                 profile = profile,
                 referer = referer,
                 token = token,
+                allowAlternateEndpointRetry = allowAlternateEndpointRetry,
                 query = query,
                 method = "POST",
                 body = formBody
@@ -1507,6 +2763,7 @@ class OkHttpStalkerApiService @Inject constructor(
                 profile = profile,
                 referer = referer,
                 token = token,
+                allowAlternateEndpointRetry = allowAlternateEndpointRetry,
                 query = query + mapOf(
                     "login" to profile.username,
                     "password" to profile.password
@@ -1517,39 +2774,206 @@ class OkHttpStalkerApiService @Inject constructor(
 
     private fun buildMetricsJson(
         profile: StalkerDeviceProfile,
-        preset: StalkerMagPresetSpec
-    ): String {
-        if (preset.metricsJson != "{}") {
-            return preset.metricsJson
-        }
-        return buildString {
-            append('{')
-            append("\"mac\":\"").append(profile.macAddress).append("\",")
-            append("\"sn\":\"").append(profile.serialNumber).append("\",")
-            append("\"model\":\"").append(profile.deviceProfile).append("\",")
-            append("\"type\":\"STB\",")
-            append("\"uid\":\"").append(profile.deviceId.take(16)).append("\",")
-            append("\"random\":\"").append(profile.deviceId2.take(16)).append("\",")
-            append("\"signature\":\"").append(profile.signature.take(16)).append("\",")
-            append("\"video_out\":\"hdmi\"")
-            append('}')
-        }
-    }
+        handshakeRandom: String
+    ): String = JsonObject(
+        linkedMapOf(
+            "mac" to JsonPrimitive(profile.macAddress),
+            "sn" to JsonPrimitive(profile.serialNumber),
+            "model" to JsonPrimitive(profile.deviceProfile),
+            "type" to JsonPrimitive("STB"),
+            "uid" to JsonPrimitive(profile.deviceId2),
+            "random" to JsonPrimitive(handshakeRandom)
+        )
+    ).toString()
 
-    private fun captureResponseCookies(response: Response) {
+    private fun captureResponseCookies(response: Response, profile: StalkerDeviceProfile) {
         val cookies = Cookie.parseAll(response.request.url, response.headers)
         if (cookies.isNotEmpty()) {
-            cookieJar.saveFromResponse(response.request.url, cookies)
+            cookieJarFor(profile).saveFromResponse(response.request.url, cookies)
         }
     }
 
-    private fun JsonElement.totalPages(): Int {
-        val payload = payloadObjectOrNull() ?: return 1
-        val totalItems = payload["total_items"]?.primitiveContentOrNull()?.toIntOrNull() ?: return 1
-        val pageSize = pageSize(payload["data"]?.jsonArrayOrNull()?.size ?: 0).takeIf { it > 0 }
-            ?: return 1
-        return ((totalItems + pageSize - 1) / pageSize).coerceAtLeast(1).coerceAtMost(MAX_PAGE_COUNT)
+    private fun recordResolvedLoadUrl(request: Request, response: Response, profile: StalkerDeviceProfile) {
+        val requested = request.url.newBuilder().query(null).fragment(null).build().toString()
+        val resolved = response.request.url.newBuilder().query(null).fragment(null).build().toString()
+        if (requested == resolved) return
+        resolvedLoadUrls[resolvedLoadUrlKey(requested, profile)] = resolved
+        if (resolvedLoadUrls.size > MAX_RESOLVED_LOAD_URLS) {
+            resolvedLoadUrls.keys.firstOrNull()?.let(resolvedLoadUrls::remove)
+        }
     }
+
+    private fun resolvedLoadUrl(loadUrl: String, profile: StalkerDeviceProfile): String? =
+        resolvedLoadUrls[resolvedLoadUrlKey(loadUrl, profile)]
+
+    private fun resolvedLoadUrlKey(loadUrl: String, profile: StalkerDeviceProfile): String =
+        "${sessionScopeKey(profile)}|${StalkerUrlFactory.normalizePortalUrl(loadUrl)}"
+
+    private fun Response.toStalkerHttpError(
+        htmlErrorPage: Boolean = false,
+        bodySnippet: String = ""
+    ): StalkerApiError {
+        val retryAfterMillis = header("Retry-After")
+            ?.trim()
+            ?.let { raw ->
+                raw.toLongOrNull()
+                    ?.coerceAtLeast(0L)
+                    ?.times(1000L)
+                    ?: runCatching {
+                        (ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME)
+                            .toInstant()
+                            .toEpochMilli() - System.currentTimeMillis()).coerceAtLeast(0L)
+                    }.getOrNull()
+            }
+        return when (code) {
+            401 -> StalkerApiError.SessionExpired(
+                message = "Portal session expired with HTTP 401.",
+                httpStatus = 401,
+                reason = "http_401"
+            )
+            403 -> if (htmlErrorPage || !bodySnippet.isSessionAuthorizationBody()) {
+                StalkerApiError.BlockedOrConfiguration(
+                    message = "Portal request was blocked with HTTP $code.",
+                    portalReason = if (htmlErrorPage) "html_error_page" else "http_403_forbidden"
+                )
+            } else {
+                StalkerApiError.SessionExpired(
+                    message = "Portal session expired with HTTP 403.",
+                    httpStatus = code
+                )
+            }
+            429 -> StalkerApiError.RateLimited(
+                httpStatus = code,
+                retryAfterMillis = retryAfterMillis
+            )
+            in 500..599 -> StalkerApiError.Server(
+                message = "Portal request failed with HTTP $code.",
+                httpStatus = code
+            )
+            else -> StalkerApiError.BlockedOrConfiguration(
+                message = "Portal request failed with HTTP $code."
+            )
+        }
+    }
+
+    private fun String.isSessionAuthorizationBody(): Boolean {
+        val normalized = lowercase(Locale.ROOT)
+        return listOf(
+            "not_valid_token",
+            "invalid token",
+            "token expired",
+            "session expired",
+            "authorization failed",
+            "unauthorized"
+        ).any(normalized::contains)
+    }
+
+    private fun sessionScopeFor(profile: StalkerDeviceProfile): SessionScope {
+        val now = System.currentTimeMillis()
+        val key = if (profile.authEpoch > 0L) {
+            sessionScopeKey(profile)
+        } else {
+            scopeAliases[sessionScopeAliasKey(profile)] ?: sessionScopeKey(profile)
+        }
+        val scope = sessionScopes.computeIfAbsent(key) { SessionScope(lastAccessAt = now) }
+        scope.lastAccessAt = now
+        if (sessionScopes.size > MAX_SESSION_SCOPES) {
+            val excess = sessionScopes.size - MAX_SESSION_SCOPES
+            sessionScopes.entries
+                .filter { it.key != key }
+                .sortedWith(
+                    compareBy<Map.Entry<String, SessionScope>>(
+                        { now - it.value.lastAccessAt <= SESSION_SCOPE_IDLE_MILLIS },
+                        { it.value.lastAccessAt }
+                    )
+                )
+                .take(excess)
+                .forEach { (staleKey, _) ->
+                    sessionScopes.remove(staleKey)
+                    stalkerHttpClients.keys.removeIf { clientKey -> clientKey.startsWith("$staleKey|") }
+                }
+        }
+        return scope
+    }
+
+    private fun cookieJarFor(profile: StalkerDeviceProfile): InMemoryStalkerCookieJar =
+        sessionScopeFor(profile).cookieJar
+
+    private fun sessionScopeKey(profile: StalkerDeviceProfile): String {
+        val normalized = listOf(
+            StalkerUrlFactory.normalizePortalUrl(profile.portalUrl),
+            profile.macAddress.trim().uppercase(Locale.ROOT),
+            profile.username.trim(),
+            profile.password,
+            profile.deviceProfile.trim(),
+            profile.deviceId.trim(),
+            profile.deviceId2.trim(),
+            profile.serialNumber.trim(),
+            profile.compatibilityProfileId,
+            profile.advancedOptions.proxy?.let { "${it.host}:${it.port}" }.orEmpty()
+        ).joinToString("\u001f")
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(normalized.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return "provider:${profile.providerId}|epoch:${profile.authEpoch}|$digest"
+    }
+
+    private fun sessionScopeAliasKey(profile: StalkerDeviceProfile): String {
+        val normalized = listOf(
+            profile.providerId,
+            StalkerUrlFactory.normalizePortalUrl(profile.portalUrl),
+            profile.macAddress.trim().uppercase(Locale.ROOT),
+            profile.username.trim(),
+            profile.password,
+            profile.deviceProfile.trim(),
+            profile.deviceId.trim(),
+            profile.deviceId2.trim(),
+            profile.serialNumber.trim(),
+            profile.compatibilityProfileId,
+            profile.advancedOptions.proxy?.let { "${it.host}:${it.port}" }.orEmpty()
+        ).joinToString("\u001f")
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(normalized.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return "provider:${profile.providerId}|alias|$digest"
+    }
+
+    private fun hashDiscoveryHeaderPolicy(profile: StalkerDeviceProfile): String {
+        val policy = buildString {
+            append(profile.httpUserAgent)
+            append('\u001f')
+            append(profile.httpHeaders)
+            append('\u001f')
+            profile.headerOverrides.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                .forEach { (name, value) ->
+                    append(name.lowercase(Locale.ROOT))
+                    append('=')
+                    append(value.orEmpty())
+                    append('\u001e')
+                }
+        }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(policy.toByteArray(Charsets.UTF_8))
+            .take(12)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun JsonElement.totalPages(fallbackPage: Int = 1): Int {
+        return (advertisedTotalPages() ?: fallbackPage).coerceAtLeast(1)
+    }
+
+    private fun JsonElement.advertisedTotalPages(): Int? {
+        val totalItems = advertisedTotalItems() ?: return null
+        val fallbackSize = payloadObjectOrNull()?.get("data")?.jsonArrayOrNull()?.size ?: 0
+        val pageSize = pageSize(fallbackSize).takeIf { it > 0 } ?: return null
+        return ((totalItems + pageSize - 1) / pageSize).coerceAtLeast(1)
+    }
+
+    private fun JsonElement.advertisedTotalItems(): Int? = payloadObjectOrNull()
+        ?.get("total_items")
+        ?.primitiveContentOrNull()
+        ?.toIntOrNull()
+        ?.takeIf { it >= 0 }
 
     private fun JsonElement.pageSize(fallback: Int): Int {
         val payload = payloadObjectOrNull() ?: return fallback
@@ -1559,7 +2983,7 @@ class OkHttpStalkerApiService @Inject constructor(
             ?: fallback
     }
 
-    private fun JsonElement.toProviderProfile(): StalkerProviderProfile {
+    private fun JsonElement.toProviderProfile(timezone: String): StalkerProviderProfile {
         val payload = payloadObjectOrNull()
         return StalkerProviderProfile(
             accountId = payload?.findString("id"),
@@ -1570,10 +2994,13 @@ class OkHttpStalkerApiService @Inject constructor(
                 ?.toIntOrNull()
                 ?: payload?.findString("max_connections")?.toIntOrNull(),
             expirationDate = payload?.findString("expire_billing_date")
-                ?.let(::parseExpirationDate)
-                ?: payload?.findString("end_date")?.let(::parseExpirationDate),
+                ?.let { parseExpirationDate(it, timezone.toPortalZoneId()) }
+                ?: payload?.findString("end_date")?.let { parseExpirationDate(it, timezone.toPortalZoneId()) },
             statusLabel = payload?.findString("status"),
-            authAccess = payload?.findBoolean("auth_access")
+            authAccess = payload?.findBoolean("auth_access"),
+            reportedStbType = payload?.findString("stb_type")
+                ?: payload?.findString("device_model")
+                ?: payload?.findString("model")
         )
     }
 
@@ -1585,6 +3012,7 @@ class OkHttpStalkerApiService @Inject constructor(
             expirationDate = other.expirationDate ?: expirationDate,
             statusLabel = other.statusLabel ?: statusLabel,
             authAccess = other.authAccess ?: authAccess,
+            reportedStbType = other.reportedStbType ?: reportedStbType,
             moduleNames = if (other.moduleNames.isNotEmpty()) other.moduleNames else moduleNames,
             bootstrapStrategy = if (other.bootstrapStrategy != StalkerBootstrapStrategy.AUTO) {
                 other.bootstrapStrategy
@@ -1672,18 +3100,21 @@ class OkHttpStalkerApiService @Inject constructor(
             StalkerCategoryRecord(
                 id = id,
                 name = name,
-                alias = entry.findString("alias")
+                alias = entry.findString("alias"),
+                advertisedItemCount = entry.findString("count")?.toIntOrNull()
+                    ?: entry.findString("items")?.toIntOrNull()
+                    ?: entry.findString("total")?.toIntOrNull()
             )
         }
     }
 
-    private fun JsonElement.toItemRecords(): List<StalkerItemRecord> =
-        extractItemEntries().mapNotNull { entry -> entry.toItemRecord() }
+    private fun JsonElement.toItemRecords(zoneId: ZoneId): List<StalkerItemRecord> =
+        extractItemEntries().mapNotNull { entry -> entry.toItemRecord(zoneId) }
 
     private fun JsonElement.extractItemEntries(): List<JsonObject> =
         extractListElements().mapNotNull { it.jsonObjectOrNull() }
 
-    private fun JsonObject.toItemRecord(): StalkerItemRecord? {
+    private fun JsonObject.toItemRecord(zoneId: ZoneId): StalkerItemRecord? {
         val id = findString("id")
             ?: findString("ch_id")
             ?: findString("video_id")
@@ -1753,13 +3184,15 @@ class OkHttpStalkerApiService @Inject constructor(
                 findString("cmd"),
                 findString("container_extension")
             ),
-            addedAt = parseDateTime(findString("added")) ?: 0L,
+            addedAt = parseDateTime(findString("added"), zoneId) ?: 0L,
             isAdult = findBoolean("censored") == true,
-            isSeries = findBoolean("is_series") == true || findString("is_series") == "1"
+            isSeries = findBoolean("is_series") == true || findString("is_series") == "1",
+            hasSeriesMarker = findString("is_series")?.trim()?.lowercase() in
+                setOf("0", "1", "true", "false")
         )
     }
 
-    private fun GsonJsonObject.toItemRecord(): StalkerItemRecord? {
+    private fun GsonJsonObject.toItemRecord(zoneId: ZoneId): StalkerItemRecord? {
         val id = findString("id")
             ?: findString("ch_id")
             ?: findString("video_id")
@@ -1829,9 +3262,11 @@ class OkHttpStalkerApiService @Inject constructor(
                 findString("cmd"),
                 findString("container_extension")
             ),
-            addedAt = parseDateTime(findString("added")) ?: 0L,
+            addedAt = parseDateTime(findString("added"), zoneId) ?: 0L,
             isAdult = findBoolean("censored") == true,
-            isSeries = findBoolean("is_series") == true || findString("is_series") == "1"
+            isSeries = findBoolean("is_series") == true || findString("is_series") == "1",
+            hasSeriesMarker = findString("is_series")?.trim()?.lowercase() in
+                setOf("0", "1", "true", "false")
         )
     }
 
@@ -1881,8 +3316,8 @@ class OkHttpStalkerApiService @Inject constructor(
         episodeEntries: List<JsonObject>,
         fallbackSeasonNumber: Int? = null
     ): StalkerSeasonRecord {
-        val seasonNumber = findString("season_id")?.toIntOrNull()
-            ?: findString("season_number")?.toIntOrNull()
+        val seasonNumber = findString("season_number")?.toIntOrNull()
+            ?: findString("season_id")?.toIntOrNull()
             ?: extractSeasonNumberFromCmd(findString("cmd"))
             ?: fallbackSeasonNumber
             ?: 1
@@ -1892,12 +3327,13 @@ class OkHttpStalkerApiService @Inject constructor(
         val explicitEpisodes = episodeEntries
             .filterNot { entry -> entry.looksLikeSeasonShellRow() }
             .mapIndexedNotNull { index, entry ->
-            entry.toEpisodeRecord(index + 1, seasonNumber)
+                entry.toEpisodeRecord(index + 1, seasonNumber)?.copy(seasonNumber = seasonNumber)
             }
         return StalkerSeasonRecord(
             seasonNumber = seasonNumber,
             name = seasonName,
             coverUrl = sanitizeUrl(findString("screenshot_uri")) ?: sanitizeUrl(findString("cover")),
+            cmd = findString("cmd"),
             episodes = explicitEpisodes.takeUnless { it.isEmpty() || it.isSeasonShellOnly() }
                 ?: buildEpisodesFromSeriesShell(seasonNumber, seasonName)
         )
@@ -1920,6 +3356,7 @@ class OkHttpStalkerApiService @Inject constructor(
             seasonNumber = seasonNumber,
             name = seasonName,
             coverUrl = sanitizeUrl(findString("screenshot_uri")) ?: sanitizeUrl(findString("cover")),
+            cmd = findString("cmd"),
             episodes = buildEpisodesFromSeriesShell(seasonNumber, seasonName)
         )
     }
@@ -1945,6 +3382,8 @@ class OkHttpStalkerApiService @Inject constructor(
                 ?: findString("season_number")?.toIntOrNull()
                 ?: fallbackSeasonNumber,
             cmd = findString("cmd"),
+            playbackSelector = findString("series_number")?.toIntOrNull()
+                ?: findString("episode_number")?.toIntOrNull(),
             coverUrl = sanitizeUrl(findString("screenshot_uri")) ?: sanitizeUrl(findString("cover")),
             plot = findString("description") ?: findString("plot"),
             durationSeconds = findString("duration")?.toIntOrNull() ?: 0,
@@ -1970,6 +3409,12 @@ class OkHttpStalkerApiService @Inject constructor(
             return true
         }
         return extractSeasonNumberFromCmd(findString("cmd")) != null
+    }
+
+    private fun JsonObject.looksLikeVodSeasonShell(): Boolean {
+        if (findBoolean("is_season") == true || findString("is_season") == "1") return true
+        if (findString("video_id") != null && findString("series_number") == null) return true
+        return looksLikeSeasonShellRow()
     }
 
     private fun JsonObject.buildEpisodesFromSeriesShell(
@@ -2032,14 +3477,15 @@ class OkHttpStalkerApiService @Inject constructor(
         }.getOrNull()
     }
 
-    private fun JsonElement.toProgramRecords(channelId: String? = null): List<StalkerProgramRecord> {
+    private fun JsonElement.toProgramRecords(channelId: String? = null, timezone: String): List<StalkerProgramRecord> {
+        val zoneId = timezone.toPortalZoneId()
         return extractListElements().mapNotNull { entry ->
             val resolvedChannelId = channelId ?: entry.findProgramChannelId() ?: return@mapNotNull null
             val startMillis = entry.findString("start_timestamp")?.toLongOrNull()?.times(1000L)
-                ?: entry.findString("time")?.let(::parseDateTime)
+                ?: entry.findString("time")?.let { parseDateTime(it, zoneId) }
                 ?: return@mapNotNull null
             val endMillis = entry.findString("stop_timestamp")?.toLongOrNull()?.times(1000L)
-                ?: entry.findString("time_to")?.let(::parseDateTime)
+                ?: entry.findString("time_to")?.let { parseDateTime(it, zoneId) }
                 ?: startMillis + (entry.findString("duration")?.toLongOrNull()?.times(60_000L) ?: DEFAULT_PROGRAM_DURATION_MILLIS)
             StalkerProgramRecord(
                 id = entry.findString("id") ?: "$resolvedChannelId:$startMillis",
@@ -2080,6 +3526,15 @@ class OkHttpStalkerApiService @Inject constructor(
         }
     }
 
+    private fun JsonElement.isRecognizedCatalogPayload(): Boolean {
+        if (this is JsonArray) return true
+        val js = rootObjectOrNull()?.get("js") ?: return false
+        if (js is JsonArray) return true
+        val wrapper = js.jsonObjectOrNull() ?: return false
+        return wrapper["data"] is JsonArray || wrapper["data"] is JsonObject ||
+            wrapper["items"] is JsonArray || wrapper["items"] is JsonObject
+    }
+
     private fun JsonElement.findString(key: String): String? {
         val payload = payloadObjectOrNull()
         return payload?.findString(key)
@@ -2114,6 +3569,11 @@ class OkHttpStalkerApiService @Inject constructor(
                 "0", "false", "no" -> false
                 else -> null
             }
+    }
+
+    private fun JsonObject.findInt(key: String): Int? {
+        val element = this[key] as? JsonPrimitive ?: return null
+        return element.contentOrNull?.trim()?.toIntOrNull()
     }
 
     private fun GsonJsonObject.findString(key: String): String? {
@@ -2217,8 +3677,8 @@ class OkHttpStalkerApiService @Inject constructor(
             StalkerAuthMode.AUTO -> buildList {
                 val hasMac = profile.macAddress.isNotBlank()
                 val hasCredentials = profile.username.isNotBlank()
-                if (hasMac && hasCredentials) add(StalkerAuthMode.MAC_PLUS_CREDENTIALS)
                 if (hasMac) add(StalkerAuthMode.MAC_ONLY)
+                if (hasMac && hasCredentials) add(StalkerAuthMode.MAC_PLUS_CREDENTIALS)
                 if (hasCredentials) add(StalkerAuthMode.CREDENTIALS_ONLY)
                 if (isEmpty()) add(StalkerAuthMode.MAC_ONLY)
             }
@@ -2230,6 +3690,49 @@ class OkHttpStalkerApiService @Inject constructor(
         profile: StalkerDeviceProfile,
         effectiveAuthMode: StalkerAuthMode
     ): List<StalkerRecipeSpec> {
+        val requestedProfile = StalkerCompatibilityRegistry.find(profile.requestedProfileId)
+        val manuallySelected = profile.requestedProfileId != StalkerCompatibilityProfileIds.AUTO
+        if (manuallySelected && requestedProfile != null) {
+            val base = StalkerCompatibilityRegistry.baseFingerprint(requestedProfile)
+            val preset = base.preset ?: profile.magPreset
+            val captured = fallbackRecipesFor(effectiveAuthMode).firstOrNull {
+                it.recipe == base.bootstrapRecipe && it.magPreset == preset
+            }
+            return listOf(
+                (captured ?: defaultRecipeFor(effectiveAuthMode, profile.portalFingerprint, preset)).copy(
+                    recipe = base.bootstrapRecipe ?: profile.bootstrapRecipe,
+                    magPreset = preset,
+                    compatibilityProfileId = requestedProfile.id
+                )
+            )
+        }
+        if (!profile.allowCompatibilityDiscovery) {
+            val learnedProfile = StalkerCompatibilityRegistry.find(profile.compatibilityProfileId)
+                ?: StalkerCompatibilityRegistry.find(
+                    StalkerCompatibilityRegistry.idForLegacyPreset(profile.magPreset)
+                )
+            learnedProfile?.let { learned ->
+                val base = StalkerCompatibilityRegistry.baseFingerprint(learned)
+                val preset = base.preset ?: profile.magPreset
+                val captured = fallbackRecipesFor(effectiveAuthMode).firstOrNull {
+                    it.recipe == base.bootstrapRecipe && it.magPreset == preset
+                }
+                return listOf(
+                    (captured ?: defaultRecipeFor(effectiveAuthMode, profile.portalFingerprint, preset)).copy(
+                        recipe = base.bootstrapRecipe ?: profile.bootstrapRecipe,
+                        magPreset = preset,
+                        compatibilityProfileId = learned.id
+                    )
+                )
+            }
+            return listOf(
+                defaultRecipeFor(effectiveAuthMode, profile.portalFingerprint, profile.magPreset).copy(
+                    recipe = profile.bootstrapRecipe,
+                    magPreset = profile.magPreset,
+                    compatibilityProfileId = profile.compatibilityProfileId
+                )
+            )
+        }
         val defaultRecipe = defaultRecipeFor(
             authMode = effectiveAuthMode,
             fingerprintHint = profile.portalFingerprint,
@@ -2248,26 +3751,75 @@ class OkHttpStalkerApiService @Inject constructor(
                     presetHint = profile.magPreset
                 ).magPreset
         )
-        return (listOf(defaultRecipe) + fallbackRecipesFor(effectiveAuthMode))
-            .distinctBy { "${it.recipe}:${it.magPreset}:${it.authMode}" }
+        if (effectiveAuthMode != StalkerAuthMode.MAC_ONLY) {
+            return (listOf(defaultRecipe) + fallbackRecipesFor(effectiveAuthMode))
+                .distinctBy { "${it.recipe}:${it.magPreset}:${it.authMode}" }
+                .take(StalkerCompatibilityRegistry.MAX_AUTOMATIC_ATTEMPTS)
+        }
+        val preferred = when {
+            profile.portalFingerprint != StalkerPortalFingerprint.BASIC_MAC ->
+                StalkerCompatibilityRegistry.idForLegacyPreset(defaultRecipe.magPreset)
+            profile.compatibilityProfileId == StalkerCompatibilityProfileIds.AUTO -> null
+            profile.compatibilityProfileId == StalkerCompatibilityProfileIds.CLASSIC_MAG250_GENERIC &&
+                profile.magPreset != StalkerMagPreset.GENERIC_SAFE ->
+                StalkerCompatibilityRegistry.idForLegacyPreset(profile.magPreset)
+            else -> profile.compatibilityProfileId
+        }
+        return StalkerCompatibilityRegistry.classicAutomaticOrder(preferred).map { candidate ->
+            val base = StalkerCompatibilityRegistry.baseFingerprint(candidate)
+            val preset = base.preset ?: profile.magPreset
+            val capturedRecipe = fallbackRecipesFor(effectiveAuthMode).firstOrNull {
+                it.recipe == base.bootstrapRecipe && it.magPreset == preset
+            } ?: defaultRecipeFor(effectiveAuthMode, profile.portalFingerprint, preset).copy(
+                recipe = base.bootstrapRecipe ?: defaultRecipe.recipe,
+                magPreset = preset
+            )
+            val selectedRecipe = if (candidate.id == preferred &&
+                    (profile.portalFingerprint != StalkerPortalFingerprint.BASIC_MAC ||
+                        profile.bootstrapRecipe != StalkerBootstrapRecipe.GENERIC_SAFE ||
+                        defaultRecipe.recipe != StalkerBootstrapRecipe.GENERIC_SAFE)
+                ) {
+                    defaultRecipe
+                } else {
+                    capturedRecipe
+                }
+            selectedRecipe.copy(
+                compatibilityProfileId = candidate.id
+            )
+        }.ifEmpty { listOf(defaultRecipe) }
+            .distinctBy { it.compatibilityProfileId }
+            .take(StalkerCompatibilityRegistry.MAX_AUTOMATIC_ATTEMPTS)
     }
 
     private fun candidateAuthAttempts(
         profile: StalkerDeviceProfile,
-        effectiveAuthMode: StalkerAuthMode
+        effectiveAuthMode: StalkerAuthMode,
+        hintedLoadUrls: List<String> = emptyList()
     ): List<StalkerAuthAttempt> {
         val recipes = candidateRecipes(profile, effectiveAuthMode)
+            .take(profile.discoveryBudget.maxIdentityProfiles)
         val defaultRecipe = recipes.firstOrNull() ?: return emptyList()
+        if (!profile.allowCompatibilityDiscovery) {
+            val loadUrl = orderedLoadUrlCandidates(profile, defaultRecipe, hintedLoadUrls).firstOrNull()
+                ?: return emptyList()
+            return recipes.mapIndexed { recipeIndex, recipe ->
+                StalkerAuthAttempt(recipeIndex, recipe, loadUrl)
+            }
+        }
         val hasLearnedEndpointPreference = profile.endpointPreference != StalkerEndpointPreference.AUTO ||
             defaultRecipe.endpointPreference != StalkerEndpointPreference.AUTO
         return if (hasLearnedEndpointPreference) {
             recipes.flatMapIndexed { recipeIndex, recipe ->
-                orderedLoadUrlCandidates(profile, recipe).map { loadUrl ->
+                orderedLoadUrlCandidates(profile, recipe, hintedLoadUrls)
+                    .take(profile.discoveryBudget.maxEndpointCandidates)
+                    .map { loadUrl ->
                     StalkerAuthAttempt(recipeIndex, recipe, loadUrl)
                 }
             }
         } else {
-            orderedLoadUrlCandidates(profile, defaultRecipe).flatMap { loadUrl ->
+            orderedLoadUrlCandidates(profile, defaultRecipe, hintedLoadUrls)
+                .take(profile.discoveryBudget.maxEndpointCandidates)
+                .flatMap { loadUrl ->
                 recipes.mapIndexed { recipeIndex, recipe ->
                     StalkerAuthAttempt(recipeIndex, recipe, loadUrl)
                 }
@@ -2275,19 +3827,109 @@ class OkHttpStalkerApiService @Inject constructor(
         }
     }
 
+    private fun promoteCompatibilityAttempt(
+        attempts: ArrayDeque<StalkerAuthAttempt>,
+        compatibilityProfileId: String,
+        loadUrl: String
+    ) {
+        val queued = attempts.toList()
+        val promoted = queued.firstOrNull { candidate ->
+            candidate.recipe.compatibilityProfileId == compatibilityProfileId &&
+                candidate.loadUrl == loadUrl
+        } ?: return
+        attempts.clear()
+        attempts.addLast(promoted)
+        queued.filterNot { it === promoted }.forEach(attempts::addLast)
+    }
+
+    /**
+     * Best-effort discovery of the portal's install path. Many portals serve the API from a
+     * non-root base (e.g. `/stalker_portal/`); for those, a bare `GET /` typically redirects
+     * to `<base>/c/`. Following that redirect once (same-origin only, enforced by the
+     * transport layer) reveals the base path and lets discovery try the correct
+     * `server/load.php` first instead of burning the request budget on 404/403 probes.
+     *
+     * Sends no MAC/cookies/identity headers and never throws: any failure simply yields no
+     * hint. Runs only for compatibility discovery (add-provider / repair), where endpoint
+     * order matters; saved providers reuse their learned endpoint.
+     */
+    private suspend fun probePortalBaseHintCandidates(profile: StalkerDeviceProfile): List<String> {
+        if (!profile.allowCompatibilityDiscovery) return emptyList()
+        if (!StalkerUrlFactory.isBarePortalBase(profile.portalUrl)) return emptyList()
+        val normalized = StalkerUrlFactory.normalizePortalUrl(profile.portalUrl)
+        val baseUrl = "$normalized/"
+        return runCatching {
+            val remaining = profile.discoveryRuntime.remainingMillis()
+            val timeoutMillis = minOf(PORTAL_BASE_HINT_TIMEOUT_MILLIS, remaining)
+            if (timeoutMillis <= 0L) return emptyList()
+            val client = transportFactory.clientFor(baseUrl, profile.transportGrant)
+                .newBuilder()
+                .callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+                .build()
+            val request = Request.Builder()
+                .url(baseUrl)
+                .header("User-Agent", profile.userAgent)
+                .header("Accept", "*/*")
+                .build()
+            withCancellableStalkerCall(client.newCall(request)) { response ->
+                response.use {
+                    val finalUrl = response.request.url
+                    val path = finalUrl.encodedPath.trimEnd('/')
+                    if (!path.endsWith("/c", ignoreCase = true)) return@withCancellableStalkerCall emptyList()
+                    val portalBase = path.dropLast(2)
+                    if (portalBase.isNotEmpty() &&
+                        (!portalBase.startsWith("/") || portalBase.substringAfterLast('/').isEmpty())
+                    ) {
+                        return@withCancellableStalkerCall emptyList()
+                    }
+                    val origin = "${finalUrl.scheme}://${finalUrl.host}" +
+                        if (finalUrl.port != defaultPortForScheme(finalUrl.scheme)) ":${finalUrl.port}" else ""
+                    listOf(
+                        "$origin$portalBase/server/load.php",
+                        "$origin$portalBase/portal.php"
+                    )
+                }
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            emptyList()
+        }.also { hinted ->
+            if (hinted.isNotEmpty()) {
+                Log.d(TAG, "Stalker portal base hint ${runCatching { URI(baseUrl).host }.getOrNull().orEmpty()} resolved=${hinted.first()}")
+            }
+        }
+    }
+
+    private fun defaultPortForScheme(scheme: String): Int =
+        if (scheme.equals("https", ignoreCase = true)) 443 else 80
+
     private fun orderedLoadUrlCandidates(
         profile: StalkerDeviceProfile,
-        recipe: StalkerRecipeSpec
+        recipe: StalkerRecipeSpec,
+        hintedLoadUrls: List<String> = emptyList()
     ): List<String> {
-        val baseCandidates = StalkerUrlFactory.loadUrlCandidates(profile.portalUrl)
+        val baseCandidates = (hintedLoadUrls + StalkerUrlFactory.loadUrlCandidates(profile.portalUrl)).distinct()
+        when (profile.endpointPreference) {
+            StalkerEndpointPreference.PORTAL -> {
+                return baseCandidates.filter { candidate ->
+                    candidate.lowercase(Locale.ROOT).endsWith("/portal.php")
+                }.ifEmpty { baseCandidates }
+            }
+            StalkerEndpointPreference.SERVER_LOAD -> {
+                return baseCandidates.filter { candidate ->
+                    candidate.lowercase(Locale.ROOT).endsWith("/server/load.php")
+                }.ifEmpty { baseCandidates }
+            }
+            StalkerEndpointPreference.AUTO -> Unit
+        }
         val preferred = recipe.endpointPreference.takeUnless { it == StalkerEndpointPreference.AUTO }
-            ?: profile.endpointPreference
         return when (preferred) {
             StalkerEndpointPreference.PORTAL ->
                 baseCandidates.sortedByDescending { candidate -> candidate.lowercase(Locale.ROOT).endsWith("/portal.php") }
             StalkerEndpointPreference.SERVER_LOAD ->
                 baseCandidates.sortedByDescending { candidate -> candidate.lowercase(Locale.ROOT).endsWith("/server/load.php") }
-            StalkerEndpointPreference.AUTO -> baseCandidates
+            StalkerEndpointPreference.AUTO,
+            null -> baseCandidates
         }
     }
 
@@ -2393,6 +4035,15 @@ class OkHttpStalkerApiService @Inject constructor(
     companion object {
         private const val TAG = "OkHttpStalkerApi"
         private const val MAX_PAGE_COUNT = 200
+        private const val MAX_DISCOVERY_CATEGORY_PROBES = 8
+        private const val MAX_RESOLVED_LOAD_URLS = 64
+        private const val MAX_SESSION_SCOPES = 16
+        private const val MAX_OPERATION_ATTEMPTS = 3
+        private const val MAX_RETRY_DELAY_MILLIS = 30_000L
+        private const val HTML_ERROR_SNIFF_BYTES = 2_048L
+        private const val CREATE_LINK_SNIFF_BYTES = 512L
+        private const val PORTAL_BASE_HINT_TIMEOUT_MILLIS = 8_000L
+        private const val SESSION_SCOPE_IDLE_MILLIS = 30 * 60_000L
         private const val DEFAULT_PROGRAM_DURATION_MILLIS = 30 * 60_000L
         /** Hard ceiling for the streamed `get_epg_info` body; anything larger is treated as a portal fault. */
         private const val MAX_EPG_BYTES = 64L * 1024L * 1024L
@@ -2400,9 +4051,65 @@ class OkHttpStalkerApiService @Inject constructor(
         private const val MAX_INLINE_EPG_RECORDS = 1500
         private val FORM_URL_ENCODED_MEDIA_TYPE = "application/x-www-form-urlencoded".toMediaType()
         private const val DEFAULT_VERSION_STRING =
-            "ImageDescription: 0.2.18-r23-250; ImageDate: Wed Oct 31 15:22:54 EEST 2018; PORTAL version: 5.6.2; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x58c"
+            "ImageDescription: 0.2.18-r19-pub-250; ImageDate: Mon Jun 12 11:04:49 EEST 2017; PORTAL version: 5.6.10; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x23"
     }
 }
+
+internal fun <T> sampleDiscoveryCategories(categories: List<T>, limit: Int): List<T> {
+    if (limit <= 0 || categories.isEmpty()) return emptyList()
+    if (categories.size <= limit) return categories
+    if (limit == 1) return listOf(categories.first())
+    val lastIndex = categories.lastIndex
+    return (0 until limit)
+        .map { sampleIndex -> (sampleIndex * lastIndex) / (limit - 1) }
+        .distinct()
+        .map(categories::get)
+}
+
+internal fun sampleLiveDiscoveryCategories(
+    categories: List<StalkerCategoryRecord>,
+    limit: Int
+): List<StalkerCategoryRecord> {
+    if (limit <= 0 || categories.isEmpty()) return emptyList()
+    if (categories.size <= limit) {
+        return categories.sortedWith(
+            compareByDescending<StalkerCategoryRecord> { it.advertisedItemCount ?: -1 }
+                .thenBy { categories.indexOf(it) }
+        )
+    }
+    val prioritized = categories.withIndex()
+        .filter { (_, category) -> (category.advertisedItemCount ?: 0) > 0 }
+        .sortedWith(
+            compareByDescending<IndexedValue<StalkerCategoryRecord>> {
+                it.value.advertisedItemCount ?: 0
+            }.thenBy(IndexedValue<StalkerCategoryRecord>::index)
+        )
+        .map(IndexedValue<StalkerCategoryRecord>::value)
+    return buildList {
+        prioritized.forEach { category ->
+            if (size < limit && category !in this) add(category)
+        }
+        // Preserve coverage at both ends even when high-confidence categories consume part of
+        // the sample budget.
+        listOf(categories.first(), categories.last()).forEach { category ->
+            if (size < limit && category !in this) add(category)
+        }
+        sampleDiscoveryCategories(categories, limit).forEach { category ->
+            if (size < limit && category !in this) add(category)
+        }
+        categories.forEach { category ->
+            if (size < limit && category !in this) add(category)
+        }
+    }
+}
+
+private fun <T> kotlin.Result<T>.getOrNullPreservingCancellation(): T? = fold(
+    onSuccess = { it },
+    onFailure = { error ->
+        if (error is CancellationException) throw error
+        null
+    }
+)
 
 internal fun buildStalkerDeviceProfile(
     portalUrl: String,
@@ -2419,14 +4126,36 @@ internal fun buildStalkerDeviceProfile(
     deviceProfile: String,
     timezone: String,
     locale: String,
+    httpUserAgentOverride: String = "",
+    httpHeadersOverride: String = "",
     serialNumberOverride: String = "",
     deviceIdOverride: String = "",
     deviceId2Override: String = "",
-    signatureOverride: String = ""
+    signatureOverride: String = "",
+    stalkerAdvancedOptionsJson: String = "",
+    protocolPreference: StalkerProtocolPreference = StalkerProtocolPreference.AUTO,
+    transportGrant: StalkerTransportGrant? = null,
+    requestedProfileId: String = StalkerCompatibilityProfileIds.AUTO,
+    learnedProfileId: String = "",
+    requireCatalogValidation: Boolean = false,
+    allowCompatibilityDiscovery: Boolean = true,
+    discoveryBudget: DiscoveryBudget = DiscoveryBudget(),
+    discoveryRuntime: StalkerDiscoveryRuntime = StalkerDiscoveryRuntime(discoveryBudget),
+    onProgress: ((String) -> Unit)? = null
 ): StalkerDeviceProfile {
-    val preset = stalkerMagPresetSpec(magPresetHint)
+    val advancedOptions = StalkerAdvancedOptionsCodec.decode(stalkerAdvancedOptionsJson)
+    val requestedCompatibilityProfile = StalkerCompatibilityRegistry.find(requestedProfileId)
+    val selectedCompatibilityProfile = requestedCompatibilityProfile
+        ?: StalkerCompatibilityRegistry.find(learnedProfileId)
+    val activeCompatibilityProfile = selectedCompatibilityProfile
+        ?: StalkerCompatibilityRegistry.find(StalkerCompatibilityRegistry.idForLegacyPreset(magPresetHint))
+    val baseFingerprint = activeCompatibilityProfile?.let(StalkerCompatibilityRegistry::baseFingerprint)
+    val effectivePreset = baseFingerprint?.preset ?: magPresetHint
+    val preset = stalkerMagPresetSpec(effectivePreset)
     val normalizedInputProfile = deviceProfile.trim()
     val normalizedProfile = when {
+        selectedCompatibilityProfile != null && requestedProfileId != StalkerCompatibilityProfileIds.CUSTOM ->
+            selectedCompatibilityProfile.model
         normalizedInputProfile.isBlank() -> preset.defaultDeviceProfile
         magPresetHint != StalkerMagPreset.GENERIC_SAFE && normalizedInputProfile.equals("MAG250", ignoreCase = true) ->
             preset.defaultDeviceProfile
@@ -2436,21 +4165,29 @@ internal fun buildStalkerDeviceProfile(
     val normalizedLocale = locale.ifBlank { Locale.getDefault().language.ifBlank { "en" } }
     val normalizedMac = macAddress.uppercase(Locale.ROOT)
     val normalizedUsername = username.trim()
+    val normalizedHttpUserAgent = httpUserAgentOverride.trim()
+    val normalizedHttpHeaders = httpHeadersOverride.trim()
+    val headerOverrides = parseStalkerHeaderOverrides(normalizedHttpHeaders)
     val effectiveAuthMode = sanitizeStalkerAuthMode(
         requested = authMode,
         normalizedMac = normalizedMac,
         normalizedUsername = normalizedUsername
     )
-    val serialSeed = normalizedMac.replace(":", "").ifBlank { username.trim().uppercase(Locale.ROOT) }
-    val serialNumber = serialNumberOverride.ifBlank { serialSeed.takeLast(13).padStart(13, '0') }
-    val deviceId = deviceIdOverride.ifBlank { stalkerDigest("device:$normalizedProfile:$normalizedMac") }
-    val deviceId2 = deviceId2Override.ifBlank { stalkerDigest("device2:$normalizedProfile:$normalizedMac") }
-    val signature = signatureOverride.ifBlank { stalkerDigest("signature:$normalizedProfile:$normalizedMac:$normalizedTimezone") }
+    val defaultUserAgent =
+        "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) $normalizedProfile stbapp ver: 2 rev: ${preset.imageVersion} Safari/533.3"
+    val apiUserAgent = advancedOptions.apiUserAgent.trim().ifBlank {
+        resolveStalkerUserAgent(
+            defaultUserAgent = defaultUserAgent,
+            httpUserAgentOverride = normalizedHttpUserAgent,
+            headerOverrides = headerOverrides
+        ).orEmpty()
+    }
+    val playerUserAgent = advancedOptions.playerUserAgent.trim()
     return StalkerDeviceProfile(
         portalUrl = portalUrl,
         macAddress = normalizedMac,
         authMode = effectiveAuthMode,
-        magPreset = magPresetHint,
+        magPreset = effectivePreset,
         portalFingerprint = portalFingerprintHint,
         bootstrapRecipe = bootstrapRecipeHint,
         endpointPreference = endpointPreferenceHint,
@@ -2461,12 +4198,27 @@ internal fun buildStalkerDeviceProfile(
         deviceProfile = normalizedProfile,
         timezone = normalizedTimezone,
         locale = normalizedLocale,
-        serialNumber = serialNumber,
-        deviceId = deviceId,
-        deviceId2 = deviceId2,
-        signature = signature,
-        userAgent = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) $normalizedProfile stbapp ver: 2 rev: ${preset.imageVersion} Safari/533.3",
-        xUserAgent = "Model: $normalizedProfile; Link: Ethernet"
+        serialNumber = serialNumberOverride.trim().uppercase(Locale.ROOT),
+        deviceId = deviceIdOverride.trim().uppercase(Locale.ROOT),
+        deviceId2 = deviceId2Override.trim().uppercase(Locale.ROOT),
+        signature = signatureOverride.trim().uppercase(Locale.ROOT),
+        userAgent = apiUserAgent,
+        playerUserAgent = playerUserAgent,
+        xUserAgent = "Model: $normalizedProfile; Link: ${advancedOptions.normalizedLink}",
+        httpUserAgent = normalizedHttpUserAgent,
+        httpHeaders = normalizedHttpHeaders,
+        headerOverrides = headerOverrides,
+        advancedOptions = advancedOptions,
+        protocolPreference = protocolPreference,
+        transportGrant = transportGrant,
+        requestedProfileId = requestedProfileId,
+        compatibilityProfileId = activeCompatibilityProfile?.id
+            ?: StalkerCompatibilityRegistry.idForLegacyPreset(effectivePreset),
+        requireCatalogValidation = requireCatalogValidation,
+        allowCompatibilityDiscovery = allowCompatibilityDiscovery,
+        discoveryBudget = discoveryBudget,
+        discoveryRuntime = discoveryRuntime,
+        onProgress = onProgress
     )
 }
 
@@ -2523,19 +4275,56 @@ private fun StalkerDeviceProfile.withRecipe(
         deviceProfile = deviceProfile,
         timezone = timezone,
         locale = locale,
+        httpUserAgentOverride = httpUserAgent,
+        httpHeadersOverride = httpHeaders,
         serialNumberOverride = serialNumber,
-        deviceIdOverride = "",
-        deviceId2Override = "",
-        signatureOverride = ""
+        deviceIdOverride = deviceId,
+        deviceId2Override = deviceId2,
+        signatureOverride = signature,
+        stalkerAdvancedOptionsJson = StalkerAdvancedOptionsCodec.encode(advancedOptions),
+        protocolPreference = protocolPreference,
+        transportGrant = transportGrant,
+        requestedProfileId = recipe.compatibilityProfileId,
+        learnedProfileId = recipe.compatibilityProfileId,
+        requireCatalogValidation = requireCatalogValidation,
+        allowCompatibilityDiscovery = allowCompatibilityDiscovery,
+        discoveryBudget = discoveryBudget,
+        discoveryRuntime = discoveryRuntime,
+        onProgress = onProgress
+    ).copy(
+        providerId = providerId,
+        authEpoch = authEpoch
     )
 }
 
-private fun stalkerDigest(seed: String): String =
-    MessageDigest.getInstance("SHA-256")
-        .digest(seed.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
+private fun resolveStalkerUserAgent(
+    defaultUserAgent: String,
+    httpUserAgentOverride: String,
+    headerOverrides: Map<String, String?>
+): String? {
+    val overriddenUserAgent = headerOverrides.entries.firstOrNull { (name, _) ->
+        name.equals("User-Agent", ignoreCase = true)
+    }?.value
+    return overriddenUserAgent ?: httpUserAgentOverride.ifBlank { defaultUserAgent }
+}
 
-internal fun parseExpirationDate(raw: String?): Long? {
+private fun Request.Builder.applyStalkerHeaderOverrides(
+    headerOverrides: Map<String, String?>,
+    preserveUserAgent: Boolean = false
+): Request.Builder = apply {
+    headerOverrides.forEach { (name, value) ->
+        if (preserveUserAgent && name.equals("User-Agent", ignoreCase = true)) {
+            return@forEach
+        }
+        if (value == null) {
+            removeHeader(name)
+        } else {
+            header(name, value)
+        }
+    }
+}
+
+internal fun parseExpirationDate(raw: String?, zoneId: ZoneId = ZoneOffset.UTC): Long? {
     val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     value.toLongOrNull()?.let { numeric ->
         return if (numeric >= 1_000_000_000_000L) numeric else numeric * 1000L
@@ -2544,21 +4333,24 @@ internal fun parseExpirationDate(raw: String?): Long? {
     runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrNull()?.let { return it }
     STALKER_DATE_TIME_FORMATTERS.forEach { formatter ->
         runCatching {
-            LocalDateTime.parse(value, formatter).toInstant(ZoneOffset.UTC).toEpochMilli()
+            LocalDateTime.parse(value, formatter).atZone(zoneId).toInstant().toEpochMilli()
         }.getOrNull()?.let { return it }
     }
     STALKER_DATE_FORMATTERS.forEach { formatter ->
         runCatching {
-            LocalDate.parse(value, formatter).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
+            LocalDate.parse(value, formatter).atStartOfDay(zoneId).toInstant().toEpochMilli()
         }.getOrNull()?.let { return it }
     }
     return null
 }
 
-private fun parseDateTime(raw: String?): Long? {
+private fun parseDateTime(raw: String?, zoneId: ZoneId = ZoneOffset.UTC): Long? {
     val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    return parseExpirationDate(value)
+    return parseExpirationDate(value, zoneId)
 }
+
+private fun String.toPortalZoneId(): ZoneId =
+    runCatching { ZoneId.of(trim()) }.getOrDefault(ZoneOffset.UTC)
 
 private val STALKER_DATE_TIME_FORMATTERS: List<DateTimeFormatter> = listOf(
     "yyyy-MM-dd HH:mm:ss",
@@ -2618,39 +4410,69 @@ private class ByteSizeLimitInputStream(
 
     private fun checkLimit() {
         if (bytesRead > maxBytes) {
-            throw IOException(onOverflow())
+            throw StalkerApiError.ResponseTooLarge(onOverflow())
         }
     }
 }
 
-private class InMemoryStalkerCookieJar : CookieJar {
-    private val store = ConcurrentHashMap<String, MutableList<Cookie>>()
+internal suspend fun <T> withCancellableStalkerCall(
+    call: Call,
+    block: suspend (Response) -> T
+): T = coroutineScope {
+    suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (!continuation.isActive) {
+                    response.close()
+                    return
+                }
+                launch {
+                    try {
+                        val result = response.use { received -> block(received) }
+                        if (continuation.isActive) continuation.resume(result)
+                    } catch (error: Throwable) {
+                        if (continuation.isActive) continuation.resumeWithException(error)
+                    }
+                }
+            }
+        })
+    }
+}
+
+internal class InMemoryStalkerCookieJar : CookieJar {
+    private val store = ConcurrentHashMap<String, List<Cookie>>()
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         if (cookies.isEmpty()) return
         val key = url.topPrivateDomain() ?: url.host
-        val existing = store.getOrPut(key) { mutableListOf() }
-        cookies.forEach { incoming ->
-            existing.removeAll { current ->
-                current.name == incoming.name &&
-                    current.domain == incoming.domain &&
-                    current.path == incoming.path
+        val now = System.currentTimeMillis()
+        store.compute(key) { _, current ->
+            val updated = current.orEmpty().filterTo(mutableListOf()) { existing ->
+                cookies.none { incoming ->
+                    existing.name == incoming.name &&
+                        existing.domain == incoming.domain &&
+                        existing.path == incoming.path
+                } && existing.expiresAt > now
             }
-            if (!incoming.expiresAt.let { it > 0L } || incoming.expiresAt > System.currentTimeMillis()) {
-                existing += incoming
+            cookies.forEach { incoming ->
+                if (incoming.expiresAt > now) updated += incoming
             }
+            updated.takeIf { it.isNotEmpty() }
         }
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
         val key = url.topPrivateDomain() ?: url.host
-        val existing = store[key].orEmpty()
         val now = System.currentTimeMillis()
-        val valid = existing.filter { cookie -> cookie.expiresAt > now && cookie.matches(url) }
-        if (valid.size != existing.size) {
-            store[key] = valid.toMutableList()
-        }
-        return valid
+        val current = store.computeIfPresent(key) { _, existing ->
+            existing.filter { cookie -> cookie.expiresAt > now }.takeIf { it.isNotEmpty() }
+        }.orEmpty()
+        return current.filter { cookie -> cookie.matches(url) }
     }
 
     fun cookieHeaderFor(url: String): String {

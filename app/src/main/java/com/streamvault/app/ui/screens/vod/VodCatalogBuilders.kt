@@ -20,7 +20,7 @@ suspend fun <Item> buildVodPreviewCatalog(
     hiddenProviderCategoryIds: Set<Long>,
     loadItemsByIds: suspend (List<Long>) -> List<Item>,
     providerPreviews: Map<Long?, List<Item>>,
-    itemId: (Item) -> Long,
+    itemIds: (Item) -> List<Long>,
     itemCategoryId: (Item) -> Long?,
     copyWithFavorite: (Item, Boolean) -> Item
 ): VodCatalogSnapshot<Item> {
@@ -41,7 +41,7 @@ suspend fun <Item> buildVodPreviewCatalog(
     if (favoritesIds.isNotEmpty()) {
         val preview = loadItemsByIds(favoritesIds.take(VodBrowseDefaults.PREVIEW_ROW_LIMIT))
             .filterNot { item -> itemCategoryId(item) in hiddenProviderCategoryIds }
-            .let { items -> markVodFavorites(items, globalFavoriteIds, itemId, copyWithFavorite) }
+            .let { items -> markVodFavorites(items, globalFavoriteIds, itemIds, copyWithFavorite) }
         if (preview.isNotEmpty()) {
             previewRows[VodBrowseDefaults.FAVORITES_CATEGORY] = preview
             countMap[VodBrowseDefaults.FAVORITES_CATEGORY] = favoritesIds.size
@@ -67,14 +67,16 @@ suspend fun <Item> buildVodPreviewCatalog(
     val preloadedById = if (idsToPreload.isEmpty()) {
         emptyMap()
     } else {
-        loadItemsByIds(idsToPreload.toList()).associateBy(itemId)
+        loadItemsByIds(idsToPreload.toList())
+            .flatMap { item -> itemIds(item).map { rawItemId -> rawItemId to item } }
+            .toMap()
     }
 
     customCategoryPreviewIds.forEach { (category, previewIds) ->
         if (previewIds.isNotEmpty()) {
             val preview = previewIds.mapNotNull(preloadedById::get)
                 .filterNot { item -> itemCategoryId(item) in hiddenProviderCategoryIds }
-                .let { items -> markVodFavorites(items, globalFavoriteIds, itemId, copyWithFavorite) }
+                .let { items -> markVodFavorites(items, globalFavoriteIds, itemIds, copyWithFavorite) }
             if (preview.isNotEmpty()) {
                 previewRows[category.name] = preview
                 countMap[category.name] = allFavorites.count { favorite -> matchesVodGroupMembership(favorite.groupId, category.id) }
@@ -90,7 +92,7 @@ suspend fun <Item> buildVodPreviewCatalog(
         .filter { category -> category.id in requestedProviderCategoryIds }
         .forEach { category ->
             val preview = providerPreviews[category.id].orEmpty()
-                .let { items -> markVodFavorites(items, globalFavoriteIds, itemId, copyWithFavorite) }
+                .let { items -> markVodFavorites(items, globalFavoriteIds, itemIds, copyWithFavorite) }
             previewRows[category.name] = preview
         }
 
@@ -108,7 +110,7 @@ fun <Item> buildVodSearchCatalog(
     customCategories: List<Category>,
     providerCategories: List<Category>,
     hiddenProviderCategoryIds: Set<Long>,
-    itemId: (Item) -> Long,
+    itemIds: (Item) -> List<Long>,
     itemCategoryId: (Item) -> Long?,
     itemCategoryName: (Item) -> String?,
     copyWithFavorite: (Item, Boolean) -> Item,
@@ -122,14 +124,14 @@ fun <Item> buildVodSearchCatalog(
     val enrichedItems = markVodFavorites(
         items.filterNot { item -> itemCategoryId(item) in hiddenProviderCategoryIds },
         globalFavoriteIds,
-        itemId,
+        itemIds,
         copyWithFavorite
     )
     val grouped = enrichedItems
         .groupBy { itemCategoryName(it) ?: uncategorizedName }
         .toMutableMap()
 
-    val favoriteMatches = enrichedItems.filter { item -> itemId(item) in globalFavoriteIds }
+    val favoriteMatches = enrichedItems.filter { item -> itemIds(item).any { rawItemId -> rawItemId in globalFavoriteIds } }
     if (favoriteMatches.isNotEmpty()) {
         grouped[VodBrowseDefaults.FAVORITES_CATEGORY] = favoriteMatches
     }
@@ -142,7 +144,9 @@ fun <Item> buildVodSearchCatalog(
                 .filter { matchesVodGroupMembership(it.groupId, customCategory.id) }
                 .map(Favorite::contentId)
                 .toSet()
-            grouped[customCategory.name] = enrichedItems.filter { itemId(it) in itemIdsInGroup }
+            grouped[customCategory.name] = enrichedItems.filter { item ->
+                itemIds(item).any { rawItemId -> rawItemId in itemIdsInGroup }
+            }
         }
 
     val customNames = customCategories.map(Category::name).toSet()
@@ -178,8 +182,8 @@ fun <Item> buildVodSearchCatalog(
 fun <Item> markVodFavorites(
     items: List<Item>,
     globalFavoriteIds: Set<Long>,
-    itemId: (Item) -> Long,
+    itemIds: (Item) -> List<Long>,
     copyWithFavorite: (Item, Boolean) -> Item
 ): List<Item> = items.map { item ->
-    copyWithFavorite(item, itemId(item) in globalFavoriteIds)
+    copyWithFavorite(item, itemIds(item).any { rawItemId -> rawItemId in globalFavoriteIds })
 }

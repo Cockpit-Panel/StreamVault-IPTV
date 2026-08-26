@@ -2,7 +2,6 @@ package com.streamvault.data.manager
 
 import android.content.Context
 import android.util.Log
-import androidx.core.net.toUri
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
@@ -13,10 +12,12 @@ import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
 import com.google.android.gms.tasks.Task
+import com.streamvault.data.remote.http.useCancellableResponse
 import com.streamvault.domain.manager.BackupManager
 import com.streamvault.domain.manager.DriveAccount
 import com.streamvault.domain.manager.DriveAuthState
 import com.streamvault.domain.manager.DriveBackupArtifact
+import com.streamvault.domain.manager.DriveBackupSnapshot
 import com.streamvault.domain.manager.DriveBackupSyncManager
 import com.streamvault.domain.manager.DriveSignInRequest
 import com.streamvault.domain.manager.DriveSyncError
@@ -29,6 +30,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -42,9 +45,30 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private const val GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com"
+
+private fun buildDefaultDriveHttpClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(20, TimeUnit.SECONDS)
+    .readTimeout(60, TimeUnit.SECONDS)
+    .writeTimeout(60, TimeUnit.SECONDS)
+    .build()
+
+private fun buildDefaultGoogleDriveClient(context: Context): GoogleSignInClient {
+    val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+        .requestEmail()
+        .requestScopes(Scope("https://www.googleapis.com/auth/drive.appdata"))
+        .build()
+    return GoogleSignIn.getClient(context, options)
+}
 
 /**
  * Implementation backed by Google Sign-In + the Drive REST `appDataFolder` scope.
@@ -54,22 +78,60 @@ import javax.inject.Singleton
  *   the OAuth credentials registered in the Google Cloud Console project. Each
  *   maintainer / signing key must register its own OAuth client (see
  *   `docs/GOOGLE_DRIVE_SETUP.md`).
- * - The backup payload is the existing [BackupManager] JSON v5 export — we just
- *   pipe it through a temp file under [Context.getCacheDir] and upload/download
- *   via multipart REST. No extra format, no extra schema.
- * - Sensitive provider passwords are already stripped by [BackupManager.exportConfig].
+ * - New pushes use a timestamped versioned bundle containing the existing
+ *   [BackupManager] JSON export and matching credentials snapshot. A bounded
+ *   history lets users restore an older generation without reintroducing the
+ *   old two-file generation mismatch.
+ * - Pulls list snapshots newest-first and accept the bundle plus legacy
+ *   standalone backup and credentials files for backwards compatibility.
  */
 @Singleton
-class GoogleDriveBackupSyncManager @Inject constructor(
+class GoogleDriveBackupSyncManager private constructor(
     @ApplicationContext private val context: Context,
     private val backupManager: BackupManager,
+    private val httpClient: OkHttpClient,
+    driveApiBaseUrl: String,
+    private val fixedAccessToken: String?,
+    private val authClientFactory: () -> GoogleSignInClient,
+    private val cachedAccountProvider: () -> GoogleSignInAccount?,
+    @Suppress("UNUSED_PARAMETER") constructorMarker: Unit,
 ) : DriveBackupSyncManager {
 
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .build()
+    private val driveApiBaseUrl = driveApiBaseUrl.trimEnd('/')
+
+    @Inject
+    constructor(
+        @ApplicationContext context: Context,
+        backupManager: BackupManager,
+    ) : this(
+        context = context,
+        backupManager = backupManager,
+        httpClient = buildDefaultDriveHttpClient(),
+        driveApiBaseUrl = GOOGLE_DRIVE_API_BASE_URL,
+        fixedAccessToken = null,
+        authClientFactory = { buildDefaultGoogleDriveClient(context) },
+        cachedAccountProvider = { GoogleSignIn.getLastSignedInAccount(context) },
+        constructorMarker = Unit,
+    )
+
+    internal constructor(
+        context: Context,
+        backupManager: BackupManager,
+        httpClient: OkHttpClient,
+        driveApiBaseUrl: String,
+        fixedAccessToken: String,
+        authClientFactory: (() -> GoogleSignInClient)? = null,
+        cachedAccountProvider: (() -> GoogleSignInAccount?)? = null,
+    ) : this(
+        context = context,
+        backupManager = backupManager,
+        httpClient = httpClient,
+        driveApiBaseUrl = driveApiBaseUrl,
+        fixedAccessToken = fixedAccessToken,
+        authClientFactory = authClientFactory ?: { buildDefaultGoogleDriveClient(context) },
+        cachedAccountProvider = cachedAccountProvider ?: { GoogleSignIn.getLastSignedInAccount(context) },
+        constructorMarker = Unit,
+    )
 
     private val _authState = MutableStateFlow<DriveAuthState>(DriveAuthState.SignedOut)
     override val authState: StateFlow<DriveAuthState> = _authState.asStateFlow()
@@ -77,11 +139,22 @@ class GoogleDriveBackupSyncManager @Inject constructor(
     private val _syncStatus = MutableStateFlow(DriveSyncStatus())
     override val syncStatus: StateFlow<DriveSyncStatus> = _syncStatus.asStateFlow()
 
+    /**
+     * Serializes operations that share the Drive file identity and auth state.
+     * The UI also suppresses duplicate actions, but callers outside that UI
+     * must not be able to race two lookup-then-upload sequences.
+     */
+    private val operationMutex = Mutex()
+
     init {
-        // Restore last known account silently on cold start.
-        val cached = GoogleSignIn.getLastSignedInAccount(context)
-        if (cached != null && hasAppDataScope(cached)) {
-            _authState.value = DriveAuthState.SignedIn(cached.toDriveAccount())
+        if (fixedAccessToken != null) {
+            _authState.value = DriveAuthState.SignedIn(DriveAccount("test", "test"))
+        } else {
+            // Restore last known account silently on cold start.
+            val cached = cachedAccountProvider()
+            if (cached != null && hasAppDataScope(cached)) {
+                _authState.value = DriveAuthState.SignedIn(cached.toDriveAccount())
+            }
         }
     }
 
@@ -130,12 +203,25 @@ class GoogleDriveBackupSyncManager @Inject constructor(
         }
 
     override suspend fun signOut(): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            buildClient().signOut().awaitTask()
-            _authState.value = DriveAuthState.SignedOut
-            Result.Success(Unit)
-        } catch (t: Throwable) {
-            Result.Error(DriveSyncError.AUTH_FAILED, t)
+        operationMutex.withLock {
+            try {
+                val client = buildClient()
+                val revokeFailure = runCatching {
+                    if (cachedAccountProvider() != null) {
+                        client.revokeAccess().awaitTask()
+                    }
+                }.exceptionOrNull()
+                client.signOut().awaitTask()
+                _authState.value = DriveAuthState.SignedOut
+                if (revokeFailure != null) {
+                    driveError(DriveSyncError.AUTH_FAILED, revokeFailure)
+                } else {
+                    Result.Success(Unit)
+                }
+            } catch (t: Throwable) {
+                _authState.value = DriveAuthState.SignedOut
+                driveError(DriveSyncError.AUTH_FAILED, t)
+            }
         }
     }
 
@@ -159,75 +245,221 @@ class GoogleDriveBackupSyncManager @Inject constructor(
         addOnCanceledListener { cont.resume(null) }
     }
 
-    override suspend fun pushBackup(): Result<DriveSyncStatus> = withContext(Dispatchers.IO) {
-        val account = requireSignedInAccount() ?: return@withContext Result.Error(DriveSyncError.NOT_SIGNED_IN)
-        val token = fetchAccessToken(account) ?: return@withContext Result.Error(DriveSyncError.AUTH_FAILED)
+    override suspend fun pushBackup(
+        credentials: List<ProviderCredentials>,
+    ): Result<DriveSyncStatus> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
+            val accessTokenResult = accessTokenResult()
+            if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+            val token = (accessTokenResult as Result.Success).data
 
-        val tempFile = File(context.cacheDir, TEMP_BACKUP_FILE_NAME).apply { delete() }
-        val exportUri = tempFile.toUri().toString()
+            val tempFile = File.createTempFile("drive_sync_backup_", ".json", context.cacheDir)
+            val bundleFile = File.createTempFile("drive_sync_bundle_", ".json", context.cacheDir)
+            val exportUri = tempFile.toURI().toString()
 
-        val exportResult = backupManager.exportConfig(exportUri)
-        if (exportResult is Result.Error) {
-            return@withContext Result.Error(DriveSyncError.EXPORT_FAILED, exportResult.exception)
-        }
-        if (!tempFile.exists() || tempFile.length() == 0L) {
-            return@withContext Result.Error(DriveSyncError.EXPORT_FAILED)
-        }
+            val exportResult = backupManager.exportConfig(exportUri)
+            if (exportResult is Result.Error) {
+                return@withContext driveError(DriveSyncError.EXPORT_FAILED, exportResult.exception)
+            }
+            if (!tempFile.exists() || tempFile.length() == 0L || tempFile.length() > MAX_BACKUP_BYTES) {
+                tempFile.delete()
+                return@withContext driveError(DriveSyncError.EXPORT_FAILED)
+            }
 
-        val uploadOk = try {
-            uploadAppDataFile(token, tempFile, BACKUP_FILE_NAME)
-        } catch (io: IOException) {
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
-        } finally {
-            tempFile.delete()
-        }
-        if (!uploadOk) {
-            return@withContext Result.Error(DriveSyncError.NETWORK)
-        }
+            val bundleBuilt = try {
+                // Keep the exported backup text unchanged. Re-parsing it into a
+                // JSONObject and serializing it again can alter escaping/order and
+                // breaks exact-byte checksum compatibility for older releases.
+                val backupJson = tempFile.readText(Charsets.UTF_8)
+                JSONObject(backupJson)
+                val bundle = JSONObject()
+                    .put("format", DRIVE_BUNDLE_FORMAT)
+                    .put("backupJson", backupJson)
+                    .put("credentials", credentials.toJsonArray())
+                bundleFile.writeText(bundle.toString(), Charsets.UTF_8)
+                bundleFile.length() > 0L && bundleFile.length() <= MAX_DRIVE_FILE_BYTES
+            } catch (t: Throwable) {
+                Log.e("DriveSync", "pushBackup: failed to build bundle", t)
+                false
+            }
+            if (!bundleBuilt) {
+                tempFile.delete()
+                bundleFile.delete()
+                return@withContext driveError(DriveSyncError.EXPORT_FAILED)
+            }
 
-        val updated = _syncStatus.value.copy(
-            lastPushAtMs = System.currentTimeMillis(),
-            lastErrorMessage = null,
-        )
-        _syncStatus.value = updated
-        Result.Success(updated)
+            val bundleFileName = buildBundleFileName()
+            val uploadOk = try {
+                uploadAppDataFile(
+                    authToken = token,
+                    payload = bundleFile,
+                    fileName = bundleFileName,
+                    overwriteExisting = false,
+                )
+            } catch (io: IOException) {
+                return@withContext driveHttpError(io)
+            } finally {
+                tempFile.delete()
+                bundleFile.delete()
+            }
+            if (!uploadOk) {
+                return@withContext driveError(DriveSyncError.NETWORK)
+            }
+
+            trimRemoteBackups(token)
+
+            val updated = _syncStatus.value.copy(
+                lastPushAtMs = System.currentTimeMillis(),
+                lastErrorMessage = null,
+            )
+            _syncStatus.value = updated
+            Result.Success(updated)
+        }
     }
 
-    override suspend fun pullBackup(): Result<DriveBackupArtifact> = withContext(Dispatchers.IO) {
+    override suspend fun listBackups(): Result<List<DriveBackupSnapshot>> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
+            val accessTokenResult = accessTokenResult()
+            if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+            val token = (accessTokenResult as Result.Success).data
+            try {
+                Result.Success(listRemoteBackups(token).map { it.toSnapshot() })
+            } catch (io: IOException) {
+                driveHttpError(io)
+            }
+        }
+    }
+
+    override suspend fun deleteBackup(snapshotId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
+            val accessTokenResult = accessTokenResult()
+            if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+            val token = (accessTokenResult as Result.Success).data
+            val selected = try {
+                listRemoteBackups(token).firstOrNull { it.id == snapshotId }
+            } catch (io: IOException) {
+                return@withContext driveHttpError(io)
+            }
+            if (selected == null) {
+                return@withContext driveError(DriveSyncError.NO_REMOTE_BACKUP)
+            }
+            try {
+                deleteRemoteFile(token, selected.id)
+                if (!selected.isBundle) {
+                    // Legacy installs stored credentials in a sibling file.
+                    // Remove it with the legacy backup so sensitive orphaned
+                    // credentials are not left behind after user cleanup.
+                    val legacyCredentialsId = findRemoteFileId(token, CREDENTIALS_FILE_NAME)
+                    if (legacyCredentialsId != null) {
+                        runCatching { deleteRemoteFile(token, legacyCredentialsId) }
+                            .onFailure { error ->
+                                Log.w("DriveSync", "legacy credentials cleanup failed", error)
+                            }
+                    }
+                }
+                Result.Success(Unit)
+            } catch (io: IOException) {
+                driveHttpError(io)
+            }
+        }
+    }
+
+    override suspend fun pullBackup(snapshotId: String?): Result<DriveBackupArtifact> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
         Log.d("DriveSync", "pullBackup: start")
-        val account = requireSignedInAccount() ?: run {
-            Log.w("DriveSync", "pullBackup: NOT_SIGNED_IN (account is null)")
-            return@withContext Result.Error(DriveSyncError.NOT_SIGNED_IN)
-        }
-        val token = fetchAccessToken(account) ?: run {
-            Log.w("DriveSync", "pullBackup: AUTH_FAILED (no token)")
-            return@withContext Result.Error(DriveSyncError.AUTH_FAILED)
-        }
-        Log.d("DriveSync", "pullBackup: token OK, looking up remote backup id")
+        val accessTokenResult = accessTokenResult()
+        if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+        val token = (accessTokenResult as Result.Success).data
+        Log.d("DriveSync", "pullBackup: token OK, looking up remote snapshots")
 
-        val fileId = try {
-            findRemoteFileId(token, BACKUP_FILE_NAME)
+        val remoteBackups = try {
+            listRemoteBackups(token)
         } catch (io: IOException) {
-            Log.e("DriveSync", "pullBackup: NETWORK error while finding remote id", io)
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
+            Log.e("DriveSync", "pullBackup: NETWORK error while finding snapshots", io)
+            return@withContext driveHttpError(io)
         }
-        if (fileId == null) {
-            Log.w("DriveSync", "pullBackup: NO_REMOTE_BACKUP (no file found in appDataFolder)")
-            return@withContext Result.Error(DriveSyncError.NO_REMOTE_BACKUP)
+        val selected = if (snapshotId == null) {
+            remoteBackups.firstOrNull()
+        } else {
+            remoteBackups.firstOrNull { it.id == snapshotId }
         }
-        Log.d("DriveSync", "pullBackup: remote fileId=$fileId, downloading")
+        if (selected == null) {
+            Log.w("DriveSync", "pullBackup: NO_REMOTE_BACKUP (no bundle or legacy file found)")
+            return@withContext driveError(DriveSyncError.NO_REMOTE_BACKUP)
+        }
+        val legacyFallback = !selected.isBundle
+        val fileId = selected.id
+        Log.d("DriveSync", "pullBackup: remote fileId=$fileId, name=${selected.name}, bundle=${selected.isBundle}, downloading")
 
-        val target = File(context.cacheDir, TEMP_BACKUP_FILE_NAME).apply { delete() }
+        val target = File.createTempFile("drive_sync_backup_", ".json", context.cacheDir).apply { delete() }
+        val downloadTarget = if (legacyFallback) {
+            target
+        } else {
+            File.createTempFile("drive_sync_bundle_", ".json", context.cacheDir).apply { delete() }
+        }
         val downloadOk = try {
-            downloadAppDataFile(token, fileId, target)
+            downloadAppDataFile(
+                authToken = token,
+                fileId = fileId,
+                target = downloadTarget,
+                maxBytes = if (legacyFallback) MAX_BACKUP_BYTES else MAX_DRIVE_FILE_BYTES,
+            )
+        } catch (tooLarge: DrivePayloadTooLargeException) {
+            downloadTarget.delete()
+            return@withContext driveError(DriveSyncError.PAYLOAD_TOO_LARGE, tooLarge)
         } catch (io: IOException) {
             Log.e("DriveSync", "pullBackup: NETWORK error during download", io)
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
+            downloadTarget.delete()
+            return@withContext driveHttpError(io)
         }
-        if (!downloadOk || !target.exists() || target.length() == 0L) {
-            Log.w("DriveSync", "pullBackup: download failed or empty file (ok=$downloadOk exists=${target.exists()} size=${target.length()})")
+        if (!downloadOk || !downloadTarget.exists() || downloadTarget.length() == 0L) {
+            Log.w("DriveSync", "pullBackup: download failed or empty file (ok=$downloadOk exists=${downloadTarget.exists()} size=${downloadTarget.length()})")
+            downloadTarget.delete()
+            return@withContext driveError(DriveSyncError.NETWORK)
+        }
+
+        val credentials: List<ProviderCredentials>?
+        if (legacyFallback) {
+            credentials = null
+        } else {
+            try {
+                val bundle = JSONObject(downloadTarget.readText(Charsets.UTF_8))
+                val format = bundle.optString("format")
+                val backupJson = when (format) {
+                    DRIVE_BUNDLE_FORMAT -> bundle.optString("backupJson", "")
+                    LEGACY_DRIVE_BUNDLE_FORMAT -> bundle.optJSONObject("backup")?.toString().orEmpty()
+                    else -> throw IllegalArgumentException("Unsupported Drive backup bundle format")
+                }
+                if (backupJson.isBlank()) {
+                    throw IllegalArgumentException("Drive backup bundle is missing backup")
+                }
+                // Validate that the preserved text is one JSON object, but write
+                // the original text rather than JSONObject.toString() so the
+                // backup checksum sees the bytes that were exported.
+                JSONObject(backupJson)
+                val credentialsArray = bundle.optJSONArray("credentials")
+                    ?: throw IllegalArgumentException("Drive backup bundle is missing credentials")
+                if (backupJson.toByteArray(Charsets.UTF_8).size.toLong() > MAX_BACKUP_BYTES) {
+                    throw DrivePayloadTooLargeException()
+                }
+                target.writeBytes(backupJson.toByteArray(Charsets.UTF_8))
+                credentials = credentialsArray.toProviderCredentials()
+            } catch (tooLarge: DrivePayloadTooLargeException) {
+                target.delete()
+                downloadTarget.delete()
+                return@withContext driveError(DriveSyncError.PAYLOAD_TOO_LARGE, tooLarge)
+            } catch (t: Throwable) {
+                Log.e("DriveSync", "pullBackup: bundle parse error", t)
+                target.delete()
+                downloadTarget.delete()
+                return@withContext driveError(DriveSyncError.IMPORT_FAILED, t)
+            } finally {
+                downloadTarget.delete()
+            }
+        }
+        if (!target.exists() || target.length() == 0L) {
             target.delete()
-            return@withContext Result.Error(DriveSyncError.NETWORK)
+            return@withContext driveError(DriveSyncError.IMPORT_FAILED)
         }
         Log.d("DriveSync", "pullBackup: downloaded ${target.length()} bytes to ${target.absolutePath}")
 
@@ -235,114 +467,105 @@ class GoogleDriveBackupSyncManager @Inject constructor(
             lastPullAtMs = System.currentTimeMillis(),
             lastErrorMessage = null,
         )
-        Result.Success(
-            DriveBackupArtifact(
-                localUriString = target.toUri().toString(),
-                sizeBytes = target.length(),
-            ),
-        )
+            Result.Success(
+                DriveBackupArtifact(
+                    localUriString = target.toURI().toString(),
+                    sizeBytes = target.length(),
+                    credentials = credentials,
+                ),
+            )
+        }
     }
 
     override suspend fun pushCredentials(
         credentials: List<ProviderCredentials>,
     ): Result<Unit> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
         Log.d("DriveSync", "pushCredentials: start (count=${credentials.size})")
-        val account = requireSignedInAccount() ?: return@withContext Result.Error(DriveSyncError.NOT_SIGNED_IN)
-        val token = fetchAccessToken(account) ?: return@withContext Result.Error(DriveSyncError.AUTH_FAILED)
+        val accessTokenResult = accessTokenResult()
+        if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+        val token = (accessTokenResult as Result.Success).data
 
-        val json = JSONArray().apply {
-            credentials.forEach { cred ->
-                put(
-                    JSONObject().apply {
-                        put("serverUrl", cred.serverUrl)
-                        put("username", cred.username)
-                        put("password", cred.password)
-                    },
-                )
-            }
-        }.toString()
+        val json = credentials.toJsonArray().toString()
 
-        val tempFile = File(context.cacheDir, TEMP_CREDENTIALS_FILE_NAME).apply { delete() }
+        val tempFile = File.createTempFile("drive_sync_credentials_", ".json", context.cacheDir)
         tempFile.writeText(json)
 
         val uploadOk = try {
             uploadAppDataFile(token, tempFile, CREDENTIALS_FILE_NAME)
         } catch (io: IOException) {
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
+            return@withContext driveHttpError(io)
         } finally {
             tempFile.delete()
         }
         if (!uploadOk) {
             Log.w("DriveSync", "pushCredentials: upload failed")
-            return@withContext Result.Error(DriveSyncError.NETWORK)
+            return@withContext driveError(DriveSyncError.NETWORK)
         }
         Log.d("DriveSync", "pushCredentials: SUCCESS")
-        Result.Success(Unit)
+        _syncStatus.value = _syncStatus.value.copy(lastErrorMessage = null)
+            Result.Success(Unit)
+        }
     }
 
     override suspend fun pullCredentials(): Result<List<ProviderCredentials>> = withContext(Dispatchers.IO) {
+        operationMutex.withLock {
         Log.d("DriveSync", "pullCredentials: start")
-        val account = requireSignedInAccount() ?: return@withContext Result.Error(DriveSyncError.NOT_SIGNED_IN)
-        val token = fetchAccessToken(account) ?: return@withContext Result.Error(DriveSyncError.AUTH_FAILED)
+        val accessTokenResult = accessTokenResult()
+        if (accessTokenResult is Result.Error) return@withContext accessTokenResult
+        val token = (accessTokenResult as Result.Success).data
 
         val fileId = try {
             findRemoteFileId(token, CREDENTIALS_FILE_NAME)
         } catch (io: IOException) {
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
+            return@withContext driveHttpError(io)
         }
         if (fileId == null) {
             Log.d("DriveSync", "pullCredentials: no remote credentials file (pre-M3 backup), returning empty list")
             return@withContext Result.Success(emptyList())
         }
 
-        val target = File(context.cacheDir, TEMP_CREDENTIALS_FILE_NAME).apply { delete() }
+        val target = File.createTempFile("drive_sync_credentials_", ".json", context.cacheDir).apply { delete() }
         val downloadOk = try {
-            downloadAppDataFile(token, fileId, target)
+            downloadAppDataFile(token, fileId, target, MAX_DRIVE_FILE_BYTES)
+        } catch (tooLarge: DrivePayloadTooLargeException) {
+            target.delete()
+            return@withContext driveError(DriveSyncError.PAYLOAD_TOO_LARGE, tooLarge)
         } catch (io: IOException) {
             target.delete()
-            return@withContext Result.Error(DriveSyncError.NETWORK, io)
+            return@withContext driveHttpError(io)
         }
         if (!downloadOk || !target.exists() || target.length() == 0L) {
             target.delete()
-            return@withContext Result.Error(DriveSyncError.NETWORK)
+            return@withContext driveError(DriveSyncError.NETWORK)
         }
 
         val parsed = try {
-            val array = JSONArray(target.readText())
-            (0 until array.length()).map { idx ->
-                val obj = array.getJSONObject(idx)
-                ProviderCredentials(
-                    serverUrl = obj.getString("serverUrl"),
-                    username = obj.getString("username"),
-                    password = obj.getString("password"),
-                )
-            }
+            JSONArray(target.readText(Charsets.UTF_8)).toProviderCredentials()
         } catch (t: Throwable) {
             Log.e("DriveSync", "pullCredentials: JSON parse error", t)
             target.delete()
-            return@withContext Result.Error(DriveSyncError.IMPORT_FAILED, t)
+            return@withContext driveError(DriveSyncError.IMPORT_FAILED, t)
         } finally {
             target.delete()
         }
         Log.d("DriveSync", "pullCredentials: SUCCESS (count=${parsed.size})")
-        Result.Success(parsed)
+        _syncStatus.value = _syncStatus.value.copy(lastErrorMessage = null)
+            Result.Success(parsed)
+        }
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
     private fun buildClient(): GoogleSignInClient {
-        val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestEmail()
-            .requestScopes(Scope(SCOPE_APP_DATA))
-            .build()
-        return GoogleSignIn.getClient(context, options)
+        return authClientFactory()
     }
 
     private fun hasAppDataScope(account: GoogleSignInAccount): Boolean =
         GoogleSignIn.hasPermissions(account, Scope(SCOPE_APP_DATA))
 
     private fun requireSignedInAccount(): GoogleSignInAccount? {
-        val cached = GoogleSignIn.getLastSignedInAccount(context) ?: return null
+        val cached = cachedAccountProvider() ?: return null
         if (!hasAppDataScope(cached)) return null
         return cached
     }
@@ -358,32 +581,69 @@ class GoogleDriveBackupSyncManager @Inject constructor(
         null
     }
 
-    private fun findRemoteFileId(authToken: String, fileName: String): String? {
-        val url = "https://www.googleapis.com/drive/v3/files" +
+    private fun accessTokenResult(): Result<String> {
+        fixedAccessToken?.let { return Result.Success(it) }
+        val account = requireSignedInAccount()
+            ?: return driveError(DriveSyncError.NOT_SIGNED_IN)
+        val token = fetchAccessToken(account)
+            ?: return driveError(DriveSyncError.AUTH_FAILED)
+        return Result.Success(token)
+    }
+
+    private fun driveError(code: String, exception: Throwable? = null): Result.Error {
+        _syncStatus.value = _syncStatus.value.copy(lastErrorMessage = code)
+        return Result.Error(code, exception)
+    }
+
+    private fun driveHttpError(exception: IOException): Result.Error {
+        val statusCode = (exception as? DriveHttpException)?.statusCode
+        val code = if (statusCode == 401 || statusCode == 403) {
+            DriveSyncError.AUTH_FAILED
+        } else {
+            DriveSyncError.NETWORK
+        }
+        return driveError(code, exception)
+    }
+
+    private suspend fun findRemoteFileId(authToken: String, fileName: String): String? {
+        val url = "$driveApiBaseUrl/drive/v3/files" +
             "?spaces=appDataFolder" +
             "&q=" + uriEncode("name='$fileName'") +
+            "&orderBy=modifiedTime%20desc" +
             "&fields=files(id,modifiedTime,size)"
         val request = Request.Builder()
             .url(url)
             .addHeader("Authorization", "Bearer $authToken")
             .get()
             .build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
+        httpClient.newCall(request).useCancellableResponse { response ->
+            if (!response.isSuccessful) {
+                throw DriveHttpException(response.code, "Drive file lookup failed")
+            }
             val body = response.body?.string().orEmpty()
-            val files = JSONObject(body).optJSONArray("files") ?: return null
+            val files = JSONObject(body).optJSONArray("files")
+                ?: throw IOException("Drive file lookup response is missing files")
             if (files.length() == 0) return null
             return files.getJSONObject(0).getString("id")
         }
     }
 
-    private fun uploadAppDataFile(authToken: String, payload: File, fileName: String): Boolean {
-        val existingId = findRemoteFileId(authToken, fileName)
+    private suspend fun uploadAppDataFile(
+        authToken: String,
+        payload: File,
+        fileName: String,
+        overwriteExisting: Boolean = true,
+    ): Boolean {
+        val existingId = if (overwriteExisting) {
+            findRemoteFileId(authToken, fileName)
+        } else {
+            null
+        }
         val boundary = "streamvault-${System.nanoTime()}"
         val (httpMethod, endpoint) = if (existingId != null) {
-            "PATCH" to "https://www.googleapis.com/upload/drive/v3/files/$existingId?uploadType=multipart"
+            "PATCH" to "$driveApiBaseUrl/upload/drive/v3/files/$existingId?uploadType=multipart"
         } else {
-            "POST" to "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+            "POST" to "$driveApiBaseUrl/upload/drive/v3/files?uploadType=multipart"
         }
 
         val metadata = JSONObject().apply {
@@ -400,21 +660,150 @@ class GoogleDriveBackupSyncManager @Inject constructor(
             .method(httpMethod, body)
             .build()
 
-        httpClient.newCall(request).execute().use { response ->
-            return response.isSuccessful
+        httpClient.newCall(request).useCancellableResponse { response ->
+            if (!response.isSuccessful) {
+                throw DriveHttpException(response.code, "Drive upload failed")
+            }
+            return true
         }
     }
 
-    private fun downloadAppDataFile(authToken: String, fileId: String, target: File): Boolean {
+    /**
+     * Returns the backup files we own in Drive, newest first. The fixed names
+     * keep old installs and pre-history backups visible; timestamped bundles
+     * are the files created by current pushes.
+     */
+    private suspend fun listRemoteBackups(authToken: String): List<RemoteBackupFile> {
+        val query = "trashed = false and (" +
+            "name = '$BUNDLE_FILE_NAME' or " +
+            "name contains '$BUNDLE_FILE_PREFIX' or " +
+            "name = '$BACKUP_FILE_NAME')"
+        val url = "$driveApiBaseUrl/drive/v3/files" +
+            "?spaces=appDataFolder" +
+            "&q=" + uriEncode(query) +
+            "&orderBy=modifiedTime%20desc" +
+            "&pageSize=100" +
+            "&fields=files(id,name,modifiedTime,size)"
         val request = Request.Builder()
-            .url("https://www.googleapis.com/drive/v3/files/$fileId?alt=media")
+            .url(url)
             .addHeader("Authorization", "Bearer $authToken")
             .get()
             .build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return false
-            val source = response.body?.byteStream() ?: return false
-            target.outputStream().use { sink -> source.copyTo(sink) }
+        httpClient.newCall(request).useCancellableResponse { response ->
+            if (!response.isSuccessful) {
+                throw DriveHttpException(response.code, "Drive backup list failed")
+            }
+            val body = response.body?.string().orEmpty()
+            val files = JSONObject(body).optJSONArray("files")
+                ?: throw IOException("Drive backup list response is missing files")
+            return (0 until files.length())
+                .mapNotNull { index ->
+                    val file = files.optJSONObject(index) ?: return@mapNotNull null
+                    val id = file.optString("id").takeIf { it.isNotBlank() }
+                        ?: return@mapNotNull null
+                    val name = file.optString("name").takeIf { it.isNotBlank() }
+                        ?: return@mapNotNull null
+                    RemoteBackupFile(
+                        id = id,
+                        name = name,
+                        modifiedAtMs = parseDriveTimestamp(file.optString("modifiedTime")),
+                        sizeBytes = file.optLong("size", 0L).coerceAtLeast(0L),
+                        isBundle = name == BUNDLE_FILE_NAME || name.startsWith(BUNDLE_FILE_PREFIX),
+                    )
+                }
+                .sortedWith(
+                    compareByDescending<RemoteBackupFile> { it.modifiedAtMs ?: Long.MIN_VALUE }
+                        .thenByDescending { it.id },
+                )
+        }
+    }
+
+    private suspend fun trimRemoteBackups(authToken: String) {
+        try {
+            val timestamped = listRemoteBackups(authToken)
+                .filter { it.isBundle && it.name.startsWith(BUNDLE_FILE_PREFIX) }
+            timestamped.drop(MAX_REMOTE_BACKUPS).forEach { remote ->
+                runCatching { deleteRemoteFile(authToken, remote.id) }
+                    .onFailure { error ->
+                        Log.w("DriveSync", "retention cleanup failed for ${remote.id}", error)
+                    }
+            }
+        } catch (io: IOException) {
+            // Retention is housekeeping. A successful upload must remain a
+            // success even if listing/cleanup is temporarily unavailable.
+            Log.w("DriveSync", "retention listing failed", io)
+        }
+    }
+
+    private suspend fun deleteRemoteFile(authToken: String, fileId: String) {
+        val request = Request.Builder()
+            .url("$driveApiBaseUrl/drive/v3/files/$fileId")
+            .addHeader("Authorization", "Bearer $authToken")
+            .delete()
+            .build()
+        httpClient.newCall(request).useCancellableResponse { response ->
+            if (!response.isSuccessful) {
+                throw DriveHttpException(response.code, "Drive backup retention delete failed")
+            }
+        }
+    }
+
+    private fun parseDriveTimestamp(value: String): Long? {
+        if (value.isBlank()) return null
+        val formats = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSSX",
+            "yyyy-MM-dd'T'HH:mm:ssX",
+        )
+        return formats.firstNotNullOfOrNull { pattern ->
+            runCatching {
+                SimpleDateFormat(pattern, Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.parse(value)?.time
+            }.getOrNull()
+        }
+    }
+
+    private fun buildBundleFileName(): String {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
+        return "$BUNDLE_FILE_PREFIX${timestamp}_${UUID.randomUUID().toString().take(8)}.json"
+    }
+
+    private suspend fun downloadAppDataFile(
+        authToken: String,
+        fileId: String,
+        target: File,
+        maxBytes: Long,
+    ): Boolean {
+        val request = Request.Builder()
+            .url("$driveApiBaseUrl/drive/v3/files/$fileId?alt=media")
+            .addHeader("Authorization", "Bearer $authToken")
+            .get()
+            .build()
+        httpClient.newCall(request).useCancellableResponse { response ->
+            if (!response.isSuccessful) {
+                throw DriveHttpException(response.code, "Drive download failed")
+            }
+            val body = response.body ?: return false
+            if (body.contentLength() > maxBytes) {
+                throw DrivePayloadTooLargeException()
+            }
+            body.byteStream().use { source ->
+                target.outputStream().use { sink ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var total = 0L
+                    while (true) {
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        if (total > maxBytes) {
+                            throw DrivePayloadTooLargeException()
+                        }
+                        sink.write(buffer, 0, read)
+                    }
+                }
+            }
             return true
         }
     }
@@ -429,10 +818,67 @@ class GoogleDriveBackupSyncManager @Inject constructor(
 
     private companion object {
         const val SCOPE_APP_DATA = "https://www.googleapis.com/auth/drive.appdata"
+        const val BUNDLE_FILE_NAME = "streamvault_backup_bundle.json"
+        const val BUNDLE_FILE_PREFIX = "streamvault_backup_bundle_"
         const val BACKUP_FILE_NAME = "streamvault_backup.json"
-        const val TEMP_BACKUP_FILE_NAME = "drive_sync_backup.json"
         const val CREDENTIALS_FILE_NAME = "streamvault_credentials.json"
-        const val TEMP_CREDENTIALS_FILE_NAME = "drive_sync_credentials.json"
+        const val DRIVE_BUNDLE_FORMAT = "streamvault-drive-bundle-v2"
+        const val LEGACY_DRIVE_BUNDLE_FORMAT = "streamvault-drive-bundle-v1"
+        const val MAX_BACKUP_BYTES = 16L * 1024L * 1024L
+        // v2 stores the backup as an escaped JSON string, so allow the bundle
+        // to be up to roughly twice the standalone backup admission limit.
+        const val MAX_DRIVE_FILE_BYTES = 40L * 1024L * 1024L
+        const val MAX_REMOTE_BACKUPS = 10
+    }
+}
+
+private data class RemoteBackupFile(
+    val id: String,
+    val name: String,
+    val modifiedAtMs: Long?,
+    val sizeBytes: Long,
+    val isBundle: Boolean,
+)
+
+private fun RemoteBackupFile.toSnapshot(): DriveBackupSnapshot = DriveBackupSnapshot(
+    id = id,
+    fileName = name,
+    modifiedAtMs = modifiedAtMs,
+    sizeBytes = sizeBytes,
+    isBundle = isBundle,
+)
+
+private class DriveHttpException(
+    val statusCode: Int,
+    message: String,
+) : IOException("$message: HTTP $statusCode")
+
+private class DrivePayloadTooLargeException : IOException("Drive payload exceeds the maximum supported size")
+private const val MAX_CREDENTIAL_COUNT = 10_000
+
+private fun List<ProviderCredentials>.toJsonArray(): JSONArray = JSONArray().apply {
+    forEach { credential ->
+        put(
+            JSONObject().apply {
+                put("serverUrl", credential.serverUrl)
+                put("username", credential.username)
+                put("password", credential.password)
+            },
+        )
+    }
+}
+
+private fun JSONArray.toProviderCredentials(): List<ProviderCredentials> {
+    if (length() > MAX_CREDENTIAL_COUNT) {
+        throw IllegalArgumentException("Too many provider credentials in Drive backup")
+    }
+    return (0 until length()).map { index ->
+        val objectValue = getJSONObject(index)
+        ProviderCredentials(
+            serverUrl = objectValue.getString("serverUrl"),
+            username = objectValue.getString("username"),
+            password = objectValue.getString("password"),
+        )
     }
 }
 

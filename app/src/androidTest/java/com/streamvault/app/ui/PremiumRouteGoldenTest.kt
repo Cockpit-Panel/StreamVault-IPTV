@@ -273,7 +273,10 @@ class PremiumRouteGoldenTest {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             AppScreenScaffold(
-                                currentRoute = Routes.FAVORITES,
+                                // Saved Library is no longer a top-level navigation destination.
+                                // Keep this visual fixture unselected instead of highlighting an
+                                // unrelated production route.
+                                currentRoute = "saved_library_golden_fixture",
                                 onNavigate = {},
                                 title = "Saved",
                                 subtitle = "Manage favorite channels, movies, and series from one premium hub."

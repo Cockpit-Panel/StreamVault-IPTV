@@ -4,8 +4,10 @@ import android.util.Log
 import com.streamvault.data.remote.http.HttpRequestProfile
 import com.streamvault.data.remote.dto.*
 import com.streamvault.data.util.AdultContentClassifier
+import com.streamvault.data.util.runSuspendCatching
 import com.streamvault.domain.model.*
-import com.streamvault.domain.provider.IptvProvider
+import com.streamvault.domain.model.LegacyProvider as Provider
+import com.streamvault.domain.provider.*
 import com.streamvault.domain.util.ChannelNormalizer
 import java.time.Instant
 import java.time.LocalDate
@@ -26,7 +28,7 @@ import kotlinx.coroutines.sync.withLock
  * Converts Xtream API responses to domain models.
  */
 class XtreamProvider(
-    override val providerId: Long,
+    val providerId: Long,
     private val api: XtreamApiService,
     private val serverUrl: String,
     private val username: String,
@@ -35,7 +37,13 @@ class XtreamProvider(
     private val useTextClassification: Boolean = true,
     private val enableBase64TextCompatibility: Boolean = false,
     private val requestProfile: HttpRequestProfile = HttpRequestProfile(ownerTag = "provider:$providerId/xtream")
-) : IptvProvider {
+) : ProviderAuthenticator,
+    LiveCatalogSource,
+    VodCatalogSource,
+    SeriesCatalogSource,
+    GuideSource,
+    PlaybackResolver,
+    CatchUpSource {
     companion object {
         private const val TAG = "XtreamProvider"
         private const val STREAM_SUMMARY_BATCH_SIZE = 500
@@ -128,6 +136,8 @@ class XtreamProvider(
                 )
             )
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Authentication failed", e), e)
     }
@@ -141,6 +151,8 @@ class XtreamProvider(
         )
         cacheAdultCategoryIds(ContentType.LIVE, categories)
         Result.success(categories.map { it.toDomain(ContentType.LIVE) })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load live categories", e), e)
     }
@@ -170,6 +182,8 @@ class XtreamProvider(
                     .getOrNull()
             }
         )
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load live streams", e), e)
     }
@@ -183,6 +197,8 @@ class XtreamProvider(
         )
         cacheAdultCategoryIds(ContentType.MOVIE, categories)
         Result.success(categories.map { it.toDomain(ContentType.MOVIE) })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load VOD categories", e), e)
     }
@@ -212,6 +228,8 @@ class XtreamProvider(
                     .getOrNull()
             }
         )
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load VOD", e), e)
     }
@@ -248,6 +266,8 @@ class XtreamProvider(
             onBatch(buffer.toList())
         }
         Result.success(acceptedCount)
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to stream VOD index", e), e)
     }
@@ -312,6 +332,8 @@ class XtreamProvider(
                 )
             )
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load movie details", e), e)
     }
@@ -325,6 +347,8 @@ class XtreamProvider(
         )
         cacheAdultCategoryIds(ContentType.SERIES, categories)
         Result.success(categories.map { it.toDomain(ContentType.SERIES) })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load series categories", e), e)
     }
@@ -354,6 +378,8 @@ class XtreamProvider(
                     .getOrNull()
             }
         )
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load series", e), e)
     }
@@ -390,6 +416,8 @@ class XtreamProvider(
             onBatch(buffer.toList())
         }
         Result.success(acceptedCount)
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to stream series index", e), e)
     }
@@ -505,6 +533,8 @@ class XtreamProvider(
             requestProfile
         )
         Result.success(response.epgListings.mapNotNull { it.toDomainOrNull() })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load EPG", e), e)
     }
@@ -525,6 +555,8 @@ class XtreamProvider(
             requestProfile
         )
         Result.success(response.epgListings.mapNotNull { it.toDomainOrNull() })
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         Result.error(XtreamErrorFormatter.message("Failed to load EPG", e), e)
     }
@@ -665,7 +697,7 @@ class XtreamProvider(
     private suspend fun loadAdultCategoryIds(type: ContentType): Set<Long> {
         adultCategoryCacheMutex.withLock {
             adultCategoryCache[type]?.let { return it }
-            val categories = runCatching {
+            val categories = try {
                 when (type) {
                     ContentType.LIVE -> api.getLiveCategories(
                         XtreamUrlFactory.buildPlayerApiUrl(serverUrl, username, password, action = "get_live_categories"),
@@ -675,19 +707,25 @@ class XtreamProvider(
                         XtreamUrlFactory.buildPlayerApiUrl(serverUrl, username, password, action = "get_vod_categories"),
                         requestProfile
                     )
+                    ContentType.VOD -> api.getVodCategories(
+                        XtreamUrlFactory.buildPlayerApiUrl(serverUrl, username, password, action = "get_vod_categories"),
+                        requestProfile
+                    )
                     ContentType.SERIES -> api.getSeriesCategories(
                         XtreamUrlFactory.buildPlayerApiUrl(serverUrl, username, password, action = "get_series_categories"),
                         requestProfile
                     )
                     ContentType.SERIES_EPISODE -> emptyList()
                 }
-            }.getOrElse {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 Log.w(
                     TAG,
                     "Failed to prefetch $type categories for adult tagging: " +
-                        XtreamUrlFactory.sanitizeLogMessage(it.message ?: "unknown error")
+                        XtreamUrlFactory.sanitizeLogMessage(e.message ?: "unknown error")
                 )
-                emptyList()
+                return emptySet()
             }
             return categories
                 .filter { it.isAdult == true || (useTextClassification && AdultContentClassifier.isAdultCategoryName(it.categoryName)) }
@@ -1020,7 +1058,7 @@ class XtreamProvider(
     }
 
     private suspend fun requestSeriesInfoWithCompatibilityFallback(seriesId: Long): XtreamSeriesInfoResponse {
-        val primaryAttempt = runCatching { requestSeriesInfo(seriesId, "series_id") }
+        val primaryAttempt = runSuspendCatching { requestSeriesInfo(seriesId, "series_id") }
         val primaryResponse = primaryAttempt.getOrNull()
         if (primaryResponse.hasUsableSeriesDetailPayload()) {
             return requireNotNull(primaryResponse)
@@ -1034,7 +1072,7 @@ class XtreamProvider(
             primaryResponse?.let { return it }
             primaryFailure?.let { throw it }
         }
-        val legacyAttempt = runCatching { requestSeriesInfo(seriesId, "series") }
+        val legacyAttempt = runSuspendCatching { requestSeriesInfo(seriesId, "series") }
         val legacyResponse = legacyAttempt.getOrNull()
         if (legacyResponse.hasUsableSeriesDetailPayload()) {
             return requireNotNull(legacyResponse)

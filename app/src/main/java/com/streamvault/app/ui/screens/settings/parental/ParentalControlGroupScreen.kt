@@ -288,6 +288,7 @@ private fun ContentTypeSelectorRow(
 private fun contentTypeTabLabel(type: ContentType): String = when (type) {
     ContentType.LIVE -> stringResource(R.string.nav_live_tv)
     ContentType.MOVIE -> stringResource(R.string.nav_movies)
+    ContentType.VOD -> stringResource(R.string.nav_vod)
     ContentType.SERIES,
     ContentType.SERIES_EPISODE -> stringResource(R.string.nav_series)
 }
@@ -649,6 +650,7 @@ private fun TypeBadge(type: ContentType) {
     val (label, background, contentColor) = when (type) {
         ContentType.LIVE -> Triple("LIVE", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.onPrimary)
         ContentType.MOVIE -> Triple("MOVIE", MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.onSecondary)
+        ContentType.VOD -> Triple("VOD", MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.onSecondary)
         ContentType.SERIES,
         ContentType.SERIES_EPISODE -> Triple("SERIES", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.onTertiary)
     }

@@ -57,15 +57,21 @@ android {
         applicationId = "com.streamvault.app"
         minSdk = 25
         targetSdk = 36
-        versionCode = 16
-        versionName = "1.0.15"
+        versionCode = 19
+        versionName = "1.0.17.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        providers.gradleProperty("compatApi").orNull?.let { expectedApi ->
+            testInstrumentationRunnerArguments["expected_api"] = expectedApi
+        }
         buildConfigField("String", "OFFICIAL_APPLICATION_ID", "\"com.streamvault.app\"")
         buildConfigField("String", "OFFICIAL_SIGNING_CERT_SHA256", "\"$officialSigningCertSha256\"")
         buildConfigField("String", "APP_UPDATE_CHANNEL", "\"stable\"")
         buildConfigField("long", "BUILD_TIMESTAMP_UTC", "0L")
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            providers.gradleProperty("compatAbi").orNull
+                ?.takeIf(String::isNotBlank)
+                ?.let { abiFilters += it }
         }
         // Dev seeding hooks — populated from rootProject/local.properties in the
         // `debug` build type only. Release builds inherit these empty defaults so
@@ -111,23 +117,19 @@ android {
             // Keep beta close to release behavior but faster for CI/test distribution.
             isMinifyEnabled = false
             isShrinkResources = false
-            if (keystorePropertiesFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            signingConfig = signingConfigs.getByName(if (keystorePropertiesFile.exists()) "release" else "debug")
             matchingFallbacks += listOf("release")
         }
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Cockpit releases stay unshrunk: upstream's R8 pass is prohibitively slow
+            // on the complete multi-module build and is not required for functionality.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            if (keystorePropertiesFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            } else {
-                signingConfig = signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName(if (keystorePropertiesFile.exists()) "release" else "debug")
         }
     }
 
@@ -145,6 +147,14 @@ android {
     testOptions {
         animationsDisabled = true
         unitTests.isReturnDefaultValues = true
+    }
+
+    lint {
+        baseline = file("lint-baseline.xml")
+        warningsAsErrors = true
+        // Dependency freshness is tracked separately from the release gate. These checks are
+        // time-sensitive and would otherwise fail whenever Google publishes a newer version.
+        disable += setOf("AndroidGradlePluginVersion", "GradleDependency")
     }
 }
 
@@ -247,6 +257,7 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.truth)
 }
 
 tasks.configureEach {

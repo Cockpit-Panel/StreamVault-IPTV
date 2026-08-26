@@ -1,83 +1,27 @@
 package com.streamvault.app.ui.screens.player
 
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-
-private const val EPG_REFRESH_INTERVAL_MS = 30_000L
-
 internal fun PlayerViewModel.fetchEpg(
     providerId: Long,
     internalChannelId: Long,
     epgChannelId: String?,
     streamId: Long = 0L
 ) {
-    epgJob?.cancel()
     if (providerId <= 0L || (internalChannelId <= 0L && epgChannelId == null && streamId <= 0L)) {
-        clearEpgState()
+        epgCoordinator.clear(::clearEpgState)
         return
     }
 
-    val requestKey = EpgRequestKey(
-        providerId = providerId,
-        internalChannelId = internalChannelId,
-        epgChannelId = epgChannelId,
-        streamId = streamId
+    val requestVersion = prepareRequestVersion
+    epgCoordinator.request(
+        scope = playbackSessionScope(requestVersion),
+        sessionId = requestVersion,
+        requestKey = EpgRequestKey(
+            providerId = providerId,
+            internalChannelId = internalChannelId,
+            epgChannelId = epgChannelId,
+            streamId = streamId
+        ),
+        onPrograms = ::applyProgramTimeline,
+        onClear = ::clearEpgState
     )
-
-    epgJob = viewModelScope.launch {
-        while (true) {
-            val now = System.currentTimeMillis()
-            val start = now - (24 * 60 * 60 * 1000L)
-            val end = now + (6 * 60 * 60 * 1000L)
-            val programs = epgRepository.getResolvedProgramsForPlaybackChannel(
-                providerId = providerId,
-                internalChannelId = internalChannelId,
-                epgChannelId = epgChannelId,
-                streamId = streamId,
-                startTime = start,
-                endTime = end
-            )
-
-            if (activeEpgRequestKey != requestKey) return@launch
-
-            if (programs.isNotEmpty()) {
-                applyProgramTimeline(programs, now)
-            } else {
-                applyRemoteProgramFallback(providerId, epgChannelId, streamId, now)
-                if (activeEpgRequestKey != requestKey) return@launch
-            }
-
-            delay(EPG_REFRESH_INTERVAL_MS)
-        }
-    }
-}
-
-internal suspend fun PlayerViewModel.applyRemoteProgramFallback(
-    providerId: Long,
-    epgChannelId: String?,
-    streamId: Long,
-    now: Long
-) {
-    if (streamId <= 0L) {
-        clearEpgState()
-        return
-    }
-
-    val result = providerRepository.getProgramsForLiveStream(
-        providerId = providerId,
-        streamId = streamId,
-        epgChannelId = epgChannelId,
-        limit = 12
-    )
-    val programs = (result as? com.streamvault.domain.model.Result.Success)?.data
-        ?.sortedBy { it.startTime }
-        .orEmpty()
-
-    if (programs.isEmpty()) {
-        clearEpgState()
-        return
-    }
-
-    applyProgramTimeline(programs, now)
 }

@@ -20,6 +20,7 @@ import org.mockito.kotlin.atLeastOnce
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.eq
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import org.mockito.kotlin.check
@@ -34,7 +35,9 @@ class PlaybackHistoryRepositoryImplTest {
         override suspend fun <T> inTransaction(block: suspend () -> T): T = block()
     }
 
-    private fun repository() = PlaybackHistoryRepositoryImpl(
+    private fun repository(
+        transactionRunner: DatabaseTransactionRunner = this.transactionRunner
+    ) = PlaybackHistoryRepositoryImpl(
         dao = historyDao,
         preferencesRepository = preferencesRepository,
         movieDao = movieDao,
@@ -70,15 +73,90 @@ class PlaybackHistoryRepositoryImplTest {
     }
 
     @Test
-    fun `updateResumePosition persists playback history and syncs movie progress immediately`() = runTest {
+    fun `updateResumePosition buffers playback history until an explicit flush`() = runTest {
         whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
         val repository = repository()
 
         val result = repository.updateResumePosition(movieHistory())
 
         assertThat(result.isSuccess).isTrue()
-        verify(historyDao).insertOrUpdate(org.mockito.kotlin.any())
+        verify(historyDao, never()).insertOrUpdate(org.mockito.kotlin.any())
+        verify(movieDao, never()).syncWatchProgressFromHistory(10L, 5L)
+
+        val flushResult = repository.flushPendingProgress()
+
+        assertThat(flushResult.isSuccess).isTrue()
+        verify(historyDao, times(1)).insertOrUpdate(org.mockito.kotlin.any())
         verify(movieDao).syncWatchProgressFromHistory(10L, 5L)
+    }
+
+    @Test
+    fun `successive resume updates coalesce to the newest position before flush`() = runTest {
+        whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
+        val repository = repository()
+
+        repository.updateResumePosition(movieHistory(resumePositionMs = 2_000L))
+        repository.updateResumePosition(movieHistory(resumePositionMs = 8_000L))
+
+        verify(historyDao, never()).insertOrUpdate(org.mockito.kotlin.any())
+        repository.flushPendingProgress()
+
+        val historyCaptor = argumentCaptor<PlaybackHistoryEntity>()
+        verify(historyDao, times(1)).insertOrUpdate(historyCaptor.capture())
+        assertThat(historyCaptor.firstValue.resumePositionMs).isEqualTo(8_000L)
+        verify(movieDao, times(1)).syncWatchProgressFromHistory(10L, 5L)
+    }
+
+    @Test
+    fun `failed flush keeps the coalesced position available for retry`() = runTest {
+        whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
+        val failingRunner = object : DatabaseTransactionRunner {
+            override suspend fun <T> inTransaction(block: suspend () -> T): T {
+                throw IllegalStateException("database unavailable")
+            }
+        }
+        val repository = repository(transactionRunner = failingRunner)
+
+        repository.updateResumePosition(movieHistory(resumePositionMs = 6_000L))
+        val result = repository.flushPendingProgress()
+
+        assertThat(result.isError).isTrue()
+        assertThat(repository.getPlaybackHistory(10L, ContentType.MOVIE, 5L)?.resumePositionMs)
+            .isEqualTo(6_000L)
+        verify(historyDao, never()).insertOrUpdate(org.mockito.kotlin.any())
+    }
+
+    @Test
+    fun `two hours of five second progress uses one durable write per thirty second window`() = runTest {
+        whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
+        val repository = repository()
+        val progressIntervalMs = 5_000L
+        val flushIntervalMs = 30_000L
+        val playbackDurationMs = 2 * 60 * 60 * 1_000L
+
+        for (positionMs in progressIntervalMs..playbackDurationMs step progressIntervalMs) {
+            repository.updateResumePosition(movieHistory(resumePositionMs = positionMs))
+            if (positionMs % flushIntervalMs == 0L) {
+                repository.flushPendingProgress()
+            }
+        }
+
+        val expectedDurableWrites = (playbackDurationMs / flushIntervalMs).toInt()
+        verify(historyDao, times(expectedDurableWrites)).insertOrUpdate(org.mockito.kotlin.any())
+        verify(movieDao, times(expectedDurableWrites)).syncWatchProgressFromHistory(10L, 5L)
+    }
+
+    @Test
+    fun `repeating a flush without new progress does not duplicate the durable write`() = runTest {
+        whenever(preferencesRepository.isIncognitoMode).thenReturn(flowOf(false))
+        val repository = repository()
+
+        repository.updateResumePosition(movieHistory(resumePositionMs = 4_000L))
+        repository.flushPendingProgress()
+        repository.flushPendingProgress()
+
+        verify(historyDao, times(1)).insertOrUpdate(org.mockito.kotlin.any())
+        verify(movieDao, times(1)).syncWatchProgressFromHistory(10L, 5L)
     }
 
     @Test

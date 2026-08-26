@@ -14,6 +14,8 @@ import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import com.streamvault.data.local.dao.ProviderDao
+import com.streamvault.data.local.entity.ProviderWorkflowPhase
+import com.streamvault.data.local.entity.ProviderWorkflowReason
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.ProviderType
 import dagger.hilt.EntryPoint
@@ -22,6 +24,12 @@ import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+
+internal fun stalkerIndexExistingWorkPolicy(force: Boolean, appendSuccessor: Boolean): ExistingWorkPolicy = when {
+    force -> ExistingWorkPolicy.REPLACE
+    appendSuccessor -> ExistingWorkPolicy.APPEND_OR_REPLACE
+    else -> ExistingWorkPolicy.KEEP
+}
 
 class StalkerIndexWorker(
     appContext: Context,
@@ -32,7 +40,8 @@ class StalkerIndexWorker(
     @InstallIn(SingletonComponent::class)
     interface StalkerIndexWorkerEntryPoint {
         fun providerDao(): ProviderDao
-        fun syncManager(): SyncManager
+        fun syncCommands(): ProviderSyncCommands
+        fun providerWorkflowRunner(): ProviderWorkflowRunner
     }
 
     override suspend fun doWork(): Result {
@@ -58,26 +67,55 @@ class StalkerIndexWorker(
             }
 
             var sawRetryableFailure = false
+            var sawPermanentFailure = false
             providers
                 .filter { provider -> provider.type == ProviderType.STALKER_PORTAL }
                 .forEach { provider ->
-                    when (val result = entryPoint.syncManager().processQueuedStalkerIndexJobs(
+                    val disposition = entryPoint.providerWorkflowRunner().execute(
                         providerId = provider.id,
-                        section = requestedSection,
-                        force = force,
-                        maxCategoriesPerSection = CATEGORY_SLICE_SIZE
-                    )) {
-                        is com.streamvault.domain.model.Result.Error -> {
-                            Log.w(TAG, "Stalker index worker failed for provider ${provider.id}: ${result.message}")
-                            if (shouldRetry(result.exception)) {
-                                sawRetryableFailure = true
+                        phase = requestedSection.toWorkflowPhase(),
+                        reason = ProviderWorkflowReason.PERIODIC,
+                        force = force
+                    ) {
+                        when (val result = entryPoint.syncCommands().processQueuedStalkerIndexJobs(
+                            providerId = provider.id,
+                            section = requestedSection,
+                            force = force,
+                            maxCategoriesPerSection = CATEGORY_SLICE_SIZE
+                        )) {
+                            is com.streamvault.domain.model.Result.Error -> {
+                                Log.w(TAG, "Stalker index worker failed for provider ${provider.id}: ${result.message}")
+                                ProviderWorkflowOutcome.Failure(
+                                    code = "STALKER_INDEX",
+                                    message = result.message,
+                                    cause = result.exception
+                                )
                             }
+                            is com.streamvault.domain.model.Result.Success ->
+                                ProviderWorkflowOutcome.Success()
+                            com.streamvault.domain.model.Result.Loading ->
+                                ProviderWorkflowOutcome.Failure(
+                                    code = "STALKER_INDEX_LOADING",
+                                    message = "Index operation did not reach a terminal state.",
+                                    retryable = true
+                                )
                         }
+                    }
+                    when (disposition) {
+                        ProviderWorkflowDisposition.RETRY,
+                        ProviderWorkflowDisposition.BUSY -> sawRetryableFailure = true
+                        ProviderWorkflowDisposition.FAILED -> sawPermanentFailure = true
                         else -> Unit
                     }
                 }
 
-            if (sawRetryableFailure) Result.retry() else Result.success()
+            when {
+                sawRetryableFailure -> Result.retry()
+                sawPermanentFailure -> Result.failure()
+                else -> Result.success()
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             Log.e(TAG, "Stalker index worker failed", error)
             if (shouldRetry(error)) Result.retry() else Result.failure()
@@ -85,12 +123,7 @@ class StalkerIndexWorker(
     }
 
     private fun shouldRetry(error: Throwable?): Boolean {
-        return when (error) {
-            is IOException -> true
-            is SQLiteException -> error.message.orEmpty().contains("locked", ignoreCase = true) ||
-                error.message.orEmpty().contains("busy", ignoreCase = true)
-            else -> false
-        }
+        return ProviderWorkFailureClassifier.isRetryable(error)
     }
 
     companion object {
@@ -100,14 +133,14 @@ class StalkerIndexWorker(
         private const val KEY_FORCE = "force"
         private const val INVALID_PROVIDER_ID = -1L
         private const val CATEGORY_SLICE_SIZE = 32
-        private const val UNIQUE_WORK_PREFIX = "stalker-index-worker-"
 
         fun enqueue(
             context: Context,
             providerId: Long,
             section: String? = null,
             force: Boolean = false,
-            initialDelaySeconds: Long = 0L
+            initialDelaySeconds: Long = 0L,
+            appendSuccessor: Boolean = false
         ) {
             if (providerId <= 0L) return
             val request = OneTimeWorkRequestBuilder<StalkerIndexWorker>()
@@ -130,10 +163,16 @@ class StalkerIndexWorker(
                 .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
-                uniqueWorkName(providerId, section),
-                if (force) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.APPEND_OR_REPLACE,
+                providerWorkUniqueName(providerId),
+                stalkerIndexExistingWorkPolicy(force, appendSuccessor),
                 request
             )
+        }
+
+        fun cancel(context: Context, providerId: Long) {
+            if (providerId > 0L) {
+                WorkManager.getInstance(context).cancelUniqueWork(providerWorkUniqueName(providerId))
+            }
         }
 
         private fun defaultConstraints(): Constraints = Constraints.Builder()
@@ -141,10 +180,14 @@ class StalkerIndexWorker(
             .setRequiresBatteryNotLow(true)
             .build()
 
-        private fun uniqueWorkName(providerId: Long, section: String?): String =
-            "$UNIQUE_WORK_PREFIX$providerId-${section.orEmpty()}"
-
         private fun String.toContentTypeOrNull(): ContentType? =
             runCatching { ContentType.valueOf(this) }.getOrNull()
+
+        private fun ContentType?.toWorkflowPhase(): ProviderWorkflowPhase = when (this) {
+            ContentType.MOVIE -> ProviderWorkflowPhase.MOVIE_INDEX
+            ContentType.SERIES,
+            ContentType.SERIES_EPISODE -> ProviderWorkflowPhase.SERIES_INDEX
+            else -> ProviderWorkflowPhase.CONTENT_INDEX
+        }
     }
 }

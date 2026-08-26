@@ -2,7 +2,6 @@ package com.streamvault.data.repository
 
 import com.streamvault.data.local.dao.CombinedM3uProfileDao
 import com.streamvault.data.local.dao.CombinedM3uProfileMemberDao
-import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.entity.CombinedM3uProfileEntity
 import com.streamvault.data.local.entity.CombinedM3uProfileMemberEntity
 import com.streamvault.data.mapper.toDomain
@@ -15,11 +14,12 @@ import com.streamvault.domain.model.CombinedCategory
 import com.streamvault.domain.model.CombinedCategoryBinding
 import com.streamvault.domain.model.CombinedM3uProfile
 import com.streamvault.domain.model.ContentType
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.repository.ChannelRepository
 import com.streamvault.domain.repository.CombinedM3uRepository
+import com.streamvault.domain.repository.ProviderRepository
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -34,9 +34,9 @@ import kotlinx.coroutines.flow.map
 class CombinedM3uRepositoryImpl @Inject constructor(
     private val profileDao: CombinedM3uProfileDao,
     private val memberDao: CombinedM3uProfileMemberDao,
-    private val providerDao: ProviderDao,
     private val channelRepository: ChannelRepository,
-    private val preferencesRepository: PreferencesRepository
+    private val preferencesRepository: PreferencesRepository,
+    private val providerRepository: ProviderRepository
 ) : CombinedM3uRepository {
 
     override fun getProfiles(): Flow<List<CombinedM3uProfile>> =
@@ -67,10 +67,8 @@ class CombinedM3uRepositoryImpl @Inject constructor(
         if (distinctProviderIds.isEmpty()) {
             return Result.error("Select at least one M3U provider.")
         }
-        val providersById = providerDao.getByIds(distinctProviderIds)
-            .associateBy { it.id }
         val providers = distinctProviderIds.mapNotNull { providerId ->
-            providersById[providerId]?.toDomain()
+            providerRepository.getProvider(providerId)
         }
         if (providers.size != distinctProviderIds.size || providers.any { it.type != ProviderType.M3U }) {
             return Result.error("Combined profiles support M3U providers only.")
@@ -130,7 +128,7 @@ class CombinedM3uRepositoryImpl @Inject constructor(
     override suspend fun addProvider(profileId: Long, providerId: Long): Result<Unit> {
         return try {
         val profile = profileDao.getById(profileId) ?: return Result.error("Combined profile not found.")
-        val provider = providerDao.getById(providerId)?.toDomain()
+        val provider = providerRepository.getProvider(providerId)
             ?: return Result.error("Provider not found.")
         if (provider.type != ProviderType.M3U) {
             return Result.error("Only M3U providers can be added to a combined profile.")
@@ -203,9 +201,8 @@ class CombinedM3uRepositoryImpl @Inject constructor(
     }
 
     override fun getAvailableM3uProviders(): Flow<List<Provider>> =
-        providerDao.getAll().map { providers ->
-            providers.map { it.toDomain().copy(password = "") }
-                .filter { it.type == ProviderType.M3U }
+        providerRepository.getProviders().map { providers ->
+            providers.filter { it.type == ProviderType.M3U }
         }
 
     override fun getActiveLiveSource(): Flow<ActiveLiveSource?> =

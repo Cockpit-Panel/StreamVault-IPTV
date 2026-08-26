@@ -11,6 +11,7 @@ import com.streamvault.data.local.entity.CategoryEntity
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.data.remote.xtream.XtreamStreamUrlResolver
 import com.streamvault.domain.manager.ParentalControlManager
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
 import com.streamvault.domain.model.ChannelNumberingMode
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.GroupedChannelLabelMode
@@ -47,6 +48,7 @@ class ChannelRepositoryImplTest {
         whenever(preferencesRepository.liveVariantPreferenceMode).thenReturn(flowOf(LiveVariantPreferenceMode.BALANCED))
         whenever(preferencesRepository.liveVariantSelections).thenReturn(flowOf(emptyMap()))
         whenever(preferencesRepository.liveVariantObservations).thenReturn(flowOf(emptyMap()))
+        whenever(preferencesRepository.hideDecorativeLiveRows).thenReturn(flowOf(true))
         whenever(preferencesRepository.getHiddenChannelIds(any())).thenReturn(flowOf(emptySet()))
     }
 
@@ -81,6 +83,29 @@ class ChannelRepositoryImplTest {
         ).inOrder()
         verify(channelDao).getGroupedCategoryCounts(7L)
         verify(channelDao, never()).getByProvider(any())
+    }
+
+    @Test
+    fun `getCategories uses raw grouped counts when decorative rows are visible`() = runTest {
+        whenever(categoryDao.getByProviderAndType(7L, ContentType.LIVE.name)).thenReturn(
+            flowOf(listOf(categoryEntity(id = 10L, name = "News")))
+        )
+        whenever(preferencesRepository.hideDecorativeLiveRows).thenReturn(flowOf(false))
+        whenever(channelDao.getRawGroupedCategoryCounts(7L)).thenReturn(
+            flowOf(listOf(CategoryCount(categoryId = 10L, item_count = 5)))
+        )
+        whenever(parentalControlManager.unlockedCategoriesForProvider(7L)).thenReturn(flowOf(emptySet()))
+
+        val repository = createRepository()
+
+        val result = repository.getCategories(7L).first()
+
+        assertThat(result.map { it.name to it.count }).containsExactly(
+            "All Channels" to 5,
+            "News" to 5
+        ).inOrder()
+        verify(channelDao).getRawGroupedCategoryCounts(7L)
+        verify(channelDao, never()).getGroupedCategoryCounts(7L)
     }
 
     @Test
@@ -177,6 +202,95 @@ class ChannelRepositoryImplTest {
     }
 
     @Test
+    fun `getChannelsByCategory filters hash wrapped provider headers`() = runTest {
+        whenever(channelDao.getByCategory(7L, 10L)).thenReturn(
+            flowOf(
+                listOf(
+                    ChannelBrowseEntity(
+                        id = 1L,
+                        streamId = 101L,
+                        name = "#### GENERAL HD/4K ####",
+                        categoryId = 10L,
+                        categoryName = "News",
+                        streamUrl = "https://stream/header",
+                        number = 1,
+                        providerId = 7L
+                    ),
+                    ChannelBrowseEntity(
+                        id = 2L,
+                        streamId = 102L,
+                        name = "News One HD",
+                        categoryId = 10L,
+                        categoryName = "News",
+                        streamUrl = "https://stream/news-one",
+                        number = 2,
+                        providerId = 7L
+                    )
+                )
+            )
+        )
+        whenever(parentalControlManager.unlockedCategoriesForProvider(7L)).thenReturn(flowOf(emptySet()))
+
+        val repository = createRepository()
+
+        val result = repository.getChannelsByCategory(7L, 10L).first()
+
+        assertThat(result.map { it.name }).containsExactly("News One")
+    }
+
+    @Test
+    fun `getChannelsByCategory keeps hash wrapped provider headers when setting disabled`() = runTest {
+        whenever(preferencesRepository.hideDecorativeLiveRows).thenReturn(flowOf(false))
+        whenever(channelDao.getByCategory(7L, 10L)).thenReturn(
+            flowOf(
+                listOf(
+                    ChannelBrowseEntity(
+                        id = 1L,
+                        streamId = 101L,
+                        name = "#### GENERAL HD/4K ####",
+                        categoryId = 10L,
+                        categoryName = "News",
+                        streamUrl = "https://stream/header",
+                        number = 1,
+                        providerId = 7L
+                    ),
+                    ChannelBrowseEntity(
+                        id = 2L,
+                        streamId = 102L,
+                        name = "News One HD",
+                        categoryId = 10L,
+                        categoryName = "News",
+                        streamUrl = "https://stream/news-one",
+                        number = 2,
+                        providerId = 7L
+                    )
+                )
+            )
+        )
+        whenever(parentalControlManager.unlockedCategoriesForProvider(7L)).thenReturn(flowOf(emptySet()))
+
+        val repository = createRepository()
+
+        val result = repository.getChannelsByCategory(7L, 10L).first()
+
+        assertThat(result.map { it.name }).containsExactly("#### GENERAL ####", "News One")
+    }
+
+    @Test
+    fun `getChannelCount uses raw count when decorative rows are visible`() = runTest {
+        whenever(preferencesRepository.hideDecorativeLiveRows).thenReturn(flowOf(false))
+        whenever(channelDao.getRawCount(7L)).thenReturn(flowOf(12))
+
+        val repository = createRepository()
+
+        val result = repository.getChannelCount(7L).first()
+
+        assertThat(result).isEqualTo(12)
+        verify(channelDao).getRawCount(7L)
+        verify(channelDao, never()).getCount(7L)
+    }
+
+    @Test
     fun `offset pages keep group numbering relative to full list`() = runTest {
         whenever(channelDao.getByProviderWithoutErrorsBrowsePageOffset(7L, 60, 60)).thenReturn(
             listOf(
@@ -211,6 +325,29 @@ class ChannelRepositoryImplTest {
         )
 
         assertThat(result.map { it.number }).containsExactly(61, 62).inOrder()
+    }
+
+    @Test
+    fun `getChannel applies epg only logo policy for raw channel lookup`() = runTest {
+        whenever(channelDao.getBrowseById(99L)).thenReturn(
+            ChannelBrowseEntity(
+                id = 99L,
+                streamId = 199L,
+                name = "News One",
+                logoUrl = "https://supplier.example/logo.png",
+                streamUrl = "https://stream/news",
+                number = 9,
+                providerId = 7L,
+                channelLogoSourcePolicy = ChannelLogoSourcePolicy.EPG_ONLY,
+                epgIconUrl = "https://epg.example/icon.png"
+            )
+        )
+
+        val repository = createRepository()
+
+        val result = repository.getChannel(99L)
+
+        assertThat(result?.logoUrl).isEqualTo("https://epg.example/icon.png")
     }
 
     @Test

@@ -43,27 +43,37 @@ interface DriveBackupSyncManager {
     suspend fun signOut(): Result<Unit>
 
     /**
-     * Exports the current configuration to a temporary local file, uploads it
-     * to Drive `appDataFolder` (overwriting the previous backup if any).
+     * Exports the current configuration and its matching credentials snapshot
+     * into one versioned Drive artifact. Keeping both payloads in one file
+     * prevents a backup and credentials upload from representing different
+     * local states.
      */
-    suspend fun pushBackup(): Result<DriveSyncStatus>
+    suspend fun pushBackup(
+        credentials: List<ProviderCredentials> = emptyList(),
+    ): Result<DriveSyncStatus>
+
+    /** Lists available Drive snapshots, newest first, for user selection. */
+    suspend fun listBackups(): Result<List<DriveBackupSnapshot>>
+
+    /** Deletes one backup snapshot after the caller has confirmed the action. */
+    suspend fun deleteBackup(snapshotId: String): Result<Unit>
 
     /**
-     * Downloads the latest backup from Drive `appDataFolder` to a temporary
+     * Downloads a selected backup from Drive `appDataFolder` to a temporary
      * local file, then hands the URI back to the caller — typically wired into
      * the existing [BackupManager.inspectBackup] flow so the preview + conflict
      * resolution UI is reused unchanged.
      *
+     * If [snapshotId] is omitted, the newest available snapshot is selected.
      * Returns [Result.Error] with code [DriveSyncError.NO_REMOTE_BACKUP] if
-     * nothing has been pushed yet.
+     * nothing has been pushed yet or the requested snapshot no longer exists.
      */
-    suspend fun pullBackup(): Result<DriveBackupArtifact>
+    suspend fun pullBackup(snapshotId: String? = null): Result<DriveBackupArtifact>
 
     /**
-     * Uploads the provider credentials list to a private sibling file
-     * (`streamvault_credentials.json`) in the same Drive `appDataFolder`.
-     * Companion to [pushBackup] — credentials are stripped from the main
-     * backup JSON by design, so this restores the round-trip.
+     * Legacy compatibility upload for the provider credentials list. New UI
+     * pushes pass credentials to [pushBackup] so they are bundled with the
+     * matching backup snapshot; this method remains only for older callers.
      *
      * Pure overwrite (last-write-wins). Matching at pull time uses
      * `(serverUrl, username)` so provider id reshuffling on import does
@@ -72,23 +82,24 @@ interface DriveBackupSyncManager {
     suspend fun pushCredentials(credentials: List<ProviderCredentials>): Result<Unit>
 
     /**
-     * Downloads `streamvault_credentials.json` from Drive `appDataFolder`.
-     * Returns an empty list if the file is absent (graceful backwards
-     * compatibility with backups produced before M3).
+     * Legacy compatibility download for `streamvault_credentials.json` from
+     * Drive `appDataFolder`. New bundle pulls expose credentials through
+     * [DriveBackupArtifact.credentials]. Returns an empty list if the legacy
+     * file is absent.
      */
     suspend fun pullCredentials(): Result<List<ProviderCredentials>>
 }
 
 /**
  * Cleartext credentials for a single provider, transported alongside the main
- * backup JSON. Storage relies on the `drive.appdata` scope + Google account
- * ACL for confidentiality — the file is invisible to the OS and purged on
- * uninstall. Matching on pull uses `(serverUrl, username)`.
+ * backup JSON. Drive storage relies on the `drive.appdata` scope + Google
+ * account ACL for confidentiality. Matching uses `(serverUrl, username, providerType)` when available.
  */
 data class ProviderCredentials(
     val serverUrl: String,
     val username: String,
     val password: String,
+    val providerType: com.streamvault.domain.model.ProviderType? = null,
 )
 
 /** Public Sign-In state for the UI. */
@@ -115,11 +126,22 @@ data class DriveSyncStatus(
 /** Carries the intent the UI must launch. Kept opaque (`Any?`) for platform independence. */
 data class DriveSignInRequest(val intent: Any?)
 
+/** A user-visible backup snapshot stored in Drive `appDataFolder`. */
+data class DriveBackupSnapshot(
+    val id: String,
+    val fileName: String,
+    val modifiedAtMs: Long? = null,
+    val sizeBytes: Long = 0L,
+    val isBundle: Boolean = true,
+)
+
 /** Local artifact produced by [DriveBackupSyncManager.pullBackup]. */
 data class DriveBackupArtifact(
     /** SAF-compatible `file://` URI string the existing [BackupManager.inspectBackup] can read. */
     val localUriString: String,
     val sizeBytes: Long,
+    /** Credentials embedded in the versioned bundle; null means a legacy backup file. */
+    val credentials: List<ProviderCredentials>? = null,
 )
 
 /** Stable identifiers UI may match against to localize messages. */
@@ -131,4 +153,5 @@ object DriveSyncError {
     const val AUTH_FAILED = "drive_auth_failed"
     const val EXPORT_FAILED = "drive_export_failed"
     const val IMPORT_FAILED = "drive_import_failed"
+    const val PAYLOAD_TOO_LARGE = "drive_payload_too_large"
 }

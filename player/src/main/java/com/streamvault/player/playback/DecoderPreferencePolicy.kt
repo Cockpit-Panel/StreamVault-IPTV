@@ -8,6 +8,11 @@ interface DecoderPreferencePolicy {
     fun resetForMedia(mediaId: String)
 }
 
+internal fun shouldForceSoftwareForAmbiguousDecoderFallback(
+    audioFallbackMode: DecoderMode?,
+    videoFallbackMode: DecoderMode?
+): Boolean = audioFallbackMode == DecoderMode.SOFTWARE || videoFallbackMode == DecoderMode.SOFTWARE
+
 class DefaultDecoderPreferencePolicy : DecoderPreferencePolicy {
     private val softwareRetriedMediaIds = mutableSetOf<String>()
 

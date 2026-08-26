@@ -7,6 +7,14 @@ data class StreamInfo(
     val title: String? = null,
     val headers: Map<String, String> = emptyMap(),
     val userAgent: String? = null,
+    /**
+     * Provider-scoped transport decision. The legacy Boolean remains only for existing
+     * non-Stalker compatibility paths.
+     */
+    val playbackTransportPolicy: PlaybackTransportPolicy? = null,
+    val allowInvalidSsl: Boolean = false,
+    val proxyHost: String = "",
+    val proxyPort: Int? = null,
     val streamType: StreamType = StreamType.UNKNOWN,
     val containerExtension: String? = null,
     val catchUpUrl: String? = null,
@@ -16,6 +24,42 @@ data class StreamInfo(
     init {
         require(url.isNotBlank()) { "StreamInfo url must not be blank" }
         expirationTime?.let { require(it >= 0) { "StreamInfo expirationTime must be non-negative" } }
+        proxyPort?.let { require(it in 1..65535) { "StreamInfo proxyPort must be between 1 and 65535" } }
+    }
+}
+
+enum class PlaybackTransportMode {
+    STRICT,
+    USER_ACCEPTED_UNVERIFIED_HTTPS,
+    USER_ACCEPTED_HTTP
+}
+
+data class PlaybackTransportPolicy(
+    val mode: PlaybackTransportMode,
+    val origin: StalkerTransportOrigin,
+    /** Base64 SHA-256 of the approved SubjectPublicKeyInfo. */
+    val spkiSha256: String? = null,
+    /**
+     * IPTV providers often redirect an approved HTTP portal URL to a raw-IP or CDN HTTP
+     * stream. The player may follow those redirects only when the user explicitly accepted
+     * cleartext HTTP transport.
+     */
+    val allowCrossOriginHttpRedirects: Boolean = false
+) {
+    init {
+        if (mode == PlaybackTransportMode.USER_ACCEPTED_UNVERIFIED_HTTPS) {
+            require(!spkiSha256.isNullOrBlank()) {
+                "Accepted unverified HTTPS playback requires an SPKI fingerprint"
+            }
+        }
+        if (allowCrossOriginHttpRedirects) {
+            require(mode == PlaybackTransportMode.USER_ACCEPTED_HTTP) {
+                "Cross-origin playback redirects require accepted HTTP transport"
+            }
+            require(origin.scheme.equals("http", ignoreCase = true)) {
+                "Cross-origin playback redirects require an HTTP origin"
+            }
+        }
     }
 }
 

@@ -16,11 +16,13 @@ import com.streamvault.domain.model.LibrarySortBy
 import com.streamvault.domain.model.PlaybackHistory
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.VodCategoryHydrationRequest
 import com.streamvault.domain.model.Series
 import com.streamvault.domain.repository.FavoriteRepository
 import com.streamvault.domain.repository.PlaybackHistoryRepository
 import com.streamvault.domain.repository.ProviderRepository
 import com.streamvault.domain.repository.SeriesRepository
+import com.streamvault.domain.repository.M3uClassificationRepository
 import com.streamvault.domain.usecase.ContinueWatchingResult
 import com.streamvault.domain.usecase.ContinueWatchingScope
 import com.streamvault.domain.usecase.GetContinueWatching
@@ -29,7 +31,6 @@ import com.streamvault.app.ui.screens.vod.createVodGroup
 import com.streamvault.app.ui.screens.vod.incrementVodSelectedCategoryLoadLimit
 import com.streamvault.app.ui.screens.vod.buildVodPreviewCatalog
 import com.streamvault.app.ui.screens.vod.buildVodSearchCatalog
-import com.streamvault.app.ui.screens.vod.loadVodDialogSelection
 import com.streamvault.app.ui.screens.vod.loadVodReorderItems
 import com.streamvault.app.ui.screens.vod.markVodFavorites
 import com.streamvault.app.ui.screens.vod.matchesVodGroupMembership
@@ -59,6 +60,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -80,7 +82,8 @@ class SeriesViewModel @Inject constructor(
     private val favoriteRepository: FavoriteRepository,
     private val getContinueWatching: GetContinueWatching,
     private val getCustomCategories: GetCustomCategories,
-    private val parentalControlManager: ParentalControlManager
+    private val parentalControlManager: ParentalControlManager,
+    private val m3uClassificationRepository: M3uClassificationRepository
 ) : ViewModel() {
     private companion object {
         const val UNCATEGORIZED = "Uncategorized"
@@ -104,6 +107,8 @@ class SeriesViewModel @Inject constructor(
     private val _selectedLibrarySortBy = MutableStateFlow(LibrarySortBy.LIBRARY)
     private val _previewBatchSize = MutableStateFlow(INITIAL_PREVIEW_BATCH_SIZE)
     private var activeProviderId: Long? = null
+    private var remotePageRequestInFlight = false
+    private var initialRemoteRequestInFlight = false
 
     private data class PreviewLoadResult(
         val snapshot: SeriesCatalogSnapshot,
@@ -129,6 +134,7 @@ class SeriesViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         hasActiveProvider = provider != null,
+                        isM3uProvider = provider?.type == ProviderType.M3U,
                         isLoading = if (provider == null) false else it.isLoading,
                         isLoadingSelectedCategory = if (provider == null) false else it.isLoadingSelectedCategory,
                         isLoadingPreviewRows = if (provider == null) false else it.isLoadingPreviewRows
@@ -304,6 +310,31 @@ class SeriesViewModel @Inject constructor(
                 .filterNotNull()
                 .flatMapLatest { provider ->
                     combine(
+                        seriesRepository.getCategoryItemCounts(provider.id),
+                        seriesRepository.getLibraryCount(provider.id),
+                        seriesRepository.getCategories(provider.id)
+                    ) { counts, libraryCount, categories ->
+                        Triple(counts, libraryCount, categories)
+                    }
+                }
+                .collectLatest { (counts, libraryCount, categories) ->
+                    val countsByName = categories.associate { category ->
+                        category.name to (counts[category.id] ?: 0)
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            categoryCounts = state.categoryCounts + countsByName,
+                            libraryCount = libraryCount
+                        )
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            providerRepository.getActiveProvider()
+                .filterNotNull()
+                .flatMapLatest { provider ->
+                    combine(
                         favoriteRepository.getAllFavorites(provider.id, ContentType.SERIES),
                         getCustomCategories(provider.id, ContentType.SERIES),
                         seriesRepository.getCategories(provider.id),
@@ -372,7 +403,7 @@ class SeriesViewModel @Inject constructor(
                             selectedCategoryLoadedCount = snapshot.loadedCount,
                             selectedCategoryTotalCount = snapshot.totalCount,
                             canLoadMoreSelectedCategory = snapshot.canLoadMore,
-                            isLoadingSelectedCategory = false
+                            isLoadingSelectedCategory = initialRemoteRequestInFlight && snapshot.items.isEmpty()
                         )
                     }
                 }
@@ -449,32 +480,20 @@ class SeriesViewModel @Inject constructor(
                         emptyList()
                     } else {
                         seriesRepository.getSeriesByIds(favoriteIds).first().orderByIds(favoriteIds)
-                    }.let { series ->
-                        markVodFavorites(series, globalFavoriteIds, Series::id) { item, isFavorite ->
-                            item.copy(isFavorite = isFavorite)
-                        }
-                    }
+                    }.markSeriesFavorites(globalFavoriteIds)
                     val continuePreview = if (continueIds.isEmpty()) {
                         emptyList()
                     } else {
                         seriesRepository.getSeriesByIds(continueIds).first().orderByIds(continueIds)
-                    }.let { series ->
-                        markVodFavorites(series, globalFavoriteIds, Series::id) { item, isFavorite ->
-                            item.copy(isFavorite = isFavorite)
-                        }
-                    }
+                    }.markSeriesFavorites(globalFavoriteIds)
 
                     _uiState.update {
                         it.copy(
                             libraryLensRows = mapOf(
                                 SeriesLibraryLens.FAVORITES to favoritePreview,
                                 SeriesLibraryLens.CONTINUE to continuePreview,
-                                SeriesLibraryLens.TOP_RATED to markVodFavorites(dependencies.topRated, globalFavoriteIds, Series::id) { item, isFavorite ->
-                                    item.copy(isFavorite = isFavorite)
-                                },
-                                SeriesLibraryLens.FRESH to markVodFavorites(dependencies.fresh, globalFavoriteIds, Series::id) { item, isFavorite ->
-                                    item.copy(isFavorite = isFavorite)
-                                }
+                                SeriesLibraryLens.TOP_RATED to dependencies.topRated.markSeriesFavorites(globalFavoriteIds),
+                                SeriesLibraryLens.FRESH to dependencies.fresh.markSeriesFavorites(globalFavoriteIds)
                             ).filterValues { rows -> rows.isNotEmpty() }
                         )
                     }
@@ -534,6 +553,45 @@ class SeriesViewModel @Inject constructor(
                 isLoadingSelectedCategory = isLoadingSelectedCategory
             )
         }
+        val providerId = activeProviderId ?: return
+        val categoryId = resolveProviderCategoryId(categoryName) ?: return
+        initialRemoteRequestInFlight = true
+        _uiState.update { it.copy(isLoadingSelectedCategory = true) }
+        viewModelScope.launch {
+            try {
+                seriesRepository.requestCategoryHydration(
+                    providerId,
+                    categoryId,
+                    VodCategoryHydrationRequest.OPEN
+                )
+            } finally {
+                initialRemoteRequestInFlight = false
+                _uiState.update { it.copy(isLoadingSelectedCategory = false) }
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                providerRepository.getActiveProvider(),
+                _uiState.map { state ->
+                    state.providerCategories.firstOrNull { it.name == state.selectedCategory }?.id
+                }.distinctUntilChanged()
+            ) { provider, categoryId -> provider?.id to categoryId }
+                .flatMapLatest { (providerId, categoryId) ->
+                    if (providerId == null || categoryId == null) flowOf(null)
+                    else seriesRepository.observeCategoryHydration(providerId, categoryId)
+                }
+                .collectLatest { hydration ->
+                    hydration ?: return@collectLatest
+                    _uiState.update {
+                        it.copy(
+                            isLoadingSelectedCategory = hydration.isInitialLoading || initialRemoteRequestInFlight,
+                            isLoadingMoreSelectedCategory = hydration.isAppending || remotePageRequestInFlight,
+                            selectedCategoryRawPageSize = hydration.pageSize
+                        )
+                    }
+                }
+        }
     }
 
     fun selectFullLibraryBrowse() {
@@ -541,10 +599,30 @@ class SeriesViewModel @Inject constructor(
     }
 
     fun loadMoreSelectedCategory() {
+        val needsRemotePage = _uiState.value.selectedCategoryLoadedCount >=
+            _uiState.value.selectedCategoryTotalCount
         incrementVodSelectedCategoryLoadLimit(
             canLoadMore = _uiState.value.canLoadMoreSelectedCategory,
             selectedCategoryLoadLimit = _selectedCategoryLoadLimit
         )
+        if (!needsRemotePage) return
+        val providerId = activeProviderId ?: return
+        val categoryId = resolveProviderCategoryId(_uiState.value.selectedCategory) ?: return
+        if (remotePageRequestInFlight) return
+        remotePageRequestInFlight = true
+        _uiState.update { it.copy(isLoadingMoreSelectedCategory = true) }
+        viewModelScope.launch {
+            try {
+                seriesRepository.requestCategoryHydration(
+                    providerId,
+                    categoryId,
+                    VodCategoryHydrationRequest.NEXT_PAGE
+                )
+            } finally {
+                remotePageRequestInFlight = false
+                _uiState.update { it.copy(isLoadingMoreSelectedCategory = false) }
+            }
+        }
     }
 
     fun loadMorePreviewRows() {
@@ -635,21 +713,19 @@ class SeriesViewModel @Inject constructor(
 
     fun onShowDialog(series: Series) {
         viewModelScope.launch {
-            val dialogSelection = loadVodDialogSelection(
-                item = series,
-                providerId = series.providerId,
-                itemId = series.id,
-                contentType = ContentType.SERIES,
-                favoriteRepository = favoriteRepository,
-                copyWithFavorite = { currentSeries, isFavorite ->
-                    currentSeries.copy(isFavorite = isFavorite)
-                }
-            )
+            val rawSeriesIds = series.rawSeriesIdsForActions()
+            val memberships = rawSeriesIds
+                .flatMap { rawSeriesId -> favoriteRepository.getGroupMemberships(series.providerId, rawSeriesId, ContentType.SERIES) }
+                .map { groupId -> -kotlin.math.abs(groupId) }
+                .distinct()
+            val isFavorite = rawSeriesIds.any { rawSeriesId ->
+                favoriteRepository.isFavorite(series.providerId, rawSeriesId, ContentType.SERIES)
+            }
             _uiState.update {
                 it.copy(
                     showDialog = true,
-                    selectedSeriesForDialog = dialogSelection.selectedItem,
-                    dialogGroupMemberships = dialogSelection.groupMemberships
+                    selectedSeriesForDialog = series.copy(isFavorite = isFavorite),
+                    dialogGroupMemberships = memberships
                 )
             }
         }
@@ -659,16 +735,33 @@ class SeriesViewModel @Inject constructor(
         _uiState.update { it.copy(showDialog = false, selectedSeriesForDialog = null) }
     }
 
+    fun moveM3uSeriesBackToLive(series: Series) {
+        viewModelScope.launch {
+            val provider = providerRepository.getActiveProvider().first() ?: return@launch
+            if (provider.type != ProviderType.M3U) return@launch
+            when (val result = m3uClassificationRepository.moveSeriesBackToLive(provider.id, series.id)) {
+                is Result.Success -> {
+                    onDismissDialog()
+                    _uiState.update { it.copy(userMessage = "Moved '${series.name}' back to Live TV") }
+                }
+                is Result.Error -> _uiState.update { it.copy(userMessage = result.message) }
+                Result.Loading -> Unit
+            }
+        }
+    }
+
     fun addFavorite(series: Series) {
         viewModelScope.launch {
-            setVodFavorite(series.providerId, series.id, ContentType.SERIES, true, favoriteRepository)
+            setVodFavorite(series.providerId, series.selectedRawSeriesId(), ContentType.SERIES, true, favoriteRepository)
             _uiState.update { it.copy(selectedSeriesForDialog = series.copy(isFavorite = true)) }
         }
     }
 
     fun removeFavorite(series: Series) {
         viewModelScope.launch {
-            setVodFavorite(series.providerId, series.id, ContentType.SERIES, false, favoriteRepository)
+            series.rawSeriesIdsForActions().forEach { rawSeriesId ->
+                setVodFavorite(series.providerId, rawSeriesId, ContentType.SERIES, false, favoriteRepository)
+            }
             _uiState.update { it.copy(selectedSeriesForDialog = series.copy(isFavorite = false)) }
         }
     }
@@ -677,7 +770,7 @@ class SeriesViewModel @Inject constructor(
         viewModelScope.launch {
             val memberships = updateVodGroupMembership(
                 providerId = series.providerId,
-                itemId = series.id,
+                itemId = series.selectedRawSeriesId(),
                 groupId = group.id,
                 contentType = ContentType.SERIES,
                 shouldBeMember = true,
@@ -689,14 +782,20 @@ class SeriesViewModel @Inject constructor(
 
     fun removeFromGroup(series: Series, group: Category) {
         viewModelScope.launch {
-            val memberships = updateVodGroupMembership(
-                providerId = series.providerId,
-                itemId = series.id,
-                groupId = group.id,
-                contentType = ContentType.SERIES,
-                shouldBeMember = false,
-                favoriteRepository = favoriteRepository
-            )
+            series.rawSeriesIdsForActions().forEach { rawSeriesId ->
+                updateVodGroupMembership(
+                    providerId = series.providerId,
+                    itemId = rawSeriesId,
+                    groupId = group.id,
+                    contentType = ContentType.SERIES,
+                    shouldBeMember = false,
+                    favoriteRepository = favoriteRepository
+                )
+            }
+            val memberships = series.rawSeriesIdsForActions()
+                .flatMap { rawSeriesId -> favoriteRepository.getGroupMemberships(series.providerId, rawSeriesId, ContentType.SERIES) }
+                .map { groupId -> -kotlin.math.abs(groupId) }
+                .distinct()
             _uiState.update { it.copy(dialogGroupMemberships = memberships) }
         }
     }
@@ -717,7 +816,7 @@ class SeriesViewModel @Inject constructor(
                     val memberships = if (selectedSeries != null) {
                         updateVodGroupMembership(
                             providerId = selectedSeries.providerId,
-                            itemId = selectedSeries.id,
+                            itemId = selectedSeries.selectedRawSeriesId(),
                             groupId = result.data.id,
                             contentType = ContentType.SERIES,
                             shouldBeMember = true,
@@ -878,6 +977,15 @@ class SeriesViewModel @Inject constructor(
     fun enterCategoryReorderMode(category: Category) {
         dismissCategoryOptions()
         viewModelScope.launch {
+            if (_uiState.value.providerCategories.any { it.id == category.id }) {
+                activeProviderId?.let { providerId ->
+                    seriesRepository.requestCategoryHydration(
+                        providerId,
+                        category.id,
+                        VodCategoryHydrationRequest.COMPLETE
+                    )
+                }
+            }
             val seriesInView = loadReorderSeries(category)
             _uiState.update {
                 it.copy(
@@ -959,7 +1067,7 @@ class SeriesViewModel @Inject constructor(
             hiddenProviderCategoryIds = params.hiddenCategoryIds,
             loadItemsByIds = { ids -> seriesRepository.getSeriesByIds(ids).first() },
             providerPreviews = providerPreviews,
-            itemId = Series::id,
+            itemIds = { series -> series.rawSeriesIdsForActions() },
             itemCategoryId = Series::categoryId,
             copyWithFavorite = { series, isFavorite -> series.copy(isFavorite = isFavorite) }
         )
@@ -985,7 +1093,7 @@ class SeriesViewModel @Inject constructor(
             customCategories = customCategories,
             providerCategories = providerCategories,
             hiddenProviderCategoryIds = hiddenCategoryIds,
-            itemId = Series::id,
+            itemIds = { series -> series.rawSeriesIdsForActions() },
             itemCategoryId = Series::categoryId,
             itemCategoryName = Series::categoryName,
             copyWithFavorite = { series, isFavorite -> series.copy(isFavorite = isFavorite) },
@@ -1133,9 +1241,7 @@ class SeriesViewModel @Inject constructor(
             }
         }
 
-        val enrichedItems = markVodFavorites(selectedItems, globalFavoriteIds, Series::id) { item, isFavorite ->
-            item.copy(isFavorite = isFavorite)
-        }
+        val enrichedItems = selectedItems.markSeriesFavorites(globalFavoriteIds)
         return SelectedSeriesCategorySnapshot(
             items = enrichedItems,
             loadedCount = enrichedItems.size,
@@ -1158,6 +1264,15 @@ class SeriesViewModel @Inject constructor(
         val seriesMap = associateBy { it.id }
         return ids.mapNotNull { seriesMap[it] }
     }
+
+    private fun List<Series>.markSeriesFavorites(globalFavoriteIds: Set<Long>): List<Series> = map { series ->
+        series.copy(isFavorite = series.rawSeriesIdsForActions().any { rawSeriesId -> rawSeriesId in globalFavoriteIds })
+    }
+
+    private fun Series.selectedRawSeriesId(): Long = selectedVariantId ?: id
+
+    private fun Series.rawSeriesIdsForActions(): List<Long> =
+        variants.map { it.rawSeriesId }.ifEmpty { listOf(selectedRawSeriesId()) }
 
     private fun applyLocalBrowseToSeries(
         items: List<Series>,
@@ -1303,6 +1418,8 @@ data class SeriesUiState(
     val selectedCategoryTotalCount: Int = 0,
     val canLoadMoreSelectedCategory: Boolean = false,
     val isLoadingSelectedCategory: Boolean = false,
+    val isLoadingMoreSelectedCategory: Boolean = false,
+    val selectedCategoryRawPageSize: Int = 0,
     val searchQuery: String = "",
     val selectedLibraryFilterType: LibraryFilterType = LibraryFilterType.ALL,
     val selectedLibrarySortBy: LibrarySortBy = LibrarySortBy.LIBRARY,
@@ -1311,6 +1428,7 @@ data class SeriesUiState(
     val continueWatching: List<PlaybackHistory> = emptyList(),
     val hasProviders: Boolean = false,
     val hasActiveProvider: Boolean = false,
+    val isM3uProvider: Boolean = false,
     val isLoading: Boolean = true,
     val isLoadingPreviewRows: Boolean = false,
     val hasMorePreviewRows: Boolean = false,

@@ -6,8 +6,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.streamvault.app.R
-import com.streamvault.app.update.AppUpdateDownloadStatus
+import com.streamvault.app.update.AppUpdateActionState
 import com.streamvault.app.update.AppUpdateInstaller
+import com.streamvault.app.update.AppUpdateCheckPolicy
 import com.streamvault.app.update.GitHubReleaseChecker
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.domain.model.Result
@@ -21,31 +22,31 @@ internal class SettingsAppUpdateActions(
 ) {
     private var updateCheckInFlight = false
 
-    fun shouldAutoCheckForUpdates(lastCheckedAt: Long?): Boolean {
-        val now = System.currentTimeMillis()
-        val checkIntervalMs = 24L * 60L * 60L * 1000L
-        return lastCheckedAt == null || now - lastCheckedAt >= checkIntervalMs
-    }
+    fun shouldAutoCheckForUpdates(lastSuccessfulCheckAt: Long?, lastFailedCheckAt: Long?): Boolean =
+        AppUpdateCheckPolicy.shouldAutoCheck(System.currentTimeMillis(), lastSuccessfulCheckAt, lastFailedCheckAt)
 
     fun checkForAppUpdates(
         scope: CoroutineScope,
         manual: Boolean,
-        isRemoteVersionNewer: (Int?, String) -> Boolean,
+        isRemoteVersionNewer: (Int?, String, String?) -> Boolean,
         autoDownload: Boolean = false
     ) {
         if (updateCheckInFlight) return
         updateCheckInFlight = true
         scope.launch {
             val checkedAt = System.currentTimeMillis()
+            preferencesRepository.setLastAppUpdateAttemptTimestamp(checkedAt)
+            preferencesRepository.setLastAppUpdateOutcome("ATTEMPTED")
             uiState.update {
                 it.copy(
                     isCheckingForUpdates = true,
                     appUpdate = it.appUpdate.copy(errorMessage = null)
                 )
             }
-            preferencesRepository.setLastAppUpdateCheckTimestamp(checkedAt)
             when (val result = gitHubReleaseChecker.fetchLatestRelease()) {
                 is Result.Error -> {
+                    preferencesRepository.setLastAppUpdateFailureTimestamp(checkedAt)
+                    preferencesRepository.setLastAppUpdateOutcome("FAILURE: ${result.message}")
                     uiState.update {
                         it.copy(
                             isCheckingForUpdates = false,
@@ -64,12 +65,29 @@ internal class SettingsAppUpdateActions(
                         versionCode = release.versionCode,
                         releaseUrl = release.releaseUrl,
                         downloadUrl = release.downloadUrl,
+                        downloadSha256 = release.downloadSha256,
                         releaseNotes = release.releaseNotes,
                         publishedAt = release.publishedAt
                     )
+                    preferencesRepository.setLastAppUpdateCheckTimestamp(checkedAt)
+                    preferencesRepository.setLastAppUpdateFailureTimestamp(null)
+                    preferencesRepository.setLastAppUpdateOutcome("SUCCESS")
                     val updateAvailable = isRemoteVersionNewer(
                         release.versionCode,
-                        release.versionName
+                        release.versionName,
+                        release.publishedAt
+                    )
+                    var latestUpdateModel = AppUpdateUiModel(
+                        latestVersionName = release.versionName,
+                        latestVersionCode = release.versionCode,
+                        releaseUrl = release.releaseUrl,
+                        downloadUrl = release.downloadUrl,
+                        downloadSha256 = release.downloadSha256,
+                        releaseNotes = release.releaseNotes,
+                        publishedAt = release.publishedAt,
+                        isUpdateAvailable = updateAvailable,
+                        lastCheckedAt = checkedAt,
+                        errorMessage = null
                     )
                     uiState.update {
                         it.copy(
@@ -83,27 +101,17 @@ internal class SettingsAppUpdateActions(
                             } else {
                                 it.userMessage
                             },
-                            appUpdate = AppUpdateUiModel(
-                                latestVersionName = release.versionName,
-                                latestVersionCode = release.versionCode,
-                                releaseUrl = release.releaseUrl,
-                                downloadUrl = release.downloadUrl,
-                                releaseNotes = release.releaseNotes,
-                                publishedAt = release.publishedAt,
-                                isUpdateAvailable = updateAvailable,
-                                lastCheckedAt = checkedAt,
-                                errorMessage = null
-                            ).withDownloadState(it.appUpdate.toDownloadState())
+                            appUpdate = latestUpdateModel.withDownloadState(it.appUpdate.toDownloadState())
                         )
                     }
-                    appUpdateInstaller.refreshState()
-                    if (autoDownload && updateAvailable) {
-                        val currentDownloadStatus = appUpdateInstaller.downloadState.value.status
-                        if (currentDownloadStatus != AppUpdateDownloadStatus.Downloading &&
-                            currentDownloadStatus != AppUpdateDownloadStatus.Downloaded
-                        ) {
-                            downloadLatestUpdate(scope)
-                        }
+                    val refreshedDownloadState = appUpdateInstaller.refreshState()
+                    latestUpdateModel = latestUpdateModel.withDownloadState(refreshedDownloadState)
+                    uiState.update { it.copy(appUpdate = latestUpdateModel) }
+                    if (autoDownload &&
+                        updateAvailable &&
+                        latestUpdateModel.latestActionState() == AppUpdateActionState.DownloadLatest
+                    ) {
+                        downloadLatestUpdate(scope)
                     }
                 }
                 Result.Loading -> {
@@ -135,7 +143,7 @@ internal class SettingsAppUpdateActions(
 
     fun installDownloadedUpdate(scope: CoroutineScope) {
         scope.launch {
-            when (val result = appUpdateInstaller.installDownloadedUpdate()) {
+            when (val result = appUpdateInstaller.installDownloadedUpdate(uiState.value.appUpdate.downloadSha256)) {
                 is Result.Error -> uiState.update { it.copy(userMessage = result.message) }
                 is Result.Success -> uiState.update {
                     it.copy(userMessage = appContext.getString(R.string.settings_update_install_started))

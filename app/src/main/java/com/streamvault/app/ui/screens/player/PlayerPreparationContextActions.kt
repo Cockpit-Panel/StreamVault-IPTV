@@ -1,8 +1,9 @@
 package com.streamvault.app.ui.screens.player
 
 import androidx.lifecycle.viewModelScope
-import com.streamvault.data.security.CredentialDecryptionException
 import com.streamvault.domain.model.ContentType
+import com.streamvault.domain.model.Result
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
@@ -18,7 +19,8 @@ internal fun PlayerViewModel.finalizePreparedPlaybackContext(
     hasArchiveRequest: Boolean,
     archiveStartMs: Long?,
     archiveEndMs: Long?,
-    archiveTitle: String?
+    archiveTitle: String?,
+    contentSwitchFlush: Job?
 ) {
     if (shouldReloadPlaylist) {
         currentCategoryId = categoryId
@@ -36,22 +38,26 @@ internal fun PlayerViewModel.finalizePreparedPlaybackContext(
 
     if (currentContentType == ContentType.LIVE && hasArchiveRequest) {
         playerEngine.stopLiveTimeshift()
-        viewModelScope.launch {
-            val catchUpUrls = try {
-                providerRepository.buildCatchUpUrls(
+        playbackSessionScope(requestVersion)?.launch {
+            contentSwitchFlush?.join()
+            if (!isActivePlaybackSession(requestVersion, streamUrl)) return@launch
+            val catchUpUrls = when (val catchUpResult = playerProviderCoordinator.buildCatchUpUrls(
                     providerId = currentProviderId,
                     streamId = currentContentId,
                     start = (archiveStartMs ?: 0L) / 1000L,
                     end = (archiveEndMs ?: 0L) / 1000L
-                )
-            } catch (e: CredentialDecryptionException) {
-                if (!isActivePlaybackSession(requestVersion, streamUrl)) return@launch
-                setLastFailureReason(e.message ?: CredentialDecryptionException.MESSAGE)
-                showPlayerNotice(
-                    message = e.message ?: CredentialDecryptionException.MESSAGE,
-                    recoveryType = PlayerRecoveryType.SOURCE
-                )
-                return@launch
+                )) {
+                is Result.Success -> catchUpResult.data
+                is Result.Error -> {
+                    if (!isActivePlaybackSession(requestVersion, streamUrl)) return@launch
+                    setLastFailureReason(catchUpResult.message)
+                    showPlayerNotice(
+                        message = catchUpResult.message,
+                        recoveryType = PlayerRecoveryType.SOURCE
+                    )
+                    return@launch
+                }
+                is Result.Loading -> return@launch
             }
             if (!isActivePlaybackSession(requestVersion, streamUrl)) return@launch
             if (catchUpUrls.isNotEmpty()) {
@@ -89,8 +95,8 @@ internal fun PlayerViewModel.finalizePreparedPlaybackContext(
     aspectRatioJob?.cancel()
     _aspectRatio.value = AspectRatio.FIT
     if (shouldResolveChannelPlaybackContext(currentContentType.name, internalChannelId)) {
-        aspectRatioJob = viewModelScope.launch {
-            preferencesRepository.getAspectRatioForChannel(internalChannelId).collect { savedRatio ->
+        aspectRatioJob = playbackSessionScope(requestVersion)?.launch {
+            playerPreferencesCoordinator.getAspectRatioForChannel(internalChannelId).collect { savedRatio ->
                 _aspectRatio.value = try {
                     savedRatio?.let { AspectRatio.valueOf(it) } ?: AspectRatio.FIT
                 } catch (_: Exception) {
@@ -99,8 +105,8 @@ internal fun PlayerViewModel.finalizePreparedPlaybackContext(
             }
         }
 
-        viewModelScope.launch {
-            val channel = channelRepository.getChannel(internalChannelId)
+        playbackSessionScope(requestVersion)?.launch {
+            val channel = playerChannelCoordinator.getChannel(internalChannelId)
             if (!isActivePlaybackSession(requestVersion, streamUrl)) return@launch
             currentChannelFlow.value = channel
             refreshCurrentChannelRecording()

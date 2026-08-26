@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.View
 import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.DecoderMode
+import com.streamvault.domain.model.PlaybackBufferMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 import com.streamvault.domain.model.PlayerSurfaceMode
 import com.streamvault.domain.model.DrmScheme
@@ -71,7 +72,8 @@ interface PlayerEngine {
     fun seekTo(positionMs: Long)
     fun seekForward(ms: Long = 10_000)
     fun seekBackward(ms: Long = 10_000)
-    fun setDecoderMode(mode: DecoderMode)
+    fun setDecoderModes(audioMode: DecoderMode, videoMode: DecoderMode)
+    fun setPlaybackBufferMode(mode: PlaybackBufferMode)
     fun setSurfaceMode(mode: PlayerSurfaceMode)
     fun setVodHttpProtocolMode(mode: VodHttpProtocolMode)
     fun setMediaSessionEnabled(enabled: Boolean)

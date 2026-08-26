@@ -29,7 +29,7 @@ import com.streamvault.app.ui.theme.OnSurfaceDim
 import com.streamvault.app.ui.theme.Primary
 import com.streamvault.app.ui.theme.Secondary
 import com.streamvault.app.ui.theme.SurfaceElevated
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderStatus
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.focus.FocusRequester
@@ -168,10 +168,19 @@ internal fun ProviderCatalogCountUiModel.shouldShowCatalogStatusTag(): Boolean =
     status != ProviderCatalogCountStatus.PENDING && status != ProviderCatalogCountStatus.READY
 
 @Composable
-internal fun ProviderStatusBadge(status: ProviderStatus) {
+internal fun ProviderStatusBadge(
+    status: ProviderStatus,
+    requiresAttention: Boolean = false
+) {
     val (label, color) = when (status) {
         ProviderStatus.ACTIVE -> stringResource(R.string.settings_status_active) to Primary
-        ProviderStatus.PARTIAL -> stringResource(R.string.settings_status_partial) to Secondary
+        ProviderStatus.PARTIAL -> stringResource(
+            if (requiresAttention) {
+                R.string.settings_status_requires_attention
+            } else {
+                R.string.settings_status_partial
+            }
+        ) to Secondary
         ProviderStatus.ERROR -> stringResource(R.string.settings_status_error) to ErrorColor
         ProviderStatus.EXPIRED -> stringResource(R.string.settings_status_expired) to ErrorColor
         ProviderStatus.DISABLED -> stringResource(R.string.settings_status_disabled) to OnSurfaceDim

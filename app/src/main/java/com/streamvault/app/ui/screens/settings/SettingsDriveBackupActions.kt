@@ -119,7 +119,14 @@ internal class SettingsDriveBackupActions(
 
     fun signOut(scope: CoroutineScope) {
         scope.launch {
-            uiState.update { it.copy(driveIsBusy = true) }
+            uiState.update {
+                it.copy(
+                    driveIsBusy = true,
+                    driveBackupOptions = emptyList(),
+                    driveBackupManagementOptions = emptyList(),
+                    pendingDriveCredentials = null,
+                )
+            }
             val result = driveManager.signOut()
             uiState.update { state ->
                 when (result) {
@@ -128,13 +135,24 @@ internal class SettingsDriveBackupActions(
                         driveSyncStatus = DriveSyncStatus(),
                         driveLastPushAt = null,
                         driveLastPullAt = null,
+                        driveBackupOptions = emptyList(),
+                        driveBackupManagementOptions = emptyList(),
+                        pendingDriveCredentials = null,
                         userMessage = "Signed out of Google Drive"
                     )
                     is Result.Error -> state.copy(
                         driveIsBusy = false,
+                        driveBackupOptions = emptyList(),
+                        driveBackupManagementOptions = emptyList(),
+                        pendingDriveCredentials = null,
                         userMessage = "Drive sign-out failed: ${result.message}"
                     )
-                    is Result.Loading -> state.copy(driveIsBusy = false)
+                    is Result.Loading -> state.copy(
+                        driveIsBusy = false,
+                        driveBackupOptions = emptyList(),
+                        driveBackupManagementOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                    )
                 }
             }
         }
@@ -146,8 +164,34 @@ internal class SettingsDriveBackupActions(
                 uiState.update { it.copy(userMessage = "Sign in to Google Drive first") }
                 return@launch
             }
-            uiState.update { it.copy(driveIsBusy = true) }
-            val backupResult = driveManager.pushBackup()
+            var started = false
+            uiState.update {
+                if (it.driveIsBusy) {
+                    it
+                } else {
+                    started = true
+                    it.copy(
+                        driveIsBusy = true,
+                        driveBackupManagementOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                    )
+                }
+            }
+            if (!started) return@launch
+            // Read credentials before starting the export so the Drive manager
+            // can commit one matching backup+credentials bundle atomically.
+            val credentials = runCatching {
+                providerRepository.getAllProviderCredentials()
+            }.getOrElse { error ->
+                uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        userMessage = "Drive push failed: ${error.message ?: "credentials unavailable"}"
+                    )
+                }
+                return@launch
+            }
+            val backupResult = driveManager.pushBackup(credentials)
             if (backupResult is Result.Error) {
                 uiState.update {
                     it.copy(
@@ -157,23 +201,11 @@ internal class SettingsDriveBackupActions(
                 }
                 return@launch
             }
-            // Chain credentials push (M3). The repository handles decryption
-            // internally so the cleartext never crosses the data layer except
-            // via the typed ProviderCredentials payload returned here.
-            val credentials = providerRepository.getAllProviderCredentials()
-            val credsResult = driveManager.pushCredentials(credentials)
-            uiState.update { state ->
-                when (credsResult) {
-                    is Result.Success -> state.copy(
-                        driveIsBusy = false,
-                        userMessage = "Backup uploaded to Google Drive"
-                    )
-                    is Result.Error -> state.copy(
-                        driveIsBusy = false,
-                        userMessage = "Backup uploaded but credentials failed: ${credsResult.message}"
-                    )
-                    is Result.Loading -> state.copy(driveIsBusy = false)
-                }
+            uiState.update {
+                it.copy(
+                    driveIsBusy = false,
+                    userMessage = "Backup uploaded to Google Drive"
+                )
             }
         }
     }
@@ -184,30 +216,197 @@ internal class SettingsDriveBackupActions(
                 uiState.update { it.copy(userMessage = "Sign in to Google Drive first") }
                 return@launch
             }
-            uiState.update { it.copy(driveIsBusy = true) }
-            val pullResult = driveManager.pullBackup()
-            if (pullResult is Result.Error) {
+            var started = false
+            uiState.update {
+                if (it.driveIsBusy) {
+                    it
+                } else {
+                    started = true
+                    it.copy(
+                        driveIsBusy = true,
+                        driveBackupOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                    )
+                }
+            }
+            if (!started) return@launch
+            val listResult = driveManager.listBackups()
+            if (listResult !is Result.Success) {
                 uiState.update {
                     it.copy(
                         driveIsBusy = false,
-                        userMessage = "Drive pull failed: ${pullResult.message}"
+                        driveBackupOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                        userMessage = "Drive pull failed: ${resultMessage(listResult)}"
                     )
                 }
                 return@launch
             }
-            val artifact = (pullResult as Result.Success).data
-            // Best-effort companion fetch (M3). Failures here are non-fatal —
-            // the user can still complete the import without credentials.
-            val credentialsResult = driveManager.pullCredentials()
-            val pendingCredentials = (credentialsResult as? Result.Success)?.data
-            if (credentialsResult is Result.Error) {
-                Log.w("DriveSync", "pullCredentials failed (non-fatal): ${credentialsResult.message}")
+            val snapshots = listResult.data
+            if (snapshots.isEmpty()) {
+                uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        driveBackupOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                        userMessage = "Drive pull failed: no backups found"
+                    )
+                }
+                return@launch
+            }
+            if (snapshots.size > 1) {
+                uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        driveBackupOptions = snapshots,
+                        pendingDriveCredentials = null,
+                    )
+                }
+                return@launch
+            }
+            pullSelectedBackup(snapshots.single().id)
+        }
+    }
+
+    fun selectBackup(scope: CoroutineScope, snapshotId: String) {
+        scope.launch {
+            var started = false
+            uiState.update {
+                if (it.driveIsBusy) {
+                    it
+                } else {
+                    started = true
+                    it.copy(
+                        driveIsBusy = true,
+                        driveBackupOptions = emptyList(),
+                        pendingDriveCredentials = null,
+                    )
+                }
+            }
+            if (!started) return@launch
+            pullSelectedBackup(snapshotId)
+        }
+    }
+
+    fun dismissBackupOptions() {
+        uiState.update { it.copy(driveBackupOptions = emptyList()) }
+    }
+
+    fun manageBackups(scope: CoroutineScope) {
+        scope.launch {
+            if (uiState.value.driveAuthState !is DriveAuthState.SignedIn) {
+                uiState.update { it.copy(userMessage = "Sign in to Google Drive first") }
+                return@launch
+            }
+            var started = false
+            uiState.update {
+                if (it.driveIsBusy) {
+                    it
+                } else {
+                    started = true
+                    it.copy(driveIsBusy = true, driveBackupManagementOptions = emptyList())
+                }
+            }
+            if (!started) return@launch
+            when (val result = driveManager.listBackups()) {
+                is Result.Success -> uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        driveBackupManagementOptions = result.data,
+                        userMessage = if (result.data.isEmpty()) "No Google Drive backups found" else null,
+                    )
+                }
+                is Result.Error -> uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        driveBackupManagementOptions = emptyList(),
+                        userMessage = "Drive backup management failed: ${result.message}",
+                    )
+                }
+                is Result.Loading -> uiState.update { it.copy(driveIsBusy = false) }
+            }
+        }
+    }
+
+    fun dismissBackupManagement() {
+        uiState.update { it.copy(driveBackupManagementOptions = emptyList()) }
+    }
+
+    fun deleteBackup(scope: CoroutineScope, snapshotId: String) {
+        scope.launch {
+            var started = false
+            uiState.update {
+                if (it.driveIsBusy) {
+                    it
+                } else {
+                    started = true
+                    it.copy(driveIsBusy = true)
+                }
+            }
+            if (!started) return@launch
+            when (val result = driveManager.deleteBackup(snapshotId)) {
+                is Result.Success -> {
+                    val refreshed = driveManager.listBackups()
+                    uiState.update {
+                        when (refreshed) {
+                            is Result.Success -> it.copy(
+                                driveIsBusy = false,
+                                driveBackupManagementOptions = refreshed.data,
+                                userMessage = "Drive backup deleted",
+                            )
+                            is Result.Error -> it.copy(
+                                driveIsBusy = false,
+                                driveBackupManagementOptions = emptyList(),
+                                userMessage = "Drive backup deleted",
+                            )
+                            is Result.Loading -> it.copy(
+                                driveIsBusy = false,
+                                driveBackupManagementOptions = emptyList(),
+                                userMessage = "Drive backup deleted",
+                            )
+                        }
+                    }
+                }
+                is Result.Error -> uiState.update {
+                    it.copy(
+                        driveIsBusy = false,
+                        userMessage = "Drive backup deletion failed: ${result.message}",
+                    )
+                }
+                is Result.Loading -> uiState.update { it.copy(driveIsBusy = false) }
+            }
+        }
+    }
+
+    private suspend fun pullSelectedBackup(snapshotId: String) {
+        val pullResult = driveManager.pullBackup(snapshotId)
+        if (pullResult is Result.Error) {
+            uiState.update {
+                it.copy(
+                    driveIsBusy = false,
+                    driveBackupOptions = emptyList(),
+                    pendingDriveCredentials = null,
+                    userMessage = "Drive pull failed: ${pullResult.message}"
+                )
+            }
+            return
+        }
+        val artifact = (pullResult as Result.Success).data
+            // New bundles carry credentials with the exact backup snapshot.
+            // Legacy standalone backups still use the old companion file.
+            val pendingCredentials = artifact.credentials ?: run {
+                val credentialsResult = driveManager.pullCredentials()
+                if (credentialsResult is Result.Error) {
+                    Log.w("DriveSync", "pullCredentials failed (non-fatal): ${credentialsResult.message}")
+                }
+                (credentialsResult as? Result.Success)?.data
             }
             val inspectResult = importBackup.inspect(InspectBackupCommand(artifact.localUriString))
             uiState.update { state ->
                 when (inspectResult) {
                     is InspectBackupResult.Success -> state.copy(
                         driveIsBusy = false,
+                        driveBackupOptions = emptyList(),
                         pendingBackupUri = inspectResult.uriString,
                         backupPreview = inspectResult.preview,
                         backupImportPlan = inspectResult.defaultPlan,
@@ -215,11 +414,18 @@ internal class SettingsDriveBackupActions(
                     )
                     is InspectBackupResult.Error -> state.copy(
                         driveIsBusy = false,
+                        driveBackupOptions = emptyList(),
+                        pendingDriveCredentials = null,
                         userMessage = "Drive import failed: ${inspectResult.message}"
                     )
                 }
             }
-        }
+    }
+
+    private fun resultMessage(result: Result<*>): String = when (result) {
+        is Result.Error -> result.message
+        is Result.Loading -> "still loading"
+        is Result.Success -> "unknown error"
     }
 
     /**

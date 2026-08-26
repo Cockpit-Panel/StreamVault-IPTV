@@ -2,6 +2,8 @@ package com.streamvault.domain.manager
 
 import com.streamvault.domain.model.RecordingItem
 import com.streamvault.domain.model.RecordingRequest
+import com.streamvault.domain.model.RecordingReconciliationResult
+import com.streamvault.domain.model.RecordingReconciliationSummary
 import com.streamvault.domain.model.RecordingStorageConfig
 import com.streamvault.domain.model.RecordingStorageState
 import com.streamvault.domain.model.Result
@@ -18,6 +20,9 @@ interface RecordingManager {
     suspend fun startManualRecording(request: RecordingRequest): Result<RecordingItem>
     suspend fun scheduleRecording(request: RecordingRequest): Result<RecordingItem>
     suspend fun stopRecording(recordingId: String): Result<Unit>
+    /** Stops a recording because Android exhausted the foreground-service time allowance. */
+    suspend fun stopRecordingForForegroundServiceTimeout(recordingId: String): Result<Unit> =
+        stopRecording(recordingId)
     suspend fun cancelRecording(recordingId: String): Result<Unit>
     suspend fun deleteRecording(recordingId: String): Result<Unit>
     suspend fun retryRecording(recordingId: String): Result<Unit> = Result.error("Retry is not supported by this recording manager.")
@@ -25,7 +30,8 @@ interface RecordingManager {
         Result.error("Schedule enablement is not supported by this recording manager.")
     suspend fun updateStorageConfig(config: RecordingStorageConfig): Result<RecordingStorageState> =
         Result.error("Storage configuration is not supported by this recording manager.")
-    suspend fun reconcileRecordingState(): Result<Unit> = Result.success(Unit)
+    suspend fun reconcileRecordingState(): RecordingReconciliationResult =
+        RecordingReconciliationResult.Complete(RecordingReconciliationSummary())
     suspend fun promoteScheduledRecording(recordingId: String): Result<Unit> =
         Result.error("Scheduled promotion is not supported by this recording manager.")
     suspend fun skipOccurrence(recordingId: String): Result<Unit> =

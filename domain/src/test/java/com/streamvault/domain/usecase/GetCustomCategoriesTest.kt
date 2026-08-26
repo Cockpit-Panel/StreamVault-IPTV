@@ -1,10 +1,13 @@
 package com.streamvault.domain.usecase
 
 import com.google.common.truth.Truth.assertThat
+import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Favorite
+import com.streamvault.domain.model.LiveChannelVariant
 import com.streamvault.domain.model.VirtualCategoryIds
 import com.streamvault.domain.model.VirtualGroup
+import com.streamvault.domain.repository.ChannelRepository
 import com.streamvault.domain.repository.FavoriteRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -28,6 +31,14 @@ class GetCustomCategoriesTest {
                     VirtualGroup(id = 10L, providerId = 1L, name = "Sports", contentType = ContentType.LIVE),
                     VirtualGroup(id = 20L, providerId = 2L, name = "Kids", contentType = ContentType.LIVE)
                 )
+            ),
+            channelRepository = FakeChannelRepository(
+                channels = listOf(
+                    rawChannel(id = 101L, name = "One", logicalGroupId = "p1_one", providerId = 1L),
+                    rawChannel(id = 102L, name = "Two", logicalGroupId = "p1_two", providerId = 1L),
+                    rawChannel(id = 201L, name = "Three", logicalGroupId = "p2_three", providerId = 2L),
+                    rawChannel(id = 202L, name = "Four", logicalGroupId = "p2_four", providerId = 2L)
+                )
             )
         )
 
@@ -41,8 +52,39 @@ class GetCustomCategoriesTest {
     }
 
     @Test
+    fun liveCustomGroupCountsFollowGroupedChannelPresentation() = runTest {
+        val useCase = GetCustomCategories(
+            favoriteRepository = FakeFavoriteRepository(
+                favorites = listOf(
+                    Favorite(providerId = 1L, contentId = 101L, contentType = ContentType.LIVE, groupId = 10L),
+                    Favorite(providerId = 1L, contentId = 102L, contentType = ContentType.LIVE, groupId = 10L)
+                ),
+                groups = listOf(
+                    VirtualGroup(id = 10L, providerId = 1L, name = "Sports", contentType = ContentType.LIVE)
+                )
+            ),
+            channelRepository = FakeChannelRepository(
+                channels = listOf(
+                    groupedChannel(
+                        id = 101L,
+                        providerId = 1L,
+                        logicalGroupId = "p1_sports",
+                        rawIds = listOf(101L, 102L)
+                    )
+                )
+            )
+        )
+
+        val result = useCase(listOf(1L), ContentType.LIVE).first()
+
+        assertThat(result).hasSize(2)
+        assertThat(result[1].name).isEqualTo("Sports")
+        assertThat(result[1].count).isEqualTo(1)
+    }
+
+    @Test
     fun returnsEmptyListForNoProviders() = runTest {
-        val useCase = GetCustomCategories(FakeFavoriteRepository())
+        val useCase = GetCustomCategories(FakeFavoriteRepository(), FakeChannelRepository())
 
         val result = useCase(emptyList(), ContentType.LIVE).first()
 
@@ -59,13 +101,22 @@ class GetCustomCategoriesTest {
         override fun getFavorites(providerIds: List<Long>, contentType: ContentType?): Flow<List<Favorite>> =
             flowOf(
                 favorites.filter { favorite ->
-                    favorite.providerId in providerIds && (contentType == null || favorite.contentType == contentType)
+                    favorite.providerId in providerIds &&
+                        favorite.groupId == null &&
+                        (contentType == null || favorite.contentType == contentType)
+                }
+            )
+
+        override fun getAllFavorites(providerIds: List<Long>, contentType: ContentType): Flow<List<Favorite>> =
+            flowOf(
+                favorites.filter { favorite ->
+                    favorite.providerId in providerIds && favorite.contentType == contentType
                 }
             )
 
         @Deprecated("Use getFavorites(providerId, contentType) instead")
         override fun getAllFavorites(providerId: Long, contentType: ContentType): Flow<List<Favorite>> =
-            getFavorites(providerId, contentType)
+            getAllFavorites(listOf(providerId), contentType)
 
         override fun getFavoritesByGroup(groupId: Long): Flow<List<Favorite>> =
             flowOf(favorites.filter { it.groupId == groupId })
@@ -117,4 +168,65 @@ class GetCustomCategoriesTest {
 
         override suspend fun renameGroup(groupId: Long, newName: String) = error("Not used in test")
     }
+
+    private class FakeChannelRepository(
+        private val channels: List<Channel> = emptyList()
+    ) : ChannelRepository {
+        override fun getChannels(providerId: Long): Flow<List<Channel>> = error("Not used in test")
+        override fun getChannelCount(providerId: Long): Flow<Int> = error("Not used in test")
+        override fun getChannelsByCategory(providerId: Long, categoryId: Long): Flow<List<Channel>> = error("Not used in test")
+        override fun getChannelsByCategoryPage(providerId: Long, categoryId: Long, limit: Int): Flow<List<Channel>> = error("Not used in test")
+        override fun getChannelsByNumber(providerId: Long, categoryId: Long): Flow<List<Channel>> = error("Not used in test")
+        override fun getChannelsWithoutErrors(providerId: Long, categoryId: Long): Flow<List<Channel>> = error("Not used in test")
+        override fun getChannelsWithoutErrorsPage(providerId: Long, categoryId: Long, limit: Int): Flow<List<Channel>> = error("Not used in test")
+        override suspend fun getChannelsByCategoryPageOffset(providerId: Long, categoryId: Long, limit: Int, offset: Int): List<Channel> = error("Not used in test")
+        override suspend fun getChannelsWithoutErrorsPageOffset(providerId: Long, categoryId: Long, limit: Int, offset: Int): List<Channel> = error("Not used in test")
+        override fun searchChannelsByCategory(providerId: Long, categoryId: Long, query: String): Flow<List<Channel>> = error("Not used in test")
+        override fun searchChannelsByCategoryPaged(providerId: Long, categoryId: Long, query: String, limit: Int): Flow<List<Channel>> = error("Not used in test")
+        override fun getCategories(providerId: Long): Flow<List<com.streamvault.domain.model.Category>> = error("Not used in test")
+        override fun searchChannels(providerId: Long, query: String): Flow<List<Channel>> = error("Not used in test")
+        override suspend fun getChannel(channelId: Long): Channel? = error("Not used in test")
+        override suspend fun getStreamInfo(channel: Channel, preferStableUrl: Boolean) = error("Not used in test")
+        override suspend fun refreshChannels(providerId: Long) = error("Not used in test")
+        override fun getChannelsByIds(ids: List<Long>): Flow<List<Channel>> =
+            flowOf(channels.filter { channel -> channel.allVariantRawIds().any(ids::contains) })
+        override suspend fun incrementChannelErrorCount(channelId: Long) = error("Not used in test")
+        override suspend fun resetChannelErrorCount(channelId: Long) = error("Not used in test")
+    }
+
+    private fun rawChannel(id: Long, name: String, logicalGroupId: String, providerId: Long): Channel = Channel(
+        id = id,
+        name = name,
+        providerId = providerId,
+        logicalGroupId = logicalGroupId,
+        selectedVariantId = id,
+        variants = listOf(
+            LiveChannelVariant(
+                rawChannelId = id,
+                logicalGroupId = logicalGroupId,
+                providerId = providerId,
+                originalName = name,
+                canonicalName = name,
+                streamUrl = "https://example.com/$id"
+            )
+        )
+    )
+
+    private fun groupedChannel(id: Long, providerId: Long, logicalGroupId: String, rawIds: List<Long>): Channel = Channel(
+        id = id,
+        name = "Grouped",
+        providerId = providerId,
+        logicalGroupId = logicalGroupId,
+        selectedVariantId = id,
+        variants = rawIds.map { rawId ->
+            LiveChannelVariant(
+                rawChannelId = rawId,
+                logicalGroupId = logicalGroupId,
+                providerId = providerId,
+                originalName = "Grouped $rawId",
+                canonicalName = "Grouped",
+                streamUrl = "https://example.com/$rawId"
+            )
+        }
+    )
 }

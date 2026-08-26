@@ -3,9 +3,12 @@ package com.streamvault.data.validation
 import com.streamvault.data.util.ProviderInputSanitizer
 import com.streamvault.data.util.UrlSecurityPolicy
 import com.streamvault.domain.manager.ProviderSetupInputValidator
+import com.streamvault.domain.manager.ValidatedJellyfinProviderInput
+import com.streamvault.domain.manager.ValidatedJellyfinQuickConnectProviderInput
 import com.streamvault.domain.manager.ValidatedM3uProviderInput
 import com.streamvault.domain.manager.ValidatedStalkerProviderInput
 import com.streamvault.domain.manager.ValidatedXtreamProviderInput
+import com.streamvault.data.remote.stalker.StalkerAdvancedOptionsCodec
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.StalkerAuthMode
 import java.time.ZoneId
@@ -105,19 +108,24 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
         username: String,
         password: String,
         allowBlankPassword: Boolean,
+        httpUserAgent: String,
+        httpHeaders: String,
         deviceProfile: String,
         timezone: String,
         locale: String,
         serialNumber: String,
         deviceId: String,
         deviceId2: String,
-        signature: String
+        signature: String,
+        stalkerAdvancedOptionsJson: String
     ): Result<ValidatedStalkerProviderInput> {
         val normalizedPortalUrl = ProviderInputSanitizer.normalizeUrl(portalUrl)
         val normalizedMacAddress = ProviderInputSanitizer.normalizeMacAddress(macAddress)
         val normalizedName = ProviderInputSanitizer.normalizeProviderName(name)
         val normalizedUsername = ProviderInputSanitizer.normalizeUsername(username)
         val normalizedPassword = ProviderInputSanitizer.normalizePassword(password)
+        val normalizedHttpUserAgent = ProviderInputSanitizer.normalizeHttpUserAgent(httpUserAgent)
+        val normalizedHttpHeaders = ProviderInputSanitizer.normalizeHttpHeaders(httpHeaders)
         val normalizedDeviceProfile = ProviderInputSanitizer.normalizeDeviceProfile(deviceProfile)
         val normalizedTimezone = ProviderInputSanitizer.normalizeTimezone(timezone)
         val normalizedLocale = ProviderInputSanitizer.normalizeLocale(locale)
@@ -191,6 +199,15 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
             }
         }
 
+        validateHttpOverrides(
+            normalizedHttpUserAgent,
+            normalizedHttpHeaders,
+            allowBlankHeaderValues = true,
+            allowRestrictedHeaderOverrides = true
+        )?.let { message ->
+            return Result.error(message)
+        }
+
         // deviceProfile becomes the X-User-Agent model and part of the device signature. Blank
         // is fine (defaults to MAG250 internally); a non-blank value must be a safe ASCII token.
         if (normalizedDeviceProfile.isNotBlank() && !DEVICE_PROFILE_SAFE_REGEX.matches(normalizedDeviceProfile)) {
@@ -230,6 +247,9 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
         validateOptionalIdentityToken(normalizedSignature, "Signature")?.let { message ->
             return Result.error(message)
         }
+        validateStalkerAdvancedOptions(stalkerAdvancedOptionsJson)?.let { message ->
+            return Result.error(message)
+        }
 
         return Result.success(
             ValidatedStalkerProviderInput(
@@ -239,15 +259,42 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
                 authMode = authMode,
                 username = normalizedUsername,
                 password = normalizedPassword,
+                httpUserAgent = normalizedHttpUserAgent,
+                httpHeaders = normalizedHttpHeaders,
                 deviceProfile = normalizedDeviceProfile,
                 timezone = normalizedTimezone,
                 locale = normalizedLocale,
                 serialNumber = normalizedSerialNumber,
                 deviceId = normalizedDeviceId,
                 deviceId2 = normalizedDeviceId2,
-                signature = normalizedSignature
+                signature = normalizedSignature,
+                stalkerAdvancedOptionsJson = stalkerAdvancedOptionsJson.trim()
             )
         )
+    }
+
+    override fun validateJellyfin(
+        serverUrl: String,
+        username: String,
+        password: String,
+        name: String,
+        allowBlankPassword: Boolean
+    ): Result<ValidatedJellyfinProviderInput> {
+        val trimmedUrl = serverUrl.trim()
+        if (trimmedUrl.isBlank()) return Result.error("Server URL is required")
+        val url = if (trimmedUrl.contains("://")) trimmedUrl else "https://$trimmedUrl"
+        val trimmedName = name.trim().ifBlank { url.substringAfter("//").substringBefore("/").ifBlank { "Jellyfin" } }
+        val trimmedUser = username.trim()
+        if (!allowBlankPassword && password.isBlank()) return Result.error("Password is required")
+        return Result.success(ValidatedJellyfinProviderInput(serverUrl = url, username = trimmedUser, password = password.trim(), name = trimmedName))
+    }
+
+    override fun validateJellyfinQuickConnect(serverUrl: String, name: String): Result<ValidatedJellyfinQuickConnectProviderInput> {
+        val trimmedUrl = serverUrl.trim()
+        if (trimmedUrl.isBlank()) return Result.error("Server URL is required")
+        val url = if (trimmedUrl.contains("://")) trimmedUrl else "https://$trimmedUrl"
+        val trimmedName = name.trim().ifBlank { url.substringAfter("//").substringBefore("/").ifBlank { "Jellyfin" } }
+        return Result.success(ValidatedJellyfinQuickConnectProviderInput(serverUrl = url, name = trimmedName))
     }
 
     private companion object {
@@ -275,6 +322,61 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
         private val LOCALE_SAFE_REGEX = Regex("^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$")
         private val IDENTITY_TOKEN_SAFE_REGEX = Regex("^[A-Za-z0-9._-]+$")
         private val HEX_TOKEN_SAFE_REGEX = Regex("^[A-F0-9]+$")
+        private val ACTION_NAME_SAFE_REGEX = Regex("^[A-Za-z0-9_:-]+$")
+        private val PARAM_NAME_SAFE_REGEX = Regex("^[A-Za-z0-9_.:-]+$")
+    }
+
+    private fun validateStalkerAdvancedOptions(raw: String): String? {
+        if (raw.isBlank()) return null
+        val options = runCatching { StalkerAdvancedOptionsCodec.decodeStrict(raw) }
+            .getOrElse { return "Stalker advanced options could not be read." }
+        if (options.proxyEnabled) {
+            if (options.proxyHost.isBlank()) {
+                return "Proxy host is required when HTTP proxy is enabled."
+            }
+            if (options.proxyHost.any { it.isWhitespace() }) {
+                return "Proxy host must not contain spaces."
+            }
+            val port = options.proxyPort
+            if (port == null || port !in 1..65535) {
+                return "Proxy port must be between 1 and 65535."
+            }
+        }
+        validateHttpOverrides(
+            httpUserAgent = options.playerUserAgent.trim(),
+            httpHeaders = options.playerHeaders.trim(),
+            allowBlankHeaderValues = true,
+            allowRestrictedHeaderOverrides = true
+        )?.let { message ->
+            return "Player headers: $message"
+        }
+        val actions = mutableSetOf<String>()
+        options.requestRules.forEach { rule ->
+            val action = rule.action.trim()
+            if (action.isBlank()) {
+                return "Each request rule needs an action name."
+            }
+            if (!ACTION_NAME_SAFE_REGEX.matches(action)) {
+                return "Request rule action '$action' contains invalid characters."
+            }
+            if (!actions.add(action)) {
+                return "Request rule action '$action' is duplicated."
+            }
+            val params = mutableSetOf<String>()
+            rule.paramOverrides.forEach { override ->
+                val name = override.name.trim()
+                if (name.isBlank()) {
+                    return "Request rule '$action' contains a blank parameter name."
+                }
+                if (!PARAM_NAME_SAFE_REGEX.matches(name)) {
+                    return "Request rule parameter '$name' contains invalid characters."
+                }
+                if (!params.add(name)) {
+                    return "Request rule '$action' contains duplicate parameter '$name'."
+                }
+            }
+        }
+        return null
     }
 
     private fun validateOptionalIdentityToken(
@@ -290,7 +392,12 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
         return if (validShape) null else "$label contains unsupported characters."
     }
 
-    private fun validateHttpOverrides(httpUserAgent: String, httpHeaders: String): String? {
+    private fun validateHttpOverrides(
+        httpUserAgent: String,
+        httpHeaders: String,
+        allowBlankHeaderValues: Boolean = false,
+        allowRestrictedHeaderOverrides: Boolean = false
+    ): String? {
         if (httpUserAgent.any { it == '\r' || it == '\n' }) {
             return "User-Agent must stay on a single line."
         }
@@ -307,15 +414,15 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
         val seenNames = linkedSetOf<String>()
         entries.forEach { entry ->
             val separatorIndex = entry.indexOf(':')
-            if (separatorIndex <= 0 || separatorIndex == entry.lastIndex) {
+            if (separatorIndex <= 0 || (!allowBlankHeaderValues && separatorIndex == entry.lastIndex)) {
                 return "Custom headers must use 'Header-Name: value' format. Separate multiple headers with '|'."
             }
             val name = entry.substring(0, separatorIndex).trim()
             val value = entry.substring(separatorIndex + 1).trim()
-            if (name.isEmpty() || value.isEmpty()) {
+            if (name.isEmpty() || (!allowBlankHeaderValues && value.isEmpty())) {
                 return "Custom headers must include both a header name and a value."
             }
-            if (name.lowercase() in DISALLOWED_GENERIC_HEADER_NAMES) {
+            if (!allowRestrictedHeaderOverrides && name.lowercase() in DISALLOWED_GENERIC_HEADER_NAMES) {
                 return if (name.equals("User-Agent", ignoreCase = true)) {
                     "Set the User-Agent in the dedicated field instead of custom headers."
                 } else {
@@ -323,7 +430,7 @@ class ProviderSetupInputValidatorImpl @Inject constructor() : ProviderSetupInput
                 }
             }
             try {
-                Headers.Builder().add(name, value)
+                Headers.Builder().add(name, value.ifEmpty { "x" })
             } catch (_: IllegalArgumentException) {
                 return "Invalid custom header: $name"
             }

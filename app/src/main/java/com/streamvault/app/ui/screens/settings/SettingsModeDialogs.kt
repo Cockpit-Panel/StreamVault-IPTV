@@ -28,6 +28,8 @@ import com.streamvault.domain.model.LiveVariantPreferenceMode
 import com.streamvault.domain.model.RemoteColorButton
 import com.streamvault.domain.model.RemoteShortcutProfile
 import com.streamvault.domain.model.RemoteShortcutSelection
+import com.streamvault.domain.model.VodDuplicateHandlingMode
+import com.streamvault.domain.model.VodVariantPreferenceMode
 
 @Composable
 internal fun VodViewModeDialog(
@@ -196,6 +198,108 @@ internal fun GroupedChannelLabelModeDialog(
         content = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 GroupedChannelLabelMode.entries.forEach { mode ->
+                    TvClickableSurface(
+                        onClick = { onModeSelected(mode) },
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = if (mode == selectedMode) Primary.copy(alpha = 0.18f) else SurfaceElevated,
+                            focusedContainerColor = Primary.copy(alpha = 0.28f)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = stringResource(mode.labelResId()),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = if (mode == selectedMode) Primary else OnBackground
+                            )
+                            Text(
+                                text = stringResource(mode.descriptionResId()),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceDim
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        footer = {
+            PremiumDialogFooterButton(
+                label = stringResource(R.string.settings_cancel),
+                onClick = onDismiss
+            )
+        }
+    )
+}
+
+@Composable
+internal fun VodDuplicateHandlingModeDialog(
+    selectedMode: VodDuplicateHandlingMode,
+    onDismiss: () -> Unit,
+    onModeSelected: (VodDuplicateHandlingMode) -> Unit
+) {
+    PremiumDialog(
+        title = stringResource(R.string.settings_vod_duplicate_handling_mode),
+        subtitle = stringResource(R.string.settings_vod_duplicate_handling_mode_subtitle),
+        onDismissRequest = onDismiss,
+        widthFraction = 0.52f,
+        content = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                VodDuplicateHandlingMode.entries.forEach { mode ->
+                    TvClickableSurface(
+                        onClick = { onModeSelected(mode) },
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = if (mode == selectedMode) Primary.copy(alpha = 0.18f) else SurfaceElevated,
+                            focusedContainerColor = Primary.copy(alpha = 0.28f)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = stringResource(mode.labelResId()),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = if (mode == selectedMode) Primary else OnBackground
+                            )
+                            Text(
+                                text = stringResource(mode.descriptionResId()),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OnSurfaceDim
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        footer = {
+            PremiumDialogFooterButton(
+                label = stringResource(R.string.settings_cancel),
+                onClick = onDismiss
+            )
+        }
+    )
+}
+
+@Composable
+internal fun VodVariantPreferenceModeDialog(
+    selectedMode: VodVariantPreferenceMode,
+    onDismiss: () -> Unit,
+    onModeSelected: (VodVariantPreferenceMode) -> Unit
+) {
+    PremiumDialog(
+        title = stringResource(R.string.settings_vod_variant_preference_mode),
+        subtitle = stringResource(R.string.settings_vod_variant_preference_mode_subtitle),
+        onDismissRequest = onDismiss,
+        widthFraction = 0.52f,
+        content = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                VodVariantPreferenceMode.entries.forEach { mode ->
                     TvClickableSurface(
                         onClick = { onModeSelected(mode) },
                         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),

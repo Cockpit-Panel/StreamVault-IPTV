@@ -7,9 +7,12 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.streamvault.domain.model.VodHttpProtocolMode
+import com.streamvault.domain.model.PlaybackTransportPolicy
 import com.streamvault.domain.model.StreamInfo
+import com.streamvault.domain.util.BoundedExpiringCache
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URI
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -25,16 +28,25 @@ class PlayerDataSourceFactoryProvider(
 ) {
     private companion object {
         private const val TAG = "PlayerDataSource"
+        private const val MAX_CLIENT_CACHE_ENTRIES = 32
+        private const val CLIENT_CACHE_TTL_MILLIS = 30L * 60L * 1_000L
     }
 
     private data class ClientKey(
         val profile: PlayerTimeoutProfile,
         val forceHttp1: Boolean,
-        val port: Int
+        val port: Int,
+        val transportPolicy: PlaybackTransportPolicy?,
+        val allowInvalidSsl: Boolean,
+        val proxyHost: String,
+        val proxyPort: Int?
     )
 
     private val addressHealthStore = PlayerAddressHealthStore()
-    private val clientsByKey = ConcurrentHashMap<ClientKey, OkHttpClient>()
+    private val clientsByKey = BoundedExpiringCache<ClientKey, OkHttpClient>(
+        maxEntries = MAX_CLIENT_CACHE_ENTRIES,
+        ttlMillis = CLIENT_CACHE_TTL_MILLIS
+    )
 
     fun createFactory(
         streamInfo: StreamInfo,
@@ -53,8 +65,26 @@ class PlayerDataSourceFactoryProvider(
             vodHttpProtocolMode = vodHttpProtocolMode
         )
         val port = streamPort(streamInfo.url)
-        val client = clientsByKey.computeIfAbsent(ClientKey(profile, forceHttp1, port)) {
-            baseClient.newBuilder()
+        val clientKey = ClientKey(
+            profile = profile,
+            forceHttp1 = forceHttp1,
+            port = port,
+            transportPolicy = streamInfo.playbackTransportPolicy,
+            allowInvalidSsl = streamInfo.allowInvalidSsl,
+            proxyHost = streamInfo.proxyHost.trim(),
+            proxyPort = streamInfo.proxyPort
+        )
+        val client = clientsByKey.getOrPut(clientKey) {
+            val transportPolicy = streamInfo.playbackTransportPolicy
+            val builder = when {
+                transportPolicy != null ->
+                    baseClient.newBuilder()
+                        .applyPlaybackTransportPolicy(transportPolicy)
+                streamInfo.allowInvalidSsl ->
+                    baseClient.newBuilder().applyUnsafeTlsBypass()
+                else -> baseClient.newBuilder()
+            }
+            builder
                 .addInterceptor(StalkerPlaybackRequestLoggingInterceptor)
                 .connectTimeout(profile.connectTimeoutMs, TimeUnit.MILLISECONDS)
                 .readTimeout(profile.readTimeoutMs, TimeUnit.MILLISECONDS)
@@ -65,6 +95,7 @@ class PlayerDataSourceFactoryProvider(
                     if (forceHttp1) {
                         protocols(listOf(Protocol.HTTP_1_1))
                     }
+                    streamInfo.httpProxy()?.let { proxy(it) }
                 }
                 .build()
         }
@@ -88,6 +119,8 @@ class PlayerDataSourceFactoryProvider(
         }
         return profile to factory
     }
+
+    internal fun clientCacheSizeForTests(): Int = clientsByKey.size()
 
     private fun logRequestShape(
         streamInfo: StreamInfo,
@@ -118,6 +151,12 @@ class PlayerDataSourceFactoryProvider(
             "https" -> 443
             else -> -1
         }
+    }
+
+    private fun StreamInfo.httpProxy(): Proxy? {
+        val host = proxyHost.trim().takeIf { it.isNotBlank() } ?: return null
+        val port = proxyPort ?: return null
+        return Proxy(Proxy.Type.HTTP, InetSocketAddress(host, port))
     }
 }
 

@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okio.Buffer
 import java.util.concurrent.TimeUnit
 
 enum class InternetSpeedTestTransport {
@@ -38,7 +39,7 @@ sealed interface InternetSpeedTestResult {
 @Singleton
 class InternetSpeedTestRunner @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val okHttpClient: OkHttpClient
+    private val downloadSpeedProbe: InternetDownloadSpeedProbe
 ) {
     suspend fun run(): InternetSpeedTestResult = withContext(Dispatchers.IO) {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -52,56 +53,18 @@ class InternetSpeedTestRunner @Inject constructor(
         val measuredAtMs = System.currentTimeMillis()
 
         runCatching {
-            val bytesToDownload = 4_000_000L
-            val request = Request.Builder()
-                .url("https://speed.cloudflare.com/__down?bytes=$bytesToDownload&seed=${SystemClock.elapsedRealtime()}")
-                .cacheControl(CacheControl.Builder().noCache().noStore().build())
-                .build()
-            val startedAtNs = SystemClock.elapsedRealtimeNanos()
-            okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    error("Speed test failed with HTTP ${response.code}")
-                }
-                val body = response.body ?: error("Speed test returned no data")
-                val bytesRead = body.source().use { source ->
-                    var total = 0L
-                    while (!source.exhausted()) {
-                        total += source.read(source.buffer, 8_192)
-                            .takeIf { it > 0 }
-                            ?: 0L
-                    }
-                    total
-                }
-                val elapsedSeconds = (SystemClock.elapsedRealtimeNanos() - startedAtNs)
-                    .coerceAtLeast(TimeUnit.MILLISECONDS.toNanos(1)) / 1_000_000_000.0
-                val megabitsPerSecond = ((bytesRead * 8.0) / elapsedSeconds) / 1_000_000.0
-                InternetSpeedTestResult.Success(
-                    InternetSpeedTestSnapshot(
-                        megabitsPerSecond = megabitsPerSecond,
-                        recommendedMaxVideoHeight = recommendMaxVideoHeight(megabitsPerSecond),
-                        measuredAtMs = measuredAtMs,
-                        transport = transport,
-                        isEstimated = false
-                    )
+            val megabitsPerSecond = downloadSpeedProbe.measureMegabitsPerSecond()
+            InternetSpeedTestResult.Success(
+                InternetSpeedTestSnapshot(
+                    megabitsPerSecond = megabitsPerSecond,
+                    recommendedMaxVideoHeight = recommendMaxVideoHeight(megabitsPerSecond),
+                    measuredAtMs = measuredAtMs,
+                    transport = transport,
+                    isEstimated = false
                 )
-            }
+            )
         }.getOrElse {
-            val fallbackMbps = capabilities.linkDownstreamBandwidthKbps
-                .takeIf { it > 0 }
-                ?.div(1000.0)
-            if (fallbackMbps != null) {
-                InternetSpeedTestResult.Success(
-                    InternetSpeedTestSnapshot(
-                        megabitsPerSecond = fallbackMbps,
-                        recommendedMaxVideoHeight = recommendMaxVideoHeight(fallbackMbps),
-                        measuredAtMs = measuredAtMs,
-                        transport = transport,
-                        isEstimated = true
-                    )
-                )
-            } else {
-                InternetSpeedTestResult.Error(it.message ?: "Speed test failed")
-            }
+            InternetSpeedTestResult.Error(it.message ?: "Speed test failed")
         }
     }
 
@@ -122,5 +85,59 @@ class InternetSpeedTestRunner @Inject constructor(
             hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> InternetSpeedTestTransport.CELLULAR
             else -> InternetSpeedTestTransport.OTHER
         }
+    }
+}
+
+class InternetDownloadSpeedProbe @Inject constructor(
+    private val okHttpClient: OkHttpClient
+) {
+    private var urlFactory: (Long) -> String = { bytesToDownload ->
+        "https://speed.cloudflare.com/__down?bytes=$bytesToDownload&seed=${SystemClock.elapsedRealtime()}"
+    }
+    private var nanoTime: () -> Long = SystemClock::elapsedRealtimeNanos
+
+    internal constructor(
+        okHttpClient: OkHttpClient,
+        urlFactory: (Long) -> String,
+        nanoTime: () -> Long
+    ) : this(okHttpClient) {
+        this.urlFactory = urlFactory
+        this.nanoTime = nanoTime
+    }
+
+    fun measureMegabitsPerSecond(bytesToDownload: Long = DEFAULT_DOWNLOAD_BYTES): Double {
+        val request = Request.Builder()
+            .url(urlFactory(bytesToDownload))
+            .cacheControl(CacheControl.Builder().noCache().noStore().build())
+            .build()
+        val startedAtNs = nanoTime()
+        okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                error("Speed test failed with HTTP ${response.code}")
+            }
+            val body = response.body ?: error("Speed test returned no data")
+            val bytesRead = body.source().use { source ->
+                val sink = Buffer()
+                var total = 0L
+                while (true) {
+                    val read = source.read(sink, READ_CHUNK_BYTES)
+                    if (read == -1L) break
+                    total += read
+                    sink.clear()
+                }
+                total
+            }
+            if (bytesRead <= 0L) {
+                error("Speed test returned no data")
+            }
+            val elapsedSeconds = (nanoTime() - startedAtNs)
+                .coerceAtLeast(TimeUnit.MILLISECONDS.toNanos(1)) / 1_000_000_000.0
+            return ((bytesRead * 8.0) / elapsedSeconds) / 1_000_000.0
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_DOWNLOAD_BYTES = 8_000_000L
+        const val READ_CHUNK_BYTES = 16_384L
     }
 }

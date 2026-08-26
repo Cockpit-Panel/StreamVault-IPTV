@@ -10,6 +10,7 @@ import com.streamvault.data.local.entity.RecordingRunWithSchedule
 import com.streamvault.data.local.entity.RecordingScheduleEntity
 import com.streamvault.data.local.entity.RecordingStorageEntity
 import com.streamvault.data.local.entity.ProgramReminderEntity
+import com.streamvault.domain.model.ProgramReminderDeliveryState
 import com.streamvault.domain.model.RecordingStatus
 import kotlinx.coroutines.flow.Flow
 
@@ -59,6 +60,7 @@ interface RecordingRunDao {
             rr.failure_reason,
             rr.terminal_at_ms,
             rr.schedule_enabled,
+            rr.exact_alarm_armed,
             rr.priority
         FROM recording_runs rr
         ORDER BY rr.scheduled_start_ms DESC, rr.created_at DESC
@@ -77,6 +79,9 @@ interface RecordingRunDao {
 
     @Update
     suspend fun update(run: RecordingRunEntity)
+
+    @Query("UPDATE recording_runs SET exact_alarm_armed = :armed, updated_at = :updatedAt WHERE id = :id")
+    suspend fun setExactAlarmArmed(id: String, armed: Boolean, updatedAt: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM recording_runs WHERE id = :id")
     suspend fun delete(id: String)
@@ -196,17 +201,83 @@ interface ProgramReminderDao {
         SELECT * FROM program_reminders
         WHERE is_dismissed = 0
           AND notified_at IS NULL
-          AND program_start_time > :now
+          AND program_start_time >= :activeAfter
         ORDER BY remind_at ASC
         """
     )
-    suspend fun getPendingActive(now: Long = System.currentTimeMillis()): List<ProgramReminderEntity>
+    suspend fun getPendingActive(activeAfter: Long): List<ProgramReminderEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(reminder: ProgramReminderEntity): Long
 
     @Update
     suspend fun update(reminder: ProgramReminderEntity)
+
+    @Query("UPDATE program_reminders SET exact_alarm_armed = :armed WHERE id = :id")
+    suspend fun setExactAlarmArmed(id: Long, armed: Boolean)
+
+    @Query(
+        """
+        UPDATE program_reminders
+        SET delivery_state = 'DELIVERING',
+            delivery_attempt_token = :attemptToken,
+            delivery_attempted_at = :attemptedAt,
+            delivery_attempt_count = delivery_attempt_count + 1,
+            delivery_failure_reason = NULL,
+            exact_alarm_armed = 0
+        WHERE id = :id
+          AND is_dismissed = 0
+          AND notified_at IS NULL
+          AND delivery_state IN ('PENDING', 'BLOCKED', 'FAILED')
+        """
+    )
+    suspend fun claimDelivery(id: Long, attemptToken: String, attemptedAt: Long): Int
+
+    @Query(
+        """
+        UPDATE program_reminders
+        SET delivery_state = 'DELIVERED',
+            notified_at = :notifiedAt,
+            delivery_attempt_token = NULL,
+            delivery_failure_reason = NULL,
+            exact_alarm_armed = 0
+        WHERE id = :id
+          AND delivery_state = 'DELIVERING'
+          AND delivery_attempt_token = :attemptToken
+        """
+    )
+    suspend fun markDelivered(id: Long, attemptToken: String, notifiedAt: Long): Int
+
+    @Query(
+        """
+        UPDATE program_reminders
+        SET delivery_state = :state,
+            delivery_attempt_token = NULL,
+            delivery_failure_reason = :reason,
+            exact_alarm_armed = 0
+        WHERE id = :id
+          AND delivery_state = 'DELIVERING'
+          AND delivery_attempt_token = :attemptToken
+        """
+    )
+    suspend fun markDeliveryIssue(
+        id: Long,
+        attemptToken: String,
+        state: ProgramReminderDeliveryState,
+        reason: String
+    ): Int
+
+    @Query(
+        """
+        UPDATE program_reminders
+        SET delivery_state = 'PENDING',
+            delivery_attempt_token = NULL
+        WHERE id = :id
+          AND delivery_state = 'DELIVERING'
+          AND delivery_attempt_token = :attemptToken
+        """
+    )
+    suspend fun resetInterruptedDelivery(id: Long, attemptToken: String): Int
 
     @Query(
         """

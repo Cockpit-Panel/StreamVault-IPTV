@@ -7,7 +7,6 @@ import com.streamvault.data.local.dao.ChannelDao
 import com.streamvault.data.local.dao.FavoriteDao
 import com.streamvault.data.local.entity.CategoryEntity
 import com.streamvault.data.local.entity.ChannelBrowseEntity
-import com.streamvault.data.local.entity.ChannelEntity
 import com.streamvault.data.local.entity.CategoryCount
 import com.streamvault.data.mapper.toDomain
 import com.streamvault.data.preferences.PreferencesRepository
@@ -15,6 +14,7 @@ import com.streamvault.data.remote.xtream.XtreamStreamUrlResolver
 import com.streamvault.data.util.rankSearchResults
 import com.streamvault.data.util.toFtsPrefixQuery
 import com.streamvault.domain.model.Category
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ChannelNumberingMode
 import com.streamvault.domain.model.ChannelQualityOption
@@ -81,7 +81,13 @@ class ChannelRepositoryImpl @Inject constructor(
         observeChannels(channelDao.getByProvider(providerId), providerId)
 
     override fun getChannelCount(providerId: Long): Flow<Int> =
-        channelDao.getCount(providerId)
+        preferencesRepository.hideDecorativeLiveRows.flatMapLatest { hideDecorativeRows ->
+            if (hideDecorativeRows) {
+                channelDao.getCount(providerId)
+            } else {
+                channelDao.getRawCount(providerId)
+            }
+        }
 
     override fun getChannelsByCategory(providerId: Long, categoryId: Long): Flow<List<Channel>> =
         observeChannels(channelFlow(providerId, categoryId), providerId)
@@ -140,6 +146,7 @@ class ChannelRepositoryImpl @Inject constructor(
         val level = preferencesRepository.parentalControlLevel.first()
         val unlockedCats = parentalControlManager.unlockedCategoriesForProvider(providerId).first()
         val hiddenIds = preferencesRepository.getHiddenChannelIds(providerId).first()
+        val hideDecorativeRows = preferencesRepository.hideDecorativeLiveRows.first()
         val entities = if (categoryId == ChannelRepository.ALL_CHANNELS_ID) {
             if (withoutErrors) channelDao.getByProviderWithoutErrorsBrowsePageOffset(providerId, limit, offset)
             else channelDao.getByProviderBrowsePageOffset(providerId, limit, offset)
@@ -147,7 +154,7 @@ class ChannelRepositoryImpl @Inject constructor(
             if (withoutErrors) channelDao.getByCategoryWithoutErrorsBrowsePageOffset(providerId, categoryId, limit, offset)
             else channelDao.getByCategoryBrowsePageOffset(providerId, categoryId, limit, offset)
         }
-        val filtered = applyVisibilityFilter(entities, level, unlockedCats)
+        val filtered = applyVisibilityFilter(entities, level, unlockedCats, hideDecorativeRows)
             .filterNot { it.id in hiddenIds }
         val presented = buildPresentedChannels(filtered, settings, unlockedCats)
         applyNumbering(presented, settings.numberingMode, offset)
@@ -160,14 +167,7 @@ class ChannelRepositoryImpl @Inject constructor(
     override fun getCategories(providerId: Long): Flow<List<Category>> =
         combine(
             categoryDao.getByProviderAndType(providerId, ContentType.LIVE.name),
-            preferencesRepository.liveChannelGroupingMode.flatMapLatest { groupingMode ->
-                val countFlow: Flow<List<CategoryCount>> = if (groupingMode == LiveChannelGroupingMode.GROUPED) {
-                    channelDao.getGroupedCategoryCounts(providerId)
-                } else {
-                    channelDao.getCategoryCounts(providerId)
-                }
-                countFlow
-            },
+            decorativeAwareCategoryCountFlow(providerId),
             preferencesRepository.parentalControlLevel,
             parentalControlManager.unlockedCategoriesForProvider(providerId)
         ) { categories: List<CategoryEntity>, categoryCounts: List<CategoryCount>, level: Int, unlockedCats: Set<Long> ->
@@ -232,19 +232,19 @@ class ChannelRepositoryImpl @Inject constructor(
     // look up a specific channel by id (e.g. HiddenChannelsDialog resolves the
     // hidden set back to Channel objects), they must not be gated by visibility.
     override suspend fun getChannel(channelId: Long): Channel? {
-        val entity = channelDao.getById(channelId) ?: return null
+        val entity = channelDao.getBrowseById(channelId) ?: return null
         val settings = currentPresentationSettings()
         val observation = settings.observedQualities[channelId]
         if (settings.groupingMode == LiveChannelGroupingMode.RAW_VARIANTS || entity.logicalGroupId.isBlank()) {
             return entity.toPresentedRawChannel(observation)
         }
         val groupedEntities = channelDao.getByLogicalGroupId(entity.providerId, entity.logicalGroupId)
-            .ifEmpty { listOf(entity.toBrowseEntity()) }
+            .ifEmpty { listOf(entity) }
         return buildGroupedChannels(groupedEntities, settings).firstOrNull()
     }
 
     override suspend fun getStreamInfo(channel: Channel, preferStableUrl: Boolean): Result<StreamInfo> = try {
-        xtreamStreamUrlResolver.resolveWithMetadata(
+        xtreamStreamUrlResolver.resolveAndCommitMetadata(
             url = channel.streamUrl,
             fallbackProviderId = channel.providerId,
             fallbackStreamId = channel.streamId.takeIf { it > 0L }
@@ -259,6 +259,10 @@ class ChannelRepositoryImpl @Inject constructor(
                     title = channel.name,
                     headers = resolvedStream.headers,
                     userAgent = resolvedStream.userAgent,
+                    playbackTransportPolicy = resolvedStream.playbackTransportPolicy,
+                    allowInvalidSsl = resolvedStream.allowInvalidSsl,
+                    proxyHost = resolvedStream.proxyHost,
+                    proxyPort = resolvedStream.proxyPort,
                     streamType = StreamType.fromContainerExtension(resolvedStream.containerExtension),
                     containerExtension = resolvedStream.containerExtension,
                     expirationTime = resolvedStream.expirationTime
@@ -290,10 +294,11 @@ class ChannelRepositoryImpl @Inject constructor(
                 flowOf(requestedEntities),
                 entityPoolFlow,
                 preferencesRepository.parentalControlLevel,
-                currentPresentationSettingsFlow()
-            ) { requested, entityPool, level, settings ->
-                val filteredRequested = applyVisibilityFilter(requested, level, emptySet())
-                val filteredPool = applyVisibilityFilter(entityPool, level, emptySet())
+                currentPresentationSettingsFlow(),
+                preferencesRepository.hideDecorativeLiveRows
+            ) { requested, entityPool, level, settings, hideDecorativeRows ->
+                val filteredRequested = applyVisibilityFilter(requested, level, emptySet(), hideDecorativeRows)
+                val filteredPool = applyVisibilityFilter(entityPool, level, emptySet(), hideDecorativeRows)
                 buildChannelsForRequestedIds(
                     requestedIds = ids,
                     requestedEntities = filteredRequested,
@@ -322,16 +327,46 @@ class ChannelRepositoryImpl @Inject constructor(
         source: Flow<List<ChannelBrowseEntity>>,
         providerId: Long
     ): Flow<List<Channel>> = combine(
-        source,
-        preferencesRepository.parentalControlLevel,
-        parentalControlManager.unlockedCategoriesForProvider(providerId),
-        currentPresentationSettingsFlow(),
-        preferencesRepository.getHiddenChannelIds(providerId)
-    ) { entities, level, unlockedCats, settings, hiddenIds ->
-        val filtered = applyVisibilityFilter(entities, level, unlockedCats)
+        combine(
+            source,
+            preferencesRepository.parentalControlLevel,
+            parentalControlManager.unlockedCategoriesForProvider(providerId),
+            currentPresentationSettingsFlow(),
+            preferencesRepository.getHiddenChannelIds(providerId)
+        ) { entities, level, unlockedCats, settings, hiddenIds ->
+            arrayOf(entities, level, unlockedCats, settings, hiddenIds)
+        },
+        preferencesRepository.hideDecorativeLiveRows
+    ) { values, hideDecorativeRows ->
+        @Suppress("UNCHECKED_CAST")
+        val entities = values[0] as List<ChannelBrowseEntity>
+        val level = values[1] as Int
+        val unlockedCats = values[2] as Set<Long>
+        val settings = values[3] as ChannelPresentationSettings
+        val hiddenIds = values[4] as Set<Long>
+        val filtered = applyVisibilityFilter(entities, level, unlockedCats, hideDecorativeRows)
             .filterNot { it.id in hiddenIds }
         applyNumbering(buildPresentedChannels(filtered, settings, unlockedCats), settings.numberingMode)
     }.flowOn(Dispatchers.Default)
+
+    private fun decorativeAwareCategoryCountFlow(providerId: Long): Flow<List<CategoryCount>> =
+        combine(
+            preferencesRepository.liveChannelGroupingMode,
+            preferencesRepository.hideDecorativeLiveRows
+        ) { groupingMode, hideDecorativeRows ->
+            groupingMode to hideDecorativeRows
+        }.flatMapLatest { (groupingMode, hideDecorativeRows) ->
+            when {
+                groupingMode == LiveChannelGroupingMode.GROUPED && hideDecorativeRows ->
+                    channelDao.getGroupedCategoryCounts(providerId)
+                groupingMode == LiveChannelGroupingMode.GROUPED ->
+                    channelDao.getRawGroupedCategoryCounts(providerId)
+                hideDecorativeRows ->
+                    channelDao.getCategoryCounts(providerId)
+                else ->
+                    channelDao.getRawCategoryCounts(providerId)
+            }
+        }
 
     private fun currentPresentationSettingsFlow(): Flow<ChannelPresentationSettings> =
         combine(
@@ -477,7 +512,7 @@ class ChannelRepositoryImpl @Inject constructor(
                 id = selectedVariant.rawChannelId,
                 name = displayName,
                 canonicalName = canonicalName,
-                logoUrl = representative.logoUrl,
+                logoUrl = representative.resolveLogoUrl(),
                 groupTitle = representative.groupTitle,
                 categoryId = representative.categoryId,
                 categoryName = representative.categoryName,
@@ -639,10 +674,15 @@ class ChannelRepositoryImpl @Inject constructor(
     private fun applyVisibilityFilter(
         entities: List<ChannelBrowseEntity>,
         level: Int,
-        unlockedCats: Set<Long>
+        unlockedCats: Set<Long>,
+        hideDecorativeRows: Boolean
     ): List<ChannelBrowseEntity> {
-        val usable = entities.filterNot { entity ->
-            ChannelNormalizer.isHashWrappedHeader(entity.name)
+        val usable = if (hideDecorativeRows) {
+            entities.filterNot { entity ->
+                ChannelNormalizer.isHashWrappedHeader(entity.name)
+            }
+        } else {
+            entities
         }
         return if (level >= 3) {
             usable.filter { entity ->
@@ -770,7 +810,7 @@ class ChannelRepositoryImpl @Inject constructor(
             id = id,
             name = name,
             canonicalName = variant.canonicalName,
-            logoUrl = logoUrl,
+            logoUrl = resolveLogoUrl(),
             groupTitle = groupTitle,
             categoryId = categoryId,
             categoryName = categoryName,
@@ -794,39 +834,14 @@ class ChannelRepositoryImpl @Inject constructor(
         )
     }
 
-    private fun ChannelEntity.toPresentedRawChannel(
-        observedQuality: LiveChannelObservedQuality?
-    ): Channel {
-        val domain = toDomain()
-        val variant = toBrowseEntity().toVariant(observedQuality)
-        return domain.copy(
-            canonicalName = variant.canonicalName,
-            logicalGroupId = logicalGroupId.takeIf(String::isNotBlank) ?: variant.logicalGroupId,
-            selectedVariantId = id,
-            variants = listOf(variant),
-            alternativeStreams = domain.alternativeStreams.distinct()
-        )
+    private fun ChannelBrowseEntity.resolveLogoUrl(): String? {
+        val supplierLogo = logoUrl?.takeIf { it.isNotBlank() }
+        val epgLogo = epgIconUrl?.takeIf { it.isNotBlank() }
+        return when (channelLogoSourcePolicy) {
+            ChannelLogoSourcePolicy.SUPPLIER_PREFERRED -> supplierLogo ?: epgLogo
+            ChannelLogoSourcePolicy.EPG_PREFERRED -> epgLogo ?: supplierLogo
+            ChannelLogoSourcePolicy.SUPPLIER_ONLY -> supplierLogo
+            ChannelLogoSourcePolicy.EPG_ONLY -> epgLogo
+        }
     }
-
-    private fun ChannelEntity.toBrowseEntity(): ChannelBrowseEntity =
-        ChannelBrowseEntity(
-            id = id,
-            streamId = streamId,
-            name = name,
-            logoUrl = logoUrl,
-            groupTitle = groupTitle,
-            categoryId = categoryId,
-            categoryName = categoryName,
-            streamUrl = streamUrl,
-            epgChannelId = epgChannelId,
-            number = number,
-            catchUpSupported = catchUpSupported,
-            catchUpDays = catchUpDays,
-            catchUpSource = catchUpSource,
-            providerId = providerId,
-            isAdult = isAdult,
-            isUserProtected = isUserProtected,
-            logicalGroupId = logicalGroupId,
-            errorCount = errorCount
-        )
 }

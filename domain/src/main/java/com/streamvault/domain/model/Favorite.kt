@@ -5,6 +5,8 @@ data class Favorite(
     val providerId: Long,
     val contentId: Long,
     val contentType: ContentType,
+    /** Provider/catalog identity used by backup restore; not persisted in the favorites table. */
+    val remoteContentId: String? = null,
     val position: Int = 0,
     val groupId: Long? = null,
     val addedAt: Long = System.currentTimeMillis()

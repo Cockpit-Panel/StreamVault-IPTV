@@ -11,7 +11,7 @@ import com.streamvault.data.remote.xtream.XtreamProvider
 import com.streamvault.data.remote.xtream.XtreamUrlFactory
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ContentType
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.SyncMetadata
 import com.streamvault.domain.sync.Section
 import com.streamvault.domain.sync.SyncProgress
@@ -43,7 +43,7 @@ internal class SyncManagerXtreamLiveStrategy(
     private val liveCategorySequentialModeWarning: String,
     private val isCurrentlyLowOnMemory: () -> Boolean = { false },
     private val stageChannelItems: suspend (Long, List<Channel>, MutableSet<Long>, FallbackCategoryCollector, Long?) -> StagedCatalogSnapshot,
-    private val syncProgressBus: SyncProgressBus
+    private val emitProgress: (Long, SyncProgress) -> Unit
 ) {
     suspend fun syncXtreamLiveCatalog(
         provider: Provider,
@@ -53,7 +53,8 @@ internal class SyncManagerXtreamLiveStrategy(
         onProgress: ((String) -> Unit)?,
         runtimeProfile: CatalogSyncRuntimeProfile,
         trackInitialLiveOnboarding: Boolean,
-        effectiveLiveSyncMethod: EffectiveXtreamLiveSyncMethod = EffectiveXtreamLiveSyncMethod.STREAM_ALL
+        effectiveLiveSyncMethod: EffectiveXtreamLiveSyncMethod = EffectiveXtreamLiveSyncMethod.STREAM_ALL,
+        requiredHiddenLiveCategoryIds: Set<Long> = emptySet()
     ): CatalogSyncPayload<Channel> {
         Log.i(XTREAM_LIVE_STRATEGY_TAG, "Xtream live strategy start for provider ${provider.id}.")
         val rawLiveCategories = when (val attempt = xtreamSupport.attemptNonCancellation {
@@ -84,11 +85,14 @@ internal class SyncManagerXtreamLiveStrategy(
             ?.map { category -> category.toEntity(provider.id) }
             ?.takeIf { it.isNotEmpty() }
         val filteredRawLiveCategories = rawLiveCategories.orEmpty().filterNot { category ->
-            category.categoryId.toLongOrNull() in hiddenLiveCategoryIds
+            val id = category.categoryId.toLongOrNull()
+            id in hiddenLiveCategoryIds && id !in requiredHiddenLiveCategoryIds
         }
-        val visibleResolvedCategories = resolvedCategories
-            ?.filterNot { category -> category.categoryId in hiddenLiveCategoryIds }
-            ?.takeIf { it.isNotEmpty() }
+        // Hidden categories still need a catalog shell after a provider is restored. The
+        // channel fetch intentionally skips them, but filtering them out of the category
+        // snapshot as well means a provider whose old rows were deleted can never recreate
+        // the hidden category itself.
+        val resolvedCatalogCategories = resolvedCategories?.takeIf { it.isNotEmpty() }
 
         var fullPayload = CatalogSyncPayload<Channel>(
             catalogResult = CatalogStrategyResult.EmptyValid("full"),
@@ -103,7 +107,7 @@ internal class SyncManagerXtreamLiveStrategy(
             when (val fullResult = fullPayload.catalogResult) {
                 is CatalogStrategyResult.Success -> return fullPayload.copy(
                     categories = catalogStrategySupport.mergePreferredAndFallbackCategories(
-                        visibleResolvedCategories,
+                        resolvedCatalogCategories,
                         fullPayload.categories ?: catalogStrategySupport.buildFallbackLiveCategories(provider.id, fullResult.items)
                     ),
                     warnings = emptyList(),
@@ -114,7 +118,7 @@ internal class SyncManagerXtreamLiveStrategy(
                 )
                 is CatalogStrategyResult.Partial -> return fullPayload.copy(
                     categories = catalogStrategySupport.mergePreferredAndFallbackCategories(
-                        visibleResolvedCategories,
+                        resolvedCatalogCategories,
                         fullPayload.categories ?: catalogStrategySupport.buildFallbackLiveCategories(provider.id, fullResult.items)
                     ),
                     warnings = emptyList(),
@@ -144,7 +148,7 @@ internal class SyncManagerXtreamLiveStrategy(
         return CatalogSyncPayload(
             catalogResult = categoryPayload.catalogResult,
             categories = catalogStrategySupport.mergePreferredAndFallbackCategories(
-                visibleResolvedCategories,
+                resolvedCatalogCategories,
                 categoryPayload.categories
             ),
             warnings = (categoryPayload.warnings + catalogStrategySupport.strategyWarnings(fullPayload.catalogResult)).distinct(),
@@ -247,7 +251,7 @@ internal class SyncManagerXtreamLiveStrategy(
                 // deja acceptes). Le `reset()` du finally cote SyncManager (T3) viendra
                 // ensuite ramener le flow a null — c'est volontaire (D7) pour eviter que
                 // l'ecran suivant n'herite d'un etat partiel.
-                syncProgressBus.emit(
+                emitProgress(provider.id,
                     SyncProgress(
                         section = Section.LIVE,
                         current = 0,
@@ -286,7 +290,7 @@ internal class SyncManagerXtreamLiveStrategy(
             // on emet en indetermine (`total = 0`) une fois par flush de batch (cadence
             // <= 1/s en pratique, jamais par item). Le label reste vide car aucune
             // categorie ne correspond a la fenetre courante.
-            syncProgressBus.emit(
+            emitProgress(provider.id,
                 SyncProgress(
                     section = Section.LIVE,
                     current = 0,
@@ -464,7 +468,7 @@ internal class SyncManagerXtreamLiveStrategy(
                 // `stagedAcceptedCount` est mis a jour de maniere thread-safe sous le
                 // `stageMutex` (cf `stageMappedBatch`), la lecture ici est best-effort
                 // (snapshot UX, pas une metrique business).
-                syncProgressBus.emit(
+                emitProgress(provider.id,
                     SyncProgress(
                         section = Section.LIVE,
                         current = completed,

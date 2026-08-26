@@ -45,6 +45,7 @@ internal fun RecordingRunWithSchedule.toDomain(): RecordingItem = RecordingItem(
     lastProgressAtMs = lastProgressAtMs,
     failureCategory = failureCategory,
     scheduleEnabled = scheduleEnabled,
+    exactAlarmArmed = exactAlarmArmed,
     priority = priority,
     failureReason = failureReason,
     terminalAtMs = terminalAtMs

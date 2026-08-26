@@ -1,7 +1,10 @@
 package com.streamvault.app.ui.screens.settings
 
 import com.google.common.truth.Truth.assertThat
+import com.streamvault.app.update.AppUpdateActionState
 import com.streamvault.app.update.AppUpdateChannel
+import com.streamvault.app.update.AppUpdateDownloadStatus
+import com.streamvault.app.update.isRemoteVersionNewerForBuild
 import org.junit.Test
 
 class SettingsAppUpdateModelsTest {
@@ -79,5 +82,73 @@ class SettingsAppUpdateModelsTest {
         )
 
         assertThat(result).isFalse()
+    }
+
+    @Test
+    fun betaBuildRejectsSameVersionBetaReleaseWhenPublishedAtMissing() {
+        val result = isRemoteVersionNewerForBuild(
+            remoteVersionCode = 12,
+            remoteVersionName = "1.0.11-beta-deadbee",
+            remotePublishedAt = null,
+            currentVersionCode = 12,
+            currentVersionName = "1.0.11-beta",
+            currentBuildTimestampUtc = 1_747_216_000_000L,
+            currentChannel = AppUpdateChannel.Beta
+        )
+
+        assertThat(result).isFalse()
+    }
+
+    @Test
+    fun downloadedLatestShowsInstallAction() {
+        val update = AppUpdateUiModel(
+            latestVersionName = "1.0.12",
+            downloadUrl = "https://example.com/StreamVault.apk",
+            isUpdateAvailable = true,
+            downloadStatus = AppUpdateDownloadStatus.Downloaded,
+            downloadedVersionName = "1.0.12"
+        )
+
+        assertThat(update.latestActionState()).isEqualTo(AppUpdateActionState.InstallLatest)
+    }
+
+    @Test
+    fun staleDownloadedUpdateShowsDownloadAction() {
+        val update = AppUpdateUiModel(
+            latestVersionName = "1.0.13",
+            downloadUrl = "https://example.com/StreamVault.apk",
+            isUpdateAvailable = true,
+            downloadStatus = AppUpdateDownloadStatus.Downloaded,
+            downloadedVersionName = "1.0.12"
+        )
+
+        assertThat(update.latestActionState()).isEqualTo(AppUpdateActionState.DownloadLatest)
+    }
+
+    @Test
+    fun downloadedLatestWithMissingInstallPermissionShowsPermissionAction() {
+        val update = AppUpdateUiModel(
+            latestVersionName = "1.0.12",
+            downloadUrl = "https://example.com/StreamVault.apk",
+            isUpdateAvailable = true,
+            downloadStatus = AppUpdateDownloadStatus.Downloaded,
+            downloadedVersionName = "1.0.12",
+            installPermissionRequired = true
+        )
+
+        assertThat(update.latestActionState()).isEqualTo(AppUpdateActionState.InstallPermissionRequired)
+    }
+
+    @Test
+    fun downloadingLatestShowsDownloadingAction() {
+        val update = AppUpdateUiModel(
+            latestVersionName = "1.0.12",
+            downloadUrl = "https://example.com/StreamVault.apk",
+            isUpdateAvailable = true,
+            downloadStatus = AppUpdateDownloadStatus.Downloading,
+            downloadedVersionName = "1.0.12"
+        )
+
+        assertThat(update.latestActionState()).isEqualTo(AppUpdateActionState.Downloading)
     }
 }

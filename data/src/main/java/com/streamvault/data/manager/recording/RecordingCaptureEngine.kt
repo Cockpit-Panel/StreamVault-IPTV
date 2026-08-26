@@ -1,6 +1,7 @@
 package com.streamvault.data.manager.recording
 
 import android.content.ContentResolver
+import com.streamvault.data.remote.http.useCancellableResponse
 import com.streamvault.domain.model.RecordingFailureCategory
 import com.streamvault.domain.model.RecordingSourceType
 import java.io.ByteArrayOutputStream
@@ -77,7 +78,7 @@ class TsPassThroughCaptureEngine @Inject constructor(
                         source.userAgent?.takeIf { it.isNotBlank() }?.let { header("User-Agent", it) }
                         source.headers.forEach { (key, value) -> header(key, value) }
                     }.build()
-                    okHttpClient.newCall(request).execute().use { response ->
+                    okHttpClient.newCall(request).useCancellableResponse { response ->
                         if (!response.isSuccessful) throw IOException("Recording stream failed with HTTP ${response.code}")
                         val body = response.body ?: throw IOException("Recording stream returned an empty body")
                         body.byteStream().use { input ->
@@ -200,7 +201,9 @@ class HlsLiveCaptureEngine @Inject constructor(
                             }
                             val segKey = segment.key?.takeIf { it.method.equals("AES-128", ignoreCase = true) }
                             val payload = if (segKey != null) {
-                                val keyBytes = keyCache.getOrPut(segKey.uri) { fetchBytes(segKey.uri, headers) }
+                                val keyBytes = keyCache[segKey.uri] ?: fetchBytes(segKey.uri, headers).also {
+                                    keyCache[segKey.uri] = it
+                                }
                                 decryptAes128(bytes, keyBytes, segKey.iv, segment.mediaSequenceNumber)
                             } else {
                                 bytes
@@ -231,21 +234,21 @@ class HlsLiveCaptureEngine @Inject constructor(
         }
     }
 
-    private fun fetchText(url: String, headers: Map<String, String>): String {
+    private suspend fun fetchText(url: String, headers: Map<String, String>): String {
         val request = Request.Builder().url(url).apply {
             headers.forEach { (key, value) -> header(key, value) }
         }.build()
-        okHttpClient.newCall(request).execute().use { response ->
+        okHttpClient.newCall(request).useCancellableResponse { response ->
             if (!response.isSuccessful) throw IOException("Recording stream failed with HTTP ${response.code}")
             return response.body?.string().orEmpty()
         }
     }
 
-    private fun fetchBytes(url: String, headers: Map<String, String>): ByteArray {
+    private suspend fun fetchBytes(url: String, headers: Map<String, String>): ByteArray {
         val request = Request.Builder().url(url).apply {
             headers.forEach { (key, value) -> header(key, value) }
         }.build()
-        okHttpClient.newCall(request).execute().use { response ->
+        okHttpClient.newCall(request).useCancellableResponse { response ->
             if (!response.isSuccessful) throw IOException("Recording stream failed with HTTP ${response.code}")
             return response.body?.bytes() ?: ByteArray(0)
         }

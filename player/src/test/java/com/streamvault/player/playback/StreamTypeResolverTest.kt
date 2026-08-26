@@ -48,6 +48,24 @@ class StreamTypeResolverTest {
     }
 
     @Test
+    fun `stalker extension ts query resolves to MPEG TS live`() {
+        assertThat(
+            StreamTypeResolver.resolve(
+                "http://portal.example.com/play/live.php?stream=1544246&extension=ts&play_token=token"
+            )
+        ).isEqualTo(ResolvedStreamType.MPEG_TS_LIVE)
+    }
+
+    @Test
+    fun `stalker extension m3u8 query resolves to HLS`() {
+        assertThat(
+            StreamTypeResolver.resolve(
+                "http://portal.example.com/play/live.php?stream=1544246&extension=m3u8"
+            )
+        ).isEqualTo(ResolvedStreamType.HLS)
+    }
+
+    @Test
     fun `mp4 resolves to progressive`() {
         assertThat(StreamTypeResolver.resolve("http://example.com/movie.mp4"))
             .isEqualTo(ResolvedStreamType.PROGRESSIVE)

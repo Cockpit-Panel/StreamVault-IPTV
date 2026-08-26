@@ -51,6 +51,8 @@ import com.streamvault.app.ui.components.ChannelLogoBadge
 import com.streamvault.app.ui.components.shell.StatusPill
 import com.streamvault.app.ui.design.AppColors
 import com.streamvault.app.ui.interaction.TvClickableSurface
+import com.streamvault.app.ui.model.archivePlaybackCapability
+import com.streamvault.app.ui.model.isArchivePlayable
 import com.streamvault.app.ui.screens.player.PlayerTimeshiftUiState
 import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createTimeFormat
@@ -118,7 +120,12 @@ fun ChannelInfoOverlay(
     val appTimeFormat = LocalAppTimeFormat.current
     val timeFormat = remember(appTimeFormat) { appTimeFormat.createTimeFormat() }
     val showTimeshiftControls = timeshiftUiState.available && !isCastConnected
-    val hasCatchUpOptions = currentChannel?.catchUpSupported == true || currentProgram?.hasArchive == true
+    val archiveCapability = currentChannel?.archivePlaybackCapability()
+    val canBrowseArchive = archiveCapability?.canBuildReplayCandidate == true
+    val canRestartProgram = currentChannel != null &&
+        currentProgram != null &&
+        currentChannel.isArchivePlayable(currentProgram)
+    val hasCatchUpOptions = canBrowseArchive || canRestartProgram
     var expandedPanel by remember { mutableStateOf<ChannelInfoPanel?>(null) }
     val recordButtonFocusRequester = remember { FocusRequester() }
     val catchUpButtonFocusRequester = remember { FocusRequester() }
@@ -263,7 +270,7 @@ fun ChannelInfoOverlay(
                                         containerColor = AppColors.SurfaceEmphasis
                                     )
                                 }
-                            if (currentChannel?.catchUpSupported == true) {
+                            if (archiveCapability?.canBuildReplayCandidate == true) {
                                 StatusPill(
                                     label = stringResource(R.string.player_catchup_badge),
                                     containerColor = AppColors.Live
@@ -658,14 +665,14 @@ fun ChannelInfoOverlay(
                     ChannelInfoActionMenuTray(
                         title = stringResource(R.string.player_catchup_options),
                         actions = buildList {
-                            if (currentProgram?.hasArchive == true) {
+                            if (canRestartProgram) {
                                 add(ChannelInfoMenuEntry(stringResource(R.string.player_restart)) {
                                     expandedPanel = null
                                     onRestartProgram()
                                     onDismiss()
                                 })
                             }
-                            if (currentChannel?.catchUpSupported == true) {
+                            if (canBrowseArchive) {
                                 add(ChannelInfoMenuEntry(stringResource(R.string.player_browse_archive)) {
                                     expandedPanel = null
                                     onDismiss()

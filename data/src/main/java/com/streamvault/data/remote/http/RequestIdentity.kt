@@ -1,7 +1,7 @@
 package com.streamvault.data.remote.http
 
 import com.streamvault.data.local.entity.ProviderEntity
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import okhttp3.Interceptor
 import okhttp3.Request
 
@@ -89,9 +89,6 @@ fun buildAppRequestProfile(
 )
 
 fun Provider.toGenericRequestProfile(ownerTag: String): HttpRequestProfile =
-    buildGenericProviderRequestProfile(ownerTag, httpUserAgent, httpHeaders)
-
-fun ProviderEntity.toGenericRequestProfile(ownerTag: String): HttpRequestProfile =
     buildGenericProviderRequestProfile(ownerTag, httpUserAgent, httpHeaders)
 
 fun buildGenericProviderRequestProfile(

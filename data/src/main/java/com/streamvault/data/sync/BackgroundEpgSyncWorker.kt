@@ -7,12 +7,13 @@ import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
+import com.streamvault.data.local.entity.ProviderWorkflowPhase
+import com.streamvault.data.local.entity.ProviderWorkflowReason
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -27,7 +28,8 @@ class BackgroundEpgSyncWorker(
     @EntryPoint
     @InstallIn(SingletonComponent::class)
     interface BackgroundEpgSyncWorkerEntryPoint {
-        fun syncManager(): SyncManager
+        fun syncCommands(): ProviderSyncCommands
+        fun providerWorkflowRunner(): ProviderWorkflowRunner
     }
 
     override suspend fun doWork(): Result {
@@ -52,32 +54,60 @@ class BackgroundEpgSyncWorker(
                 applicationContext,
                 BackgroundEpgSyncWorkerEntryPoint::class.java
             )
-            when (val result = entryPoint.syncManager().syncEpg(providerId, force = force)) {
-                is com.streamvault.domain.model.Result.Success -> {
-                    // A successful EPG sync may still have transient partial failures
-                    // (e.g. network hiccup on one provider section). Check the published
-                    // sync state and retry if it signals a retryable EPG failure so
-                    // WorkManager backoff can heal it without manual intervention.
-                    val syncState = entryPoint.syncManager().currentSyncState(providerId)
-                    if (syncState is com.streamvault.domain.model.SyncState.Partial &&
-                            syncState.hasRetryableEpgFailure) {
-                        Log.i(TAG, "Scheduling retry for provider $providerId: EPG completed with retryable failure")
-                        Result.retry()
-                    } else {
-                        Result.success()
+            when (
+                entryPoint.providerWorkflowRunner().execute(
+                    providerId = providerId,
+                    phase = ProviderWorkflowPhase.EPG,
+                    reason = ProviderWorkflowReason.PERIODIC,
+                    force = force
+                ) {
+                    when (val result = entryPoint.syncCommands().syncEpg(providerId, force = force)) {
+                        is com.streamvault.domain.model.Result.Success -> {
+                            // A successful EPG sync may still have transient partial failures.
+                            val syncState = entryPoint.syncCommands().currentSyncState(providerId)
+                            if (syncState is com.streamvault.domain.model.SyncState.Partial &&
+                                syncState.hasRetryableEpgFailure
+                            ) {
+                                Log.i(TAG, "Scheduling retry for provider $providerId: EPG completed with retryable failure")
+                                ProviderWorkflowOutcome.Failure(
+                                    code = "EPG_PARTIAL_RETRYABLE",
+                                    message = "EPG completed with a retryable partial failure.",
+                                    retryable = true
+                                )
+                            } else {
+                                ProviderWorkflowOutcome.Success(
+                                    partial = syncState is com.streamvault.domain.model.SyncState.Partial
+                                )
+                            }
+                        }
+                        is com.streamvault.domain.model.Result.Error -> {
+                            if (result.message.contains("not found", ignoreCase = true)) {
+                                ProviderWorkflowOutcome.Success()
+                            } else {
+                                ProviderWorkflowOutcome.Failure(
+                                    code = "EPG_SYNC",
+                                    message = result.message,
+                                    cause = result.exception
+                                )
+                            }
+                        }
+                        com.streamvault.domain.model.Result.Loading ->
+                            ProviderWorkflowOutcome.Failure(
+                                code = "EPG_LOADING",
+                                message = "EPG operation did not reach a terminal state.",
+                                retryable = true
+                            )
                     }
                 }
-                is com.streamvault.domain.model.Result.Error -> {
-                    if (result.message.contains("not found", ignoreCase = true)) {
-                        Result.success()
-                    } else if (shouldRetry(result.exception)) {
-                        Result.retry()
-                    } else {
-                        Result.failure()
-                    }
-                }
-                com.streamvault.domain.model.Result.Loading -> Result.retry()
+            ) {
+                ProviderWorkflowDisposition.SUCCEEDED,
+                ProviderWorkflowDisposition.SUPERSEDED -> Result.success()
+                ProviderWorkflowDisposition.RETRY,
+                ProviderWorkflowDisposition.BUSY -> Result.retry()
+                ProviderWorkflowDisposition.FAILED -> Result.failure()
             }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Log.e(TAG, "Background EPG work failed for provider $providerId", e)
             if (shouldRetry(e)) Result.retry() else Result.failure()
@@ -85,12 +115,7 @@ class BackgroundEpgSyncWorker(
     }
 
     private fun shouldRetry(error: Throwable?): Boolean {
-        return when (error) {
-            is java.io.IOException -> true
-            is SQLiteException -> error.message.orEmpty().contains("locked", ignoreCase = true) ||
-                error.message.orEmpty().contains("busy", ignoreCase = true)
-            else -> false
-        }
+        return ProviderWorkFailureClassifier.isRetryable(error)
     }
 
     companion object {
@@ -98,7 +123,6 @@ class BackgroundEpgSyncWorker(
         private const val KEY_PROVIDER_ID = "provider_id"
         private const val KEY_FORCE_REFRESH = "force_refresh"
         private const val INVALID_PROVIDER_ID = -1L
-        private const val UNIQUE_WORK_PREFIX = "background-epg-sync-"
         /**
          * Default delay before the first background EPG sync runs after enqueue. This
          * replaces the in-process [kotlinx.coroutines.delay] previously used by the
@@ -135,10 +159,8 @@ class BackgroundEpgSyncWorker(
                 .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
-                uniqueWorkName(providerId),
-                // Force-refresh requests must displace any queued stale work so the new
-                // parameters (force=true) actually run; KEEP would silently drop them.
-                if (force) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
+                providerWorkUniqueName(providerId),
+                providerWorkExistingPolicy(supersede = false),
                 request
             )
         }
@@ -146,12 +168,11 @@ class BackgroundEpgSyncWorker(
         fun cancel(context: Context, providerId: Long) {
             if (providerId <= 0L) return
             runCatching {
-                WorkManager.getInstance(context).cancelUniqueWork(uniqueWorkName(providerId))
+                WorkManager.getInstance(context).cancelUniqueWork(providerWorkUniqueName(providerId))
             }.onFailure { error ->
                 Log.w(TAG, "Skipping background EPG cancellation for provider $providerId", error)
             }
         }
 
-        private fun uniqueWorkName(providerId: Long): String = "$UNIQUE_WORK_PREFIX$providerId"
     }
 }

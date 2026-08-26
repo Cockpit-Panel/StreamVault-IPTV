@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 interface FavoriteRepository {
     fun getFavorites(providerId: Long, contentType: ContentType? = null): Flow<List<Favorite>>
     fun getFavorites(providerIds: List<Long>, contentType: ContentType? = null): Flow<List<Favorite>>
+    fun getAllFavorites(providerIds: List<Long>, contentType: ContentType): Flow<List<Favorite>>
     @Deprecated(
         "Use getFavorites(providerId, contentType) instead",
         replaceWith = ReplaceWith("getFavorites(providerId, contentType)")

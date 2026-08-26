@@ -46,6 +46,7 @@ internal fun BoxScope.SettingsScreenOverlays(
         viewModel = viewModel,
         context = context,
         scope = scope,
-        dialogState = dialogState
+        dialogState = dialogState,
+        onCancelSync = { viewModel.cancelSync() }
     )
 }

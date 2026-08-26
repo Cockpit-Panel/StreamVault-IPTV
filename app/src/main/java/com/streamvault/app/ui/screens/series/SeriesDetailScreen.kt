@@ -2,6 +2,8 @@ package com.streamvault.app.ui.screens.series
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,7 +57,9 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import coil3.compose.AsyncImage
+import com.streamvault.app.MainActivity
 import com.streamvault.app.R
+import com.streamvault.app.cast.CastUiEvent
 import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.components.rememberCrossfadeImageModel
 import com.streamvault.app.util.formatPositionMs
@@ -68,6 +73,7 @@ import com.streamvault.domain.model.Episode
 import com.streamvault.domain.model.ExternalRatings
 import com.streamvault.domain.model.Season
 import com.streamvault.domain.model.Series
+import com.streamvault.domain.model.VodSeriesVariant
 import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.interaction.TvButton
 import com.streamvault.app.ui.interaction.TvIconButton
@@ -86,6 +92,17 @@ fun SeriesDetailScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val series = uiState.series
     val context = LocalContext.current
+    val mainActivity = remember(context) { context.findMainActivity() }
+
+    LaunchedEffect(viewModel, context, mainActivity) {
+        viewModel.castEvents.collect { event ->
+            when (event) {
+                CastUiEvent.OpenRouteChooser -> mainActivity?.openCastRouteChooser()
+                is CastUiEvent.ShowMessage ->
+                    Toast.makeText(context, context.getString(event.messageResId), Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     if (uiState.isLoading) {
         Box(
@@ -119,9 +136,11 @@ fun SeriesDetailScreen(
         selectedSeason = uiState.selectedSeason,
         resumeEpisode = uiState.resumeEpisode,
         unwatchedEpisodeCount = uiState.unwatchedEpisodeCount,
+        isCasting = uiState.isCasting,
         externalRatings = uiState.externalRatings,
         isLoadingExternalRatings = uiState.isLoadingExternalRatings,
         onToggleFavorite = viewModel::toggleFavorite,
+        onSelectVariant = viewModel::selectSeriesVariant,
         onSeasonSelected = viewModel::selectSeason,
         onEpisodeClick = onEpisodeClick,
         onResumeClick = onResumeClick ?: onEpisodeClick,
@@ -135,6 +154,8 @@ fun SeriesDetailScreen(
         onDownloadEpisode = { episode ->
             viewModel.downloadEpisode(context, episode)
         },
+        onCastResumeEpisode = viewModel::castResumeEpisode,
+        onCastEpisode = viewModel::castEpisode,
         onBack = onBack
     )
 }
@@ -145,14 +166,18 @@ private fun SeriesDetailContent(
     selectedSeason: Season?,
     resumeEpisode: Episode?,
     unwatchedEpisodeCount: Int,
+    isCasting: Boolean,
     externalRatings: ExternalRatings,
     isLoadingExternalRatings: Boolean,
     onToggleFavorite: () -> Unit,
+    onSelectVariant: (Long) -> Unit,
     onSeasonSelected: (Season) -> Unit,
     onEpisodeClick: (Episode) -> Unit,
     onResumeClick: (Episode) -> Unit,
     onCopyEpisodeUrl: suspend (Episode) -> String?,
     onDownloadEpisode: (Episode) -> Unit,
+    onCastResumeEpisode: () -> Unit,
+    onCastEpisode: (Episode) -> Unit,
     onBack: () -> Unit
 ) {
     val isTelevisionDevice = rememberIsTelevisionDevice()
@@ -286,6 +311,11 @@ private fun SeriesDetailContent(
                                 ratings = externalRatings,
                                 isLoading = isLoadingExternalRatings
                             )
+                            SeriesVersionSelector(
+                                variants = series.variants,
+                                selectedVariantId = series.selectedVariantId ?: series.id,
+                                onSelectVariant = onSelectVariant
+                            )
                             Text(
                                 text = series.plot ?: stringResource(R.string.series_plot_fallback),
                                 style = MaterialTheme.typography.bodyLarge,
@@ -299,8 +329,10 @@ private fun SeriesDetailContent(
                                     series = series,
                                     resumeEpisode = ep,
                                      hasProgress = hasProgress,
+                                     isCasting = isCasting,
                                      onResumeClick = onResumeClick,
                                      onCopyUrl = { copyEpisodeUrl(ep) },
+                                     onCast = onCastResumeEpisode,
                                      onToggleFavorite = onToggleFavorite
                                  )
                             }
@@ -367,6 +399,11 @@ private fun SeriesDetailContent(
                                 ratings = externalRatings,
                                 isLoading = isLoadingExternalRatings
                             )
+                            SeriesVersionSelector(
+                                variants = series.variants,
+                                selectedVariantId = series.selectedVariantId ?: series.id,
+                                onSelectVariant = onSelectVariant
+                            )
                             Text(
                                 text = series.plot ?: stringResource(R.string.series_plot_fallback),
                                 style = MaterialTheme.typography.bodyLarge,
@@ -380,8 +417,10 @@ private fun SeriesDetailContent(
                                     series = series,
                                     resumeEpisode = ep,
                                      hasProgress = hasProgress,
+                                     isCasting = isCasting,
                                      onResumeClick = onResumeClick,
                                      onCopyUrl = { copyEpisodeUrl(ep) },
+                                     onCast = onCastResumeEpisode,
                                      onToggleFavorite = onToggleFavorite
                                  )
                             }
@@ -441,7 +480,9 @@ private fun SeriesDetailContent(
                         fallbackImageUrl = fallbackCover,
                         onClick = { onEpisodeClick(episode) },
                         onCopyUrl = { copyEpisodeUrl(episode) },
-                        onDownload = { onDownloadEpisode(episode) }
+                        onDownload = { onDownloadEpisode(episode) },
+                        onCast = { onCastEpisode(episode) },
+                        isCasting = isCasting
                     )
                 }
                 if (visibleEpisodes.size < season.episodes.size) {
@@ -468,12 +509,48 @@ private fun SeriesDetailContent(
 }
 
 @Composable
+private fun SeriesVersionSelector(
+    variants: List<VodSeriesVariant>,
+    selectedVariantId: Long,
+    onSelectVariant: (Long) -> Unit
+) {
+    if (variants.size <= 1) return
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.series_detail_versions),
+            style = MaterialTheme.typography.titleMedium,
+            color = AppColors.TextPrimary
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(variants, key = { it.rawSeriesId }) { variant ->
+                val selected = variant.rawSeriesId == selectedVariantId
+                TvButton(
+                    onClick = { onSelectVariant(variant.rawSeriesId) },
+                    colors = ButtonDefaults.colors(
+                        containerColor = if (selected) AppColors.Brand else AppColors.SurfaceEmphasis,
+                        contentColor = if (selected) Color.White else AppColors.TextPrimary
+                    )
+                ) {
+                    Text(
+                        text = variant.label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SeriesDetailActions(
     series: Series,
     resumeEpisode: Episode,
     hasProgress: Boolean,
+    isCasting: Boolean,
     onResumeClick: (Episode) -> Unit,
     onCopyUrl: () -> Unit,
+    onCast: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -509,6 +586,20 @@ private fun SeriesDetailActions(
             )
         ) {
             Text(stringResource(R.string.stream_url_copy))
+        }
+        TvButton(
+            onClick = onCast,
+            enabled = !isCasting,
+            colors = ButtonDefaults.colors(
+                containerColor = AppColors.SurfaceEmphasis,
+                contentColor = AppColors.TextPrimary
+            )
+        ) {
+            Text(
+                stringResource(
+                    if (isCasting) R.string.cast_launching else R.string.cast_button_label
+                )
+            )
         }
         SeriesDetailFavoriteAction(series = series, onToggleFavorite = onToggleFavorite)
     }
@@ -575,7 +666,9 @@ fun EpisodeItem(
     fallbackImageUrl: String? = null,
     onClick: () -> Unit,
     onCopyUrl: () -> Unit,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onCast: () -> Unit,
+    isCasting: Boolean
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -610,6 +703,16 @@ fun EpisodeItem(
             TvButton(onClick = onCopyUrl) {
                 Text(stringResource(R.string.stream_url_copy))
             }
+            TvButton(
+                onClick = onCast,
+                enabled = !isCasting
+            ) {
+                Text(
+                    stringResource(
+                        if (isCasting) R.string.cast_launching else R.string.cast_button_label
+                    )
+                )
+            }
         }
     }
 }
@@ -622,4 +725,10 @@ private fun copyStreamUrlToClipboard(context: android.content.Context, url: Stri
     context.getSystemService(ClipboardManager::class.java)
         ?.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.stream_url_clip_label), url))
     Toast.makeText(context, context.getString(R.string.stream_url_copied), Toast.LENGTH_SHORT).show()
+}
+
+private tailrec fun Context.findMainActivity(): MainActivity? = when (this) {
+    is MainActivity -> this
+    is ContextWrapper -> baseContext.findMainActivity()
+    else -> null
 }

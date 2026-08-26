@@ -7,7 +7,8 @@ data class VideoFormat(
     val bitrate: Int = 0,
     val codecV: String? = null,
     val codecA: String? = null,
-    val pixelWidthHeightRatio: Float = 1f
+    val pixelWidthHeightRatio: Float = 1f,
+    val isHdr: Boolean = false
 ) {
     init {
         require(width >= 0) { "width must be non-negative" }

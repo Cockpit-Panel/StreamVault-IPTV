@@ -3,10 +3,12 @@ package com.streamvault.app.ui.screens.player
 import androidx.lifecycle.viewModelScope
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.LiveChannelObservedQuality
+import com.streamvault.domain.model.VodVariantObservation
 import com.streamvault.domain.model.VideoFormat
 import com.streamvault.player.AUDIO_VIDEO_OFFSET_MAX_MS
 import com.streamvault.player.AUDIO_VIDEO_OFFSET_MIN_MS
 import com.streamvault.player.PlaybackState
+import com.streamvault.player.PlayerError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -80,7 +82,7 @@ fun PlayerViewModel.selectLiveVariant(rawChannelId: Long) {
     if (updatedChannel.selectedVariantId == currentChannel.selectedVariantId) return
 
     val requestVersion = beginPlaybackSession()
-    triedAlternativeStreams.clear()
+    playerRecoveryCoordinator.clearStreamAttempts()
     currentContentId = updatedChannel.id
     currentStreamUrl = updatedChannel.streamUrl
     currentTitle = updatedChannel.currentVariant?.originalName ?: updatedChannel.name
@@ -102,8 +104,8 @@ fun PlayerViewModel.selectLiveVariant(rawChannelId: Long) {
     refreshCurrentChannelRecording()
     updateChannelDiagnostics(updatedChannel)
     updateStreamClass("Variant")
-    viewModelScope.launch {
-        preferencesRepository.setPreferredLiveVariant(
+    playbackSessionScope(requestVersion)?.launch {
+        playerPreferencesCoordinator.setPreferredLiveVariant(
             providerId = updatedChannel.providerId,
             logicalGroupId = updatedChannel.logicalGroupId,
             rawChannelId = rawChannelId
@@ -138,10 +140,10 @@ fun PlayerViewModel.selectStreamFormat(formatUrl: String) {
     if (formatUrl == currentStreamUrl) return
 
     val requestVersion = beginPlaybackSession()
-    triedAlternativeStreams.add(formatUrl)
+    playerRecoveryCoordinator.markStreamAttempt(formatUrl)
     currentStreamUrl = formatUrl
     updateStreamClass("Format")
-    viewModelScope.launch {
+    playbackSessionScope(requestVersion)?.launch {
         val streamInfo = resolvePlaybackStreamInfo(
             logicalUrl = formatUrl,
             internalContentId = channel.id,
@@ -176,8 +178,8 @@ fun PlayerViewModel.recordLiveVariantObservation(playbackState: PlaybackState, v
     lastRecordedVariantObservationSignature = signature
 
     viewModelScope.launch {
-        val existing = preferencesRepository.liveVariantObservations.first()[rawChannelId]
-        preferencesRepository.recordLiveVariantObservation(
+        val existing = playerPreferencesCoordinator.liveVariantObservations.first()[rawChannelId]
+        playerPreferencesCoordinator.recordLiveVariantObservation(
             rawChannelId = rawChannelId,
             observedQuality = LiveChannelObservedQuality(
                 lastObservedWidth = videoFormat.width,
@@ -191,11 +193,62 @@ fun PlayerViewModel.recordLiveVariantObservation(playbackState: PlaybackState, v
     }
 }
 
+fun PlayerViewModel.recordMovieVariantSuccessObservation() {
+    if (currentContentType != ContentType.MOVIE) return
+    val rawMovieId = currentContentId.takeIf { it > 0L } ?: return
+    val signature = "success|$prepareRequestVersion|$rawMovieId"
+    if (signature == lastRecordedVodVariantObservationSignature) return
+    lastRecordedVodVariantObservationSignature = signature
+
+    viewModelScope.launch {
+        val existing = playerPreferencesCoordinator.vodVariantObservations.first()[rawMovieId]
+        playerPreferencesCoordinator.recordVodVariantObservation(
+            rawItemId = rawMovieId,
+            observation = VodVariantObservation(
+                successCount = (existing?.successCount ?: 0) + 1,
+                failureCount = existing?.failureCount ?: 0,
+                lastSuccessfulAt = System.currentTimeMillis(),
+                lastFailedAt = existing?.lastFailedAt ?: 0L
+            )
+        )
+    }
+}
+
+fun PlayerViewModel.recordMovieVariantFailureObservation(error: PlayerError) {
+    if (currentContentType != ContentType.MOVIE) return
+    val rawMovieId = currentContentId.takeIf { it > 0L } ?: return
+    val signature = buildString {
+        append("failure|")
+        append(prepareRequestVersion)
+        append('|')
+        append(rawMovieId)
+        append('|')
+        append(error::class.java.simpleName)
+        append('|')
+        append(error.message)
+    }
+    if (signature == lastRecordedVodVariantObservationSignature) return
+    lastRecordedVodVariantObservationSignature = signature
+
+    viewModelScope.launch {
+        val existing = playerPreferencesCoordinator.vodVariantObservations.first()[rawMovieId]
+        playerPreferencesCoordinator.recordVodVariantObservation(
+            rawItemId = rawMovieId,
+            observation = VodVariantObservation(
+                successCount = existing?.successCount ?: 0,
+                failureCount = (existing?.failureCount ?: 0) + 1,
+                lastSuccessfulAt = existing?.lastSuccessfulAt ?: 0L,
+                lastFailedAt = System.currentTimeMillis()
+            )
+        )
+    }
+}
+
 fun PlayerViewModel.setPlaybackSpeed(speed: Float) {
     val normalizedSpeed = speed.coerceIn(0.5f, 2f)
     playerEngine.setPlaybackSpeed(normalizedSpeed)
     viewModelScope.launch {
-        preferencesRepository.setPlayerPlaybackSpeed(normalizedSpeed)
+        playerPreferencesCoordinator.setPlayerPlaybackSpeed(normalizedSpeed)
     }
 }
 
@@ -220,7 +273,7 @@ fun PlayerViewModel.saveAudioVideoOffsetForChannel() {
     val channelId = currentChannelFlow.value?.id?.takeIf { it > 0L } ?: return
     val offsetMs = _audioVideoOffsetUiState.value.effectiveOffsetMs
     viewModelScope.launch {
-        preferencesRepository.setAudioVideoOffsetForChannel(channelId, offsetMs)
+        playerPreferencesCoordinator.setAudioVideoOffsetForChannel(channelId, offsetMs)
         audioVideoOffsetPreviewMs.value = null
     }
 }
@@ -229,9 +282,9 @@ fun PlayerViewModel.saveAudioVideoOffsetAsGlobal() {
     val offsetMs = _audioVideoOffsetUiState.value.effectiveOffsetMs
     val channelId = currentChannelFlow.value?.id?.takeIf { it > 0L }
     viewModelScope.launch {
-        preferencesRepository.setPlayerAudioVideoOffsetMs(offsetMs)
+        playerPreferencesCoordinator.setPlayerAudioVideoOffsetMs(offsetMs)
         if (channelId != null) {
-            preferencesRepository.clearAudioVideoOffsetForChannel(channelId)
+            playerPreferencesCoordinator.clearAudioVideoOffsetForChannel(channelId)
         }
         audioVideoOffsetPreviewMs.value = null
     }
@@ -240,7 +293,7 @@ fun PlayerViewModel.saveAudioVideoOffsetAsGlobal() {
 fun PlayerViewModel.useGlobalAudioVideoOffset() {
     val channelId = currentChannelFlow.value?.id?.takeIf { it > 0L } ?: return
     viewModelScope.launch {
-        preferencesRepository.clearAudioVideoOffsetForChannel(channelId)
+        playerPreferencesCoordinator.clearAudioVideoOffsetForChannel(channelId)
         audioVideoOffsetPreviewMs.value = null
     }
 }
@@ -266,7 +319,7 @@ fun PlayerViewModel.updateSeekPreview(positionMs: Long?) {
 
     val previewPositionMs = positionMs.coerceAtLeast(0L)
     val previewUrl = currentResolvedPlaybackUrl.ifBlank { currentStreamUrl }
-    val canExtractFrame = previewUrl.isNotBlank() && seekThumbnailProvider.supportsFrameExtraction(previewUrl)
+    val canExtractFrame = previewUrl.isNotBlank() && playerThumbnailCoordinator.supportsFrameExtraction(previewUrl)
 
     _seekPreview.update { current ->
         current.copy(
@@ -287,7 +340,7 @@ fun PlayerViewModel.updateSeekPreview(positionMs: Long?) {
     val requestVersion = ++seekPreviewRequestVersion
     seekPreviewJob = viewModelScope.launch {
         delay(120)
-        val bitmap = seekThumbnailProvider.loadFrame(previewUrl, previewPositionMs)
+        val bitmap = playerThumbnailCoordinator.loadFrame(previewUrl, previewPositionMs)
         if (requestVersion != seekPreviewRequestVersion) return@launch
 
         _seekPreview.update { current ->
@@ -307,7 +360,7 @@ fun PlayerViewModel.updateSeekPreview(positionMs: Long?) {
 
 internal fun PlayerViewModel.startThumbnailPreload() {
     val url = currentResolvedPlaybackUrl.ifBlank { currentStreamUrl }
-    if (url.isBlank() || !seekThumbnailProvider.supportsFrameExtraction(url)) return
+    if (url.isBlank() || !playerThumbnailCoordinator.supportsFrameExtraction(url)) return
     if (!shouldStartThumbnailPreload(url, lastCompletedThumbnailPreloadKey, inFlightThumbnailPreloadKey)) return
     val durationMs = playerEngine.duration.value
     if (durationMs <= 0L) return
@@ -323,7 +376,7 @@ internal fun PlayerViewModel.startThumbnailPreload() {
         try {
             preloadPositions.forEach { positionMs ->
                 ensureActive()
-                seekThumbnailProvider.loadFrame(url, positionMs)
+                playerThumbnailCoordinator.loadFrame(url, positionMs)
             }
             lastCompletedThumbnailPreloadKey = url
         } finally {

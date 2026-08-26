@@ -27,3 +27,13 @@ Capture/export helper:
 ```
 
 The script extracts Stalker `action=` requests from a HAR capture, redacts domains/tokens/MACs/credentials deterministically, and emits a replay-fixture skeleton in the same format used by `StalkerPortalReplayHarnessTest`.
+
+Fixtures may also include an `operations` array. The acceptance harness currently understands
+`MOVIE_PREVIEW`, `SERIES_PREVIEW`, `EPG`, and `BACKGROUND_INDEX`; it uses these to assert that
+on-demand setup performs no item-page calls and that later work remains page-bounded.
+
+For authorized comparisons, run `tools/stalker-trace-compare.ps1` with a reference-client HAR
+and a StreamVault HAR. Its output contains only action/type/endpoint-family timing and byte counts.
+For connected playback and migration evidence, run `tools/stalker-connected-validation.ps1` once
+per Live channel; the script enforces `ROTATION_270`, captures 61 frames by default, hashes them,
+checks the media session, and writes only filtered and redacted player logs.

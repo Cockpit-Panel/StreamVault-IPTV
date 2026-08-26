@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.content.Intent
 import android.util.Log
 import android.os.Build
@@ -14,6 +15,11 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.streamvault.app.MainActivity
 import com.streamvault.app.R
+import com.streamvault.data.local.dao.DownloadDao
+import com.streamvault.data.platform.DataSyncQuotaAcquireResult
+import com.streamvault.data.platform.DataSyncQuotaLease
+import com.streamvault.data.platform.DataSyncQuotaOwner
+import com.streamvault.data.platform.DataSyncServiceOwner
 import com.streamvault.domain.model.DownloadItem
 import com.streamvault.domain.model.DownloadStatus
 import com.streamvault.domain.repository.DownloadManager
@@ -36,11 +42,15 @@ class DownloadForegroundService : Service() {
     @InstallIn(SingletonComponent::class)
     interface DownloadServiceEntryPoint {
         fun downloadManager(): DownloadManager
+        fun dataSyncQuotaOwner(): DataSyncQuotaOwner
+        fun downloadDao(): DownloadDao
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var observeJob: Job? = null
     private var currentDownloadId: String? = null
+    private var dataSyncQuotaOwner: DataSyncQuotaOwner? = null
+    private var dataSyncQuotaLease: DataSyncQuotaLease? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -49,32 +59,54 @@ class DownloadForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val downloadId = intent?.getStringExtra(EXTRA_DOWNLOAD_ID)
-        if (downloadId.isNullOrBlank()) {
-            Log.w(TAG, " onStartCommand called without download_id extra; stopping self")
-            stopSelf(startId)
-            return START_NOT_STICKY
-        }
-
+        val startMode = resolveDownloadServiceStartMode(downloadId)
         currentDownloadId = downloadId
-        val entryPoint = entryPoint()
-        val downloadFlow = entryPoint.downloadManager().observeDownload(downloadId)
-
         beginPendingCommand()
 
-        runCatching {
-            startForeground(
-                NOTIFICATION_ID,
+        val foregroundStarted = runCatching {
+            startDataSyncForeground(
                 buildNotification(
                     downloadItem = null,
                     pendingCommand = true
                 )
             )
+            true
         }.onFailure { error ->
             Log.e(TAG, "Unable to enter foreground", error)
+        }.getOrDefault(false)
+        if (!foregroundStarted) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        // Promote the service before touching the Hilt graph/Room. Opening the database can
+        // block during a migration, and Android's FGS startup deadline applies until this call
+        // completes. A slow migration must not make the system believe this service never
+        // entered the foreground (which also prevents dataSync timeout callbacks on API 35+).
+        val entryPoint = entryPoint()
+        ensureDataSyncQuotaLease()
 
+        observeJob?.cancel()
+        if (startMode == DownloadServiceStartMode.RECOVER_INTERRUPTED) {
+            Log.w(TAG, "Sticky restart without download_id; reconciling interrupted downloads")
+            observeJob = serviceScope.launch {
+                val manager = entryPoint.downloadManager()
+                if (manager.recoverInterruptedDownloads() is com.streamvault.domain.model.Result.Error) {
+                    stopSelf(startId)
+                    return@launch
+                }
+                manager.observeAllDownloads().collectLatest { downloads ->
+                    val active = downloads.firstOrNull {
+                        it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.PENDING
+                    }
+                    currentDownloadId = active?.id
+                    updateNotification(active)
+                    if (active == null) stopSelf(startId)
+                }
+            }
+            return START_STICKY
+        }
+
+        val downloadFlow = entryPoint.downloadManager().observeDownload(requireNotNull(downloadId))
         observeJob = serviceScope.launch {
             downloadFlow.collectLatest { downloadItem ->
                 updateNotification(downloadItem)
@@ -96,10 +128,27 @@ class DownloadForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        releaseDataSyncQuotaLease("service_destroyed")
         observeJob?.cancel()
         serviceScope.cancel()
         currentDownloadId = null
         super.onDestroy()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val downloadId = currentDownloadId
+        Log.e(TAG, "Foreground-service time allowance exhausted; pausing download $downloadId")
+        serviceScope.launch {
+            try {
+                if (!downloadId.isNullOrBlank()) {
+                    entryPoint().downloadManager().pauseDownloadForForegroundServiceTimeout(downloadId)
+                }
+            } finally {
+                releaseDataSyncQuotaLease("android_timeout")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -187,6 +236,41 @@ class DownloadForegroundService : Service() {
     private fun entryPoint(): DownloadServiceEntryPoint =
         EntryPointAccessors.fromApplication(applicationContext, DownloadServiceEntryPoint::class.java)
 
+    private fun startDataSyncForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun ensureDataSyncQuotaLease() {
+        if (dataSyncQuotaLease != null) return
+        val owner = entryPoint().dataSyncQuotaOwner()
+        when (val result = owner.acquire(DataSyncServiceOwner.DOWNLOAD)) {
+            is DataSyncQuotaAcquireResult.Granted -> {
+                dataSyncQuotaOwner = owner
+                dataSyncQuotaLease = result.lease
+            }
+            is DataSyncQuotaAcquireResult.Exhausted -> {
+                dataSyncQuotaOwner = owner
+                Log.e(TAG, "Shared dataSync quota is exhausted; Android timeout handling remains authoritative")
+            }
+        }
+    }
+
+    private fun releaseDataSyncQuotaLease(reason: String) {
+        val lease = dataSyncQuotaLease ?: return
+        dataSyncQuotaLease = null
+        runCatching { dataSyncQuotaOwner?.release(lease) }
+            .onFailure { error -> Log.w(TAG, "Unable to release dataSync quota lease ($reason)", error) }
+        dataSyncQuotaOwner = null
+    }
+
     private fun beginPendingCommand() {
         updateNotification(downloadItem = null, pendingCommand = true)
     }
@@ -223,3 +307,15 @@ class DownloadForegroundService : Service() {
         }
     }
 }
+
+internal enum class DownloadServiceStartMode {
+    OBSERVE_REQUESTED,
+    RECOVER_INTERRUPTED
+}
+
+internal fun resolveDownloadServiceStartMode(downloadId: String?): DownloadServiceStartMode =
+    if (downloadId.isNullOrBlank()) {
+        DownloadServiceStartMode.RECOVER_INTERRUPTED
+    } else {
+        DownloadServiceStartMode.OBSERVE_REQUESTED
+    }

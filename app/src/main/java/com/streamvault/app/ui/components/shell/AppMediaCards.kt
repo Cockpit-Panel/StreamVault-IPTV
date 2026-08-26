@@ -67,6 +67,7 @@ import com.streamvault.app.ui.design.AppMotion
 import com.streamvault.app.ui.design.FocusSpec
 import com.streamvault.app.ui.interaction.mouseClickable
 import com.streamvault.app.ui.interaction.rememberTvInteractionSounds
+import com.streamvault.app.ui.model.archivePlaybackCapability
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Episode
 import com.streamvault.domain.model.Movie
@@ -103,6 +104,7 @@ fun LiveChannelRowCard(
     val contentSpacing = if (isUltraCompact) 8.dp else 10.dp
     val badgeSpacing = if (isUltraCompact) 3.dp else 4.dp
     val nowMs by LiveChannelRowTicker.nowMs.collectAsStateWithLifecycle()
+    val hasUsableArchive = channel.archivePlaybackCapability().canBuildReplayCandidate
 
     Box(
         modifier = modifier
@@ -154,7 +156,7 @@ fun LiveChannelRowCard(
                         if (channel.isFavorite) {
                             StatusPill(label = stringResource(R.string.badge_saved), containerColor = AppColors.Warning, contentColor = Color.Black)
                         }
-                        if (channel.catchUpSupported) {
+                        if (hasUsableArchive) {
                             StatusPill(label = stringResource(R.string.badge_catch_up), containerColor = AppColors.Brand)
                         }
                     }
@@ -227,6 +229,7 @@ fun LiveChannelRowSurface(
     val favoriteLabel = stringResource(R.string.a11y_favorite)
     val catchUpLabel = stringResource(R.string.a11y_catch_up_available)
     val lockedLabel = stringResource(R.string.a11y_locked)
+    val hasUsableArchive = channel.archivePlaybackCapability().canBuildReplayCandidate
     val channelDescription = buildString {
         append(
             channel.number.takeIf { it > 0 }?.let {
@@ -241,7 +244,7 @@ fun LiveChannelRowSurface(
             append(". ")
             append(favoriteLabel)
         }
-        if (channel.catchUpSupported) {
+        if (hasUsableArchive) {
             append(". ")
             append(catchUpLabel)
         }
@@ -404,19 +407,17 @@ fun EpisodeRowCard(
                         .background(AppColors.SurfaceEmphasis),
                     contentAlignment = Alignment.Center
                 ) {
+                    Text(
+                        text = stringResource(R.string.label_episode, episode.episodeNumber),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AppColors.TextSecondary
+                    )
                     if (displayUrl != null) {
                         AsyncImage(
                             model = displayUrl,
                             contentDescription = episode.title,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        // Fallback: episode number label when no image is available
-                        Text(
-                            text = stringResource(R.string.label_episode, episode.episodeNumber),
-                            style = MaterialTheme.typography.titleMedium,
-                            color = AppColors.TextSecondary
                         )
                     }
                 }

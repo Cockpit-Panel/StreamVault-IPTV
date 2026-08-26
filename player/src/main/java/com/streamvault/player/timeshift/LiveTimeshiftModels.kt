@@ -1,8 +1,11 @@
 package com.streamvault.player.timeshift
 
+import com.streamvault.domain.model.TimeshiftBackendPreference
+
 data class TimeshiftConfig(
     val enabled: Boolean = false,
-    val depthMinutes: Int = 30
+    val depthMinutes: Int = 30,
+    val backendPreference: TimeshiftBackendPreference = TimeshiftBackendPreference.AUTOMATIC
 ) {
     val depthMs: Long = depthMinutes.coerceIn(15, 60) * 60_000L
 
@@ -21,6 +24,24 @@ enum class LiveTimeshiftBackend {
     NONE,
     DISK,
     MEMORY
+}
+
+internal fun resolveLiveTimeshiftBackend(
+    preference: TimeshiftBackendPreference,
+    snapshotStorageAvailable: Boolean,
+    diskStorageAvailable: Boolean
+): LiveTimeshiftBackend? {
+    if (!snapshotStorageAvailable) return null
+
+    return when (preference) {
+        TimeshiftBackendPreference.AUTOMATIC ->
+            if (diskStorageAvailable) LiveTimeshiftBackend.DISK else LiveTimeshiftBackend.MEMORY
+
+        TimeshiftBackendPreference.STORAGE ->
+            LiveTimeshiftBackend.DISK.takeIf { diskStorageAvailable }
+
+        TimeshiftBackendPreference.MEMORY -> LiveTimeshiftBackend.MEMORY
+    }
 }
 
 enum class LiveTimeshiftStatus {

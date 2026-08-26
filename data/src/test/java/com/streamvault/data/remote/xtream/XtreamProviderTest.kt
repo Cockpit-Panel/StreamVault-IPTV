@@ -1,6 +1,7 @@
 package com.streamvault.data.remote.xtream
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.streamvault.data.remote.http.HttpRequestProfile
 import com.streamvault.data.remote.dto.XtreamAuthResponse
 import com.streamvault.data.remote.dto.XtreamCategory
@@ -18,12 +19,144 @@ import com.streamvault.data.remote.dto.XtreamUserInfo
 import com.streamvault.data.remote.dto.XtreamVodInfo
 import com.streamvault.data.remote.dto.XtreamVodInfoResponse
 import com.streamvault.data.remote.dto.XtreamVodMovieData
+import com.streamvault.domain.model.Result
+import java.io.IOException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XtreamProviderTest {
+
+    @Test
+    fun `series compatibility fallback preserves cancellation and does not issue legacy request`() = runTest {
+        val requestedEndpoints = mutableListOf<String>()
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                seriesInfoLoader = { endpoint ->
+                    requestedEndpoints += endpoint.substringAfter("action=get_series_info")
+                    throw CancellationException("cancelled")
+                }
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+        var cancellation: CancellationException? = null
+
+        try {
+            provider.getSeriesInfo(91)
+        } catch (error: CancellationException) {
+            cancellation = error
+        }
+
+        assertThat(cancellation).isNotNull()
+        assertThat(requestedEndpoints).hasSize(1)
+        assertThat(requestedEndpoints.single()).contains("series_id=91")
+    }
+
+    @Test
+    fun `streaming facade preserves cancellation from its batch consumer`() = runTest {
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodStreams = listOf(vodStream("1"))
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+        var cancellation: CancellationException? = null
+
+        try {
+            provider.streamVodSummaries(batchSize = 1) {
+                throw CancellationException("cancelled while consuming batch")
+            }
+        } catch (error: CancellationException) {
+            cancellation = error
+        }
+
+        assertThat(cancellation).isNotNull()
+    }
+
+    @Test
+    fun `all public facade operations preserve cancellation`() = runTest {
+        val operations = listOf(
+            "authenticate" to CancellationTarget.AUTHENTICATE,
+            "live categories" to CancellationTarget.LIVE_CATEGORIES,
+            "live streams" to CancellationTarget.LIVE_STREAMS,
+            "VOD categories" to CancellationTarget.VOD_CATEGORIES,
+            "VOD streams" to CancellationTarget.VOD_STREAMS,
+            "VOD stream summaries" to CancellationTarget.VOD_STREAM_SUMMARIES,
+            "VOD details" to CancellationTarget.VOD_INFO,
+            "series categories" to CancellationTarget.SERIES_CATEGORIES,
+            "series list" to CancellationTarget.SERIES_LIST,
+            "series summaries" to CancellationTarget.SERIES_SUMMARIES,
+            "series details" to CancellationTarget.SERIES_INFO,
+            "short EPG" to CancellationTarget.SHORT_EPG,
+            "full EPG" to CancellationTarget.FULL_EPG
+        )
+
+        operations.forEach { (label, target) ->
+            val provider = XtreamProvider(
+                providerId = 42,
+                api = CancellationXtreamApiService(target),
+                serverUrl = "https://example.com",
+                username = "user",
+                password = "pass"
+            )
+            var cancellation: CancellationException? = null
+
+            try {
+                when (target) {
+                    CancellationTarget.AUTHENTICATE -> provider.authenticate()
+                    CancellationTarget.LIVE_CATEGORIES -> provider.getLiveCategories()
+                    CancellationTarget.LIVE_STREAMS -> provider.getLiveStreams()
+                    CancellationTarget.VOD_CATEGORIES -> provider.getVodCategories()
+                    CancellationTarget.VOD_STREAMS -> provider.getVodStreams()
+                    CancellationTarget.VOD_STREAM_SUMMARIES -> provider.streamVodSummaries { }
+                    CancellationTarget.VOD_INFO -> provider.getVodInfo(91)
+                    CancellationTarget.SERIES_CATEGORIES -> provider.getSeriesCategories()
+                    CancellationTarget.SERIES_LIST -> provider.getSeriesList()
+                    CancellationTarget.SERIES_SUMMARIES -> provider.streamSeriesSummaries { }
+                    CancellationTarget.SERIES_INFO -> provider.getSeriesInfo(91)
+                    CancellationTarget.SHORT_EPG -> provider.getShortEpg("91", 5)
+                    CancellationTarget.FULL_EPG -> provider.getEpg("91")
+                }
+            } catch (error: CancellationException) {
+                cancellation = error
+            }
+
+            assertWithMessage("$label must preserve cancellation")
+                .that(cancellation)
+                .isNotNull()
+        }
+    }
+
+    @Test
+    fun `genuine Xtream network failures remain typed facade errors`() = runTest {
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                authLoader = { throw IOException("connection reset") }
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        val result = provider.authenticate()
+
+        assertThat(result).isInstanceOf(Result.Error::class.java)
+        assertThat((result as Result.Error).exception).isInstanceOf(IOException::class.java)
+    }
 
     @Test
     fun `parseXtreamExpirationDate handles slash separated local date times`() {
@@ -449,6 +582,155 @@ class XtreamProviderTest {
     }
 
     @Test
+    fun `getVodStreams retries adult category prefetch after a transient failure`() = runBlocking {
+        var categoryRequests = 0
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodCategoriesLoader = {
+                    if (categoryRequests++ == 0) {
+                        throw XtreamNetworkException("category prefetch failed")
+                    }
+                    listOf(XtreamCategory(categoryId = "28", categoryName = "Adults", isAdult = true))
+                },
+                vodStreams = listOf(
+                    XtreamStream(
+                        name = "Movie",
+                        streamId = 321,
+                        categoryId = "28",
+                        categoryName = "Movies",
+                        containerExtension = "mp4"
+                    )
+                )
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        assertThat(provider.getVodStreams().getOrNull().orEmpty().single().isAdult).isFalse()
+        assertThat(provider.getVodStreams().getOrNull().orEmpty().single().isAdult).isTrue()
+        assertThat(categoryRequests).isEqualTo(2)
+    }
+
+    @Test
+    fun `getVodStreams caches a successful empty adult category response`() = runBlocking {
+        var categoryRequests = 0
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodCategoriesLoader = {
+                    categoryRequests++
+                    emptyList()
+                },
+                vodStreams = listOf(vodStream(categoryId = "28"))
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        provider.getVodStreams()
+        provider.getVodStreams()
+
+        assertThat(categoryRequests).isEqualTo(1)
+    }
+
+    @Test
+    fun `cancelled adult category prefetch is not cached`() = runTest {
+        val firstRequestStarted = CompletableDeferred<Unit>()
+        val keepFirstRequestOpen = CompletableDeferred<Unit>()
+        var categoryRequests = 0
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodCategoriesLoader = {
+                    if (categoryRequests++ == 0) {
+                        firstRequestStarted.complete(Unit)
+                        keepFirstRequestOpen.await()
+                    }
+                    listOf(XtreamCategory(categoryId = "28", categoryName = "Adults", isAdult = true))
+                },
+                vodStreams = listOf(vodStream(categoryId = "28"))
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        val firstLoad = async { provider.getVodStreams() }
+        firstRequestStarted.await()
+        firstLoad.cancelAndJoin()
+
+        val recoveredMovie = provider.getVodStreams().getOrNull().orEmpty().single()
+
+        assertThat(recoveredMovie.isAdult).isTrue()
+        assertThat(categoryRequests).isEqualTo(2)
+    }
+
+    @Test
+    fun `concurrent adult category prefetches are single flight`() = runTest {
+        val firstRequestStarted = CompletableDeferred<Unit>()
+        val releaseCategoryResponse = CompletableDeferred<Unit>()
+        var categoryRequests = 0
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodCategoriesLoader = {
+                    categoryRequests++
+                    firstRequestStarted.complete(Unit)
+                    releaseCategoryResponse.await()
+                    listOf(XtreamCategory(categoryId = "28", categoryName = "Adults", isAdult = true))
+                },
+                vodStreams = listOf(vodStream(categoryId = "28"))
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        val firstLoad = async { provider.getVodStreams() }
+        firstRequestStarted.await()
+        val secondLoad = async { provider.getVodStreams() }
+        runCurrent()
+
+        assertThat(categoryRequests).isEqualTo(1)
+
+        releaseCategoryResponse.complete(Unit)
+
+        assertThat(firstLoad.await().getOrNull().orEmpty().single().isAdult).isTrue()
+        assertThat(secondLoad.await().getOrNull().orEmpty().single().isAdult).isTrue()
+        assertThat(categoryRequests).isEqualTo(1)
+    }
+
+    @Test
+    fun `successful category refresh replaces cached adult category ids`() = runBlocking {
+        var categoryRequests = 0
+        val provider = XtreamProvider(
+            providerId = 42,
+            api = FakeXtreamApiService(
+                vodCategoriesLoader = {
+                    if (categoryRequests++ == 0) {
+                        listOf(XtreamCategory(categoryId = "28", categoryName = "Adults", isAdult = true))
+                    } else {
+                        emptyList()
+                    }
+                },
+                vodStreams = listOf(vodStream(categoryId = "28"))
+            ),
+            serverUrl = "https://example.com",
+            username = "user",
+            password = "pass"
+        )
+
+        assertThat(provider.getVodStreams().getOrNull().orEmpty().single().isAdult).isTrue()
+        provider.getVodCategories()
+
+        assertThat(provider.getVodStreams().getOrNull().orEmpty().single().isAdult).isFalse()
+        assertThat(categoryRequests).isEqualTo(2)
+    }
+
+    @Test
     fun `getVodStreams honors explicit adult flag from xtream payload`() = runBlocking {
         val provider = XtreamProvider(
             providerId = 42,
@@ -739,28 +1021,139 @@ class XtreamProviderTest {
         assertThat(series?.seasons?.first()?.episodes).isEmpty()
     }
 
+    private fun vodStream(categoryId: String): XtreamStream = XtreamStream(
+        name = "Movie",
+        streamId = 321,
+        categoryId = categoryId,
+        categoryName = "Movies",
+        containerExtension = "mp4"
+    )
+
+    private enum class CancellationTarget {
+        AUTHENTICATE,
+        LIVE_CATEGORIES,
+        LIVE_STREAMS,
+        VOD_CATEGORIES,
+        VOD_STREAMS,
+        VOD_STREAM_SUMMARIES,
+        VOD_INFO,
+        SERIES_CATEGORIES,
+        SERIES_LIST,
+        SERIES_SUMMARIES,
+        SERIES_INFO,
+        SHORT_EPG,
+        FULL_EPG
+    }
+
+    private class CancellationXtreamApiService(
+        private val target: CancellationTarget
+    ) : XtreamApiService {
+        private fun cancelIf(expected: CancellationTarget) {
+            if (target == expected) throw CancellationException("${expected.name} cancelled")
+        }
+
+        override suspend fun authenticate(endpoint: String, requestProfile: HttpRequestProfile): XtreamAuthResponse {
+            cancelIf(CancellationTarget.AUTHENTICATE)
+            return XtreamAuthResponse(XtreamUserInfo(auth = 1), XtreamServerInfo())
+        }
+
+        override suspend fun getLiveCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> {
+            cancelIf(CancellationTarget.LIVE_CATEGORIES)
+            return emptyList()
+        }
+
+        override suspend fun getLiveStreams(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamStream> {
+            cancelIf(CancellationTarget.LIVE_STREAMS)
+            return emptyList()
+        }
+
+        override suspend fun getVodCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> {
+            cancelIf(CancellationTarget.VOD_CATEGORIES)
+            return emptyList()
+        }
+
+        override suspend fun getVodStreams(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamStream> {
+            cancelIf(CancellationTarget.VOD_STREAMS)
+            return emptyList()
+        }
+
+        override suspend fun streamVodStreams(
+            endpoint: String,
+            requestProfile: HttpRequestProfile,
+            onItem: suspend (XtreamStream) -> Unit
+        ): Int {
+            cancelIf(CancellationTarget.VOD_STREAM_SUMMARIES)
+            return super.streamVodStreams(endpoint, requestProfile, onItem)
+        }
+
+        override suspend fun getVodInfo(endpoint: String, requestProfile: HttpRequestProfile): XtreamVodInfoResponse {
+            cancelIf(CancellationTarget.VOD_INFO)
+            return XtreamVodInfoResponse()
+        }
+
+        override suspend fun getSeriesCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> {
+            cancelIf(CancellationTarget.SERIES_CATEGORIES)
+            return emptyList()
+        }
+
+        override suspend fun getSeriesList(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamSeriesItem> {
+            cancelIf(CancellationTarget.SERIES_LIST)
+            return emptyList()
+        }
+
+        override suspend fun streamSeriesList(
+            endpoint: String,
+            requestProfile: HttpRequestProfile,
+            onItem: suspend (XtreamSeriesItem) -> Unit
+        ): Int {
+            cancelIf(CancellationTarget.SERIES_SUMMARIES)
+            return super.streamSeriesList(endpoint, requestProfile, onItem)
+        }
+
+        override suspend fun getSeriesInfo(endpoint: String, requestProfile: HttpRequestProfile): XtreamSeriesInfoResponse {
+            cancelIf(CancellationTarget.SERIES_INFO)
+            return XtreamSeriesInfoResponse()
+        }
+
+        override suspend fun getShortEpg(endpoint: String, requestProfile: HttpRequestProfile): XtreamEpgResponse {
+            cancelIf(CancellationTarget.SHORT_EPG)
+            return XtreamEpgResponse()
+        }
+
+        override suspend fun getFullEpg(endpoint: String, requestProfile: HttpRequestProfile): XtreamEpgResponse {
+            cancelIf(CancellationTarget.FULL_EPG)
+            return XtreamEpgResponse()
+        }
+    }
+
     private class FakeXtreamApiService(
         private val authResponse: XtreamAuthResponse = XtreamAuthResponse(XtreamUserInfo(auth = 1), XtreamServerInfo()),
+        private val authLoader: (suspend () -> XtreamAuthResponse)? = null,
         private val liveCategories: List<XtreamCategory> = emptyList(),
+        private val liveCategoriesLoader: (suspend () -> List<XtreamCategory>)? = null,
         private val liveStreams: List<XtreamStream> = emptyList(),
         private val vodCategories: List<XtreamCategory> = emptyList(),
+        private val vodCategoriesLoader: (suspend () -> List<XtreamCategory>)? = null,
         private val vodStreams: List<XtreamStream> = emptyList(),
         private val vodInfo: XtreamVodInfoResponse = XtreamVodInfoResponse(),
         private val seriesCategories: List<XtreamCategory> = emptyList(),
         private val seriesList: List<XtreamSeriesItem> = emptyList(),
         private val seriesInfo: XtreamSeriesInfoResponse = XtreamSeriesInfoResponse(),
+        private val seriesInfoLoader: (suspend (String) -> XtreamSeriesInfoResponse)? = null,
         private val shortEpg: XtreamEpgResponse = XtreamEpgResponse(),
         private val fullEpg: XtreamEpgResponse = XtreamEpgResponse()
     ) : XtreamApiService {
         override suspend fun authenticate(endpoint: String, requestProfile: HttpRequestProfile): XtreamAuthResponse {
-            return authResponse
+            return authLoader?.invoke() ?: authResponse
         }
 
-        override suspend fun getLiveCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> = liveCategories
+        override suspend fun getLiveCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> =
+            liveCategoriesLoader?.invoke() ?: liveCategories
 
         override suspend fun getLiveStreams(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamStream> = liveStreams
 
-        override suspend fun getVodCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> = vodCategories
+        override suspend fun getVodCategories(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamCategory> =
+            vodCategoriesLoader?.invoke() ?: vodCategories
 
         override suspend fun getVodStreams(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamStream> = vodStreams
 
@@ -770,7 +1163,8 @@ class XtreamProviderTest {
 
         override suspend fun getSeriesList(endpoint: String, requestProfile: HttpRequestProfile): List<XtreamSeriesItem> = seriesList
 
-        override suspend fun getSeriesInfo(endpoint: String, requestProfile: HttpRequestProfile): XtreamSeriesInfoResponse = seriesInfo
+        override suspend fun getSeriesInfo(endpoint: String, requestProfile: HttpRequestProfile): XtreamSeriesInfoResponse =
+            seriesInfoLoader?.invoke(endpoint) ?: seriesInfo
 
         override suspend fun getShortEpg(endpoint: String, requestProfile: HttpRequestProfile): XtreamEpgResponse = shortEpg
 

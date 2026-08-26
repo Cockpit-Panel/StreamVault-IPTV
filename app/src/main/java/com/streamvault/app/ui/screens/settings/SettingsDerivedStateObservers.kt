@@ -8,7 +8,7 @@ import com.streamvault.data.local.dao.ProgramDao
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.CategorySortMode
 import com.streamvault.domain.model.ContentType
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.VodSyncMode
 import com.streamvault.domain.repository.CategoryRepository
@@ -169,6 +169,13 @@ private fun buildCapabilitySummary(application: Application, provider: Provider)
                 "Portal catalog with MAC auth and on-demand guide/playback resolution."
             }
         }
+        ProviderType.JELLYFIN -> {
+            if (provider.epgUrl.isNotBlank()) {
+                "Jellyfin catalog with direct streaming, optional XMLTV import."
+            } else {
+                "Jellyfin catalog with direct streaming and guide data from the server."
+            }
+        }
     }
 }
 
@@ -176,6 +183,7 @@ private fun Provider.sourceLabel(): String = when (type) {
     ProviderType.XTREAM_CODES -> "Xtream Codes"
     ProviderType.M3U -> "M3U Playlist"
     ProviderType.STALKER_PORTAL -> "Stalker/MAG Portal"
+    ProviderType.JELLYFIN -> "Jellyfin"
 }
 
 private fun Provider.expirySummary(): String {
@@ -205,6 +213,13 @@ private fun Provider.archiveSummary(): String = when (type) {
             "Stalker replay depends on portal support; guide falls back to portal data."
         } else {
             "Stalker replay depends on portal support with optional XMLTV coverage."
+        }
+    }
+    ProviderType.JELLYFIN -> {
+        if (epgUrl.isBlank()) {
+            "Jellyfin replay depends on server guide data."
+        } else {
+            "Jellyfin replay combines server guide data with optional XMLTV coverage."
         }
     }
 }

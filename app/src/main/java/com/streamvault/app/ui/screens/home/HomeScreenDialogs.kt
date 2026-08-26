@@ -21,15 +21,21 @@ import com.streamvault.app.ui.components.dialogs.PremiumDialog
 import com.streamvault.app.ui.components.dialogs.PremiumDialogActionButton
 import com.streamvault.app.ui.components.dialogs.PremiumDialogFooterButton
 import com.streamvault.app.ui.components.dialogs.RenameGroupDialog
+import com.streamvault.app.ui.components.dialogs.M3uCategoryOrganizerDialog
+import com.streamvault.app.ui.components.dialogs.M3uCategorySeriesAssignmentDialog
+import com.streamvault.app.ui.components.dialogs.M3uSeriesAssignmentDialog
 import com.streamvault.app.ui.screens.multiview.MultiViewPlannerDialog
 import com.streamvault.app.ui.screens.multiview.MultiViewViewModel
 import com.streamvault.domain.model.ActiveLiveSource
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.Channel
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.VirtualCategoryIds
 import com.streamvault.domain.repository.ChannelRepository
+import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.repository.M3uCategoryItem
+import com.streamvault.domain.repository.M3uClassificationTarget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -61,6 +67,10 @@ internal fun HomeDialogsHost(
     scope: CoroutineScope
 ) {
     val context = LocalContext.current
+    var pendingM3uSeriesChannel by remember { mutableStateOf<Channel?>(null) }
+    var pendingM3uCategory by remember { mutableStateOf<Category?>(null) }
+    var pendingM3uSeriesCategory by remember { mutableStateOf<Category?>(null) }
+    var pendingM3uSeriesItems by remember { mutableStateOf<List<M3uCategoryItem>?>(null) }
 
     if (showPinDialog) {
         PinDialog(
@@ -143,9 +153,10 @@ internal fun HomeDialogsHost(
             onHide = if (!isCategoryLocked && !category.isVirtual && category.id != ChannelRepository.ALL_CHANNELS_ID) {
                 { viewModel.hideCategory(category) }
             } else null,
-            onHideFromLiveTV = if (!isCategoryLocked && category.id in setOf(VirtualCategoryIds.RECENT, ChannelRepository.ALL_CHANNELS_ID)) {
+            onHideFromLiveTV = if (!isCategoryLocked && category.id in setOf(VirtualCategoryIds.FAVORITES, VirtualCategoryIds.RECENT, ChannelRepository.ALL_CHANNELS_ID)) {
                 {
                     when (category.id) {
+                        VirtualCategoryIds.FAVORITES -> viewModel.setShowFavoritesCategory(false)
                         VirtualCategoryIds.RECENT -> viewModel.setShowRecentChannelsCategory(false)
                         ChannelRepository.ALL_CHANNELS_ID -> viewModel.setShowAllChannelsCategory(false)
                     }
@@ -171,6 +182,18 @@ internal fun HomeDialogsHost(
             } else null,
             onReorderChannels = if (!isCategoryLocked && category.isVirtual && category.id != VirtualCategoryIds.RECENT) {
                 { viewModel.enterChannelReorderMode(category) }
+            } else null,
+            onOrganizeM3u = if (
+                !isCategoryLocked &&
+                    !uiState.isCombinedLiveSource &&
+                    uiState.provider?.type == ProviderType.M3U &&
+                    category.type == com.streamvault.domain.model.ContentType.LIVE &&
+                    !category.isVirtual
+            ) {
+                {
+                    pendingM3uCategory = category
+                    viewModel.dismissCategoryOptions()
+                }
             } else null
         )
     }
@@ -256,7 +279,67 @@ internal fun HomeDialogsHost(
                     viewModel.onDismissDialog()
                 }
             } else null,
-            onHideChannel = { viewModel.hideChannel(channel) }
+            onHideChannel = { viewModel.hideChannel(channel) },
+            onMoveToMovies = if (!uiState.isCombinedLiveSource && uiState.provider?.type == ProviderType.M3U) {
+                { viewModel.moveM3uChannelToMovies(channel) }
+            } else null,
+            onMoveToSeries = if (!uiState.isCombinedLiveSource && uiState.provider?.type == ProviderType.M3U) {
+                {
+                    pendingM3uSeriesChannel = channel
+                    viewModel.onDismissDialog()
+                }
+            } else null
+        )
+    }
+
+    pendingM3uSeriesChannel?.let { channel ->
+        M3uSeriesAssignmentDialog(
+            initialTitle = channel.name,
+            onDismiss = { pendingM3uSeriesChannel = null },
+            onConfirm = { assignment ->
+                pendingM3uSeriesChannel = null
+                viewModel.moveM3uChannelToSeries(channel, assignment)
+            }
+        )
+    }
+
+    pendingM3uCategory?.let { category ->
+        M3uCategoryOrganizerDialog(
+            categoryName = category.name,
+            onDismiss = { pendingM3uCategory = null },
+            onTargetSelected = { target ->
+                if (target == M3uClassificationTarget.SERIES) {
+                    pendingM3uCategory = null
+                    viewModel.loadM3uCategoryItems(category) { items ->
+                        pendingM3uSeriesCategory = category
+                        pendingM3uSeriesItems = items
+                    }
+                } else {
+                    pendingM3uCategory = null
+                    viewModel.organizeM3uCategory(category, target)
+                }
+            }
+        )
+    }
+
+    if (pendingM3uSeriesCategory != null && pendingM3uSeriesItems != null) {
+        val category = pendingM3uSeriesCategory!!
+        M3uCategorySeriesAssignmentDialog(
+            categoryName = category.name,
+            items = pendingM3uSeriesItems!!,
+            onDismiss = {
+                pendingM3uSeriesCategory = null
+                pendingM3uSeriesItems = null
+            },
+            onConfirm = { assignments ->
+                pendingM3uSeriesCategory = null
+                pendingM3uSeriesItems = null
+                viewModel.organizeM3uCategory(
+                    category = category,
+                    target = M3uClassificationTarget.SERIES,
+                    seriesAssignments = assignments
+                )
+            }
         )
     }
 

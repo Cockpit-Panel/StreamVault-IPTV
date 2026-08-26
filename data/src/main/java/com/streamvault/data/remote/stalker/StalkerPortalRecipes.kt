@@ -15,7 +15,6 @@ internal data class StalkerMagPresetSpec(
     val imageVersion: String,
     val hwVersion: String,
     val apiSignature: String,
-    val metricsJson: String,
     val localization: String,
     val requireStrictIdentity: Boolean = false
 )
@@ -31,17 +30,17 @@ internal data class StalkerRecipeSpec(
     val endpointPreference: StalkerEndpointPreference = StalkerEndpointPreference.AUTO,
     val preferLocalizationBeforeProfile: Boolean = false,
     val cookieMode: StalkerCookieMode = StalkerCookieMode.NONE,
-    val playbackBackendHint: StalkerPlaybackBackendHint = StalkerPlaybackBackendHint.AUTO
+    val playbackBackendHint: StalkerPlaybackBackendHint = StalkerPlaybackBackendHint.AUTO,
+    val compatibilityProfileId: String = StalkerCompatibilityRegistry.idForLegacyPreset(magPreset)
 )
 
 internal fun stalkerMagPresetSpec(preset: StalkerMagPreset): StalkerMagPresetSpec = when (preset) {
     StalkerMagPreset.GENERIC_SAFE -> StalkerMagPresetSpec(
         defaultDeviceProfile = "MAG250",
-        versionString = "ImageDescription: 0.2.18-r23-250; ImageDate: Wed Oct 31 15:22:54 EEST 2018; PORTAL version: 5.6.2; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x58c",
+        versionString = "ImageDescription: 0.2.18-r19-pub-250; ImageDate: Mon Jun 12 11:04:49 EEST 2017; PORTAL version: 5.6.10; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x23",
         imageVersion = "218",
         hwVersion = "1.7-BD-00",
         apiSignature = "262",
-        metricsJson = "{}",
         localization = "en_US.utf8"
     )
 
@@ -51,17 +50,15 @@ internal fun stalkerMagPresetSpec(preset: StalkerMagPreset): StalkerMagPresetSpe
         imageVersion = "216",
         hwVersion = "1.7-BD-00",
         apiSignature = "254",
-        metricsJson = """{"mac":"legacy","sn":"legacy"}""",
         localization = "en_GB.utf8"
     )
 
     StalkerMagPreset.MAG254_STRICT -> StalkerMagPresetSpec(
         defaultDeviceProfile = "MAG254",
         versionString = "ImageDescription: 0.2.18-r23-254; ImageDate: Thu Nov 1 11:14:12 EET 2018; PORTAL version: 5.6.8; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x58c",
-        imageVersion = "254",
+        imageVersion = "218",
         hwVersion = "2.6-IB-00",
         apiSignature = "263",
-        metricsJson = """{"hw":"strict","video_out":"hdmi"}""",
         localization = "en_US.utf8",
         requireStrictIdentity = true
     )
@@ -72,7 +69,6 @@ internal fun stalkerMagPresetSpec(preset: StalkerMagPreset): StalkerMagPresetSpe
         imageVersion = "221",
         hwVersion = "2.6-IB-00",
         apiSignature = "270",
-        metricsJson = """{"platform":"ministra","video_out":"hdmi","num_banks":2}""",
         localization = "en_US.utf8",
         requireStrictIdentity = true
     )

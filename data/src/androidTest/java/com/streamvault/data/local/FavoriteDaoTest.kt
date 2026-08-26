@@ -189,7 +189,6 @@ class FavoriteDaoTest {
     private fun provider(id: Long, name: String) = ProviderEntity(
         id = id,
         name = name,
-        type = ProviderType.M3U,
-        serverUrl = "https://$name.example.com"
+        type = ProviderType.M3U
     )
 }

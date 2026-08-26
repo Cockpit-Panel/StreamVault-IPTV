@@ -149,6 +149,22 @@ For `playback.prepare` and `cast.rewriteUrl`, plugins should set
 `handled=false` when the URL is not theirs. StreamVault then continues with other
 enabled plugins or the original URL.
 
+`MSG_REWRITE_CAST_URL` is Cast-specific. StreamVault sends the stream context that
+made direct receiver playback unsafe:
+
+- `input_url`: original media URL.
+- `stream_type`: MIME/stream hint when known.
+- `headers_json`: JSON object with HTTP headers needed by local playback.
+- `user_agent`: custom user agent needed by local playback.
+- `allow_invalid_ssl`: whether local playback accepted invalid TLS certificates.
+- `proxy_host` and optional `proxy_port`: proxy settings used by local playback.
+- `cast_rewrite_reason`: one of `LOCAL_URI`, `CUSTOM_HEADERS`,
+  `CUSTOM_USER_AGENT`, `PROXY`, or `INVALID_SSL`.
+
+Plugins should return a receiver-reachable `output_url` that no longer requires
+device-local URLs, app-only headers, app-only user agent handling, app proxy
+settings, or invalid TLS handling on the Cast receiver.
+
 `MSG_PREPARE_PLAYBACK` may also enrich the stream that StreamVault sends to the
 player. When `handled=true` and `success=true`, the plugin can return:
 

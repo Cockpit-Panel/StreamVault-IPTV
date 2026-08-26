@@ -3,17 +3,14 @@
   "device": {
     "portalUrl": "https://portal.example.com/c",
     "macAddress": "00:1A:79:AC:10:04",
-    "authMode": "AUTO",
+    "authMode": "MAC_PLUS_CREDENTIALS",
     "username": "archive",
     "password": "secret"
   },
   "responses": [
     { "action": "handshake", "body": "{\"js\":{\"token\":\"token-archive-fallback-a\"}}" },
     { "action": "do_auth", "method": "POST", "body": "{\"js\":{\"status\":1}}" },
-    { "action": "get_profile", "body": "" },
-    { "action": "get_profile", "body": "" },
-    { "action": "handshake", "body": "{\"js\":{\"token\":\"token-archive-fallback-b\"}}" },
-    { "action": "do_auth", "method": "POST", "body": "{\"js\":{\"status\":1}}" },
+    { "action": "get_profile", "code": 500, "body": "{}" },
     { "action": "get_profile", "body": "{\"js\":{\"id\":\"504\",\"name\":\"Archive Fallback\",\"status\":\"1\",\"auth_access\":true}}" },
     { "action": "get_main_info", "body": "{\"js\":{\"id\":\"504\",\"name\":\"Archive Fallback\",\"status\":\"1\",\"auth_access\":true}}" },
     { "action": "get_localization", "body": "{\"js\":{\"lang\":\"en\",\"timezone\":\"UTC\"}}" },
@@ -28,7 +25,7 @@
     "bootstrapRecipe": "PORTAL_PREFERRED",
     "recipeEvidence": ["recipe:PORTAL_PREFERRED", "preset:MAG254_STRICT", "fallback_recipe", "rediscovery_attempted"],
     "bootstrapEvidence": ["handshake", "do_auth", "get_profile", "get_account_info", "get_localization"],
-    "requestOrder": ["handshake", "do_auth", "get_profile", "get_profile", "handshake", "do_auth", "get_profile", "get_main_info", "get_localization", "get_all_channels", "create_link"],
+    "requestOrder": ["handshake", "do_auth", "get_profile", "get_profile", "get_main_info", "get_localization", "get_all_channels", "create_link"],
     "endpointPreference": "SERVER_LOAD",
     "archiveRequiresBootstrapPrep": true,
     "archiveViaCreateLink": true,

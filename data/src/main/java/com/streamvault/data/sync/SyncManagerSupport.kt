@@ -7,12 +7,66 @@ import com.streamvault.data.remote.dto.XtreamCategory
 import com.streamvault.data.util.AdultContentClassifier
 import com.streamvault.domain.model.ContentType
 import java.io.InputStream
+import java.nio.charset.Charset
 import java.security.MessageDigest
 
 internal data class SyncOutcome(
     val partial: Boolean = false,
-    val warnings: List<String> = emptyList()
+    val warnings: List<String> = emptyList(),
+    /** Number of catalog rows accepted by the staging/activation path during this execution. */
+    val stagedMutations: Int = 0,
+    /** Durable work that was handed off before this plan returned. */
+    val continuationWork: List<SyncContinuation> = emptyList(),
+    /** What happened to the active catalog; executors commit before returning this receipt. */
+    val activation: SyncActivation = SyncActivation.NO_CATALOG_CHANGE
 )
+
+internal data class SyncContinuation(
+    val operation: SyncContinuationOperation,
+    val section: ContentType? = null,
+    val reason: String,
+    val force: Boolean = false
+)
+
+internal enum class SyncContinuationOperation {
+    INDEX_CATALOG,
+    REFRESH_GUIDE
+}
+
+internal enum class SyncActivation {
+    /** A staged snapshot (or safe staged subset) was promoted before the executor returned. */
+    ACTIVATED_CATALOG,
+    /** The operation completed successfully without changing catalog activation. */
+    NO_CATALOG_CHANGE,
+    /** Existing active rows were deliberately retained because a replacement was not safe. */
+    PRESERVED_ACTIVE_CATALOG,
+    /** No replacement was activated; declared durable work must finish the requested section. */
+    DEFERRED_TO_FOLLOW_UP
+}
+
+internal object SyncActivationPolicy {
+    fun validate(outcome: SyncOutcome): SyncOutcome {
+        require(outcome.stagedMutations >= 0) {
+            "stagedMutations must be non-negative"
+        }
+        if (outcome.activation == SyncActivation.DEFERRED_TO_FOLLOW_UP) {
+            require(outcome.continuationWork.isNotEmpty()) {
+                "DEFERRED_TO_FOLLOW_UP outcomes must declare continuation work"
+            }
+        }
+        if (outcome.stagedMutations > 0) {
+            require(outcome.activation == SyncActivation.ACTIVATED_CATALOG) {
+                "staged mutations must be reported as an activated catalog"
+            }
+        }
+        return outcome
+    }
+}
+
+internal val SyncOutcome.requiresPartialActivation: Boolean
+    get() = partial ||
+        activation == SyncActivation.PRESERVED_ACTIVE_CATALOG ||
+        activation == SyncActivation.DEFERRED_TO_FOLLOW_UP
 
 internal sealed interface CatalogStrategyResult<out T> {
     val strategyName: String
@@ -103,7 +157,9 @@ internal data class M3uImportStats(
 internal data class StreamedPlaylist(
     val inputStream: InputStream,
     val contentEncoding: String? = null,
-    val sourceName: String? = null
+    val contentLength: Long? = null,
+    val sourceName: String? = null,
+    val declaredCharset: Charset? = null
 )
 
 internal class FallbackCategoryCollector(
@@ -182,6 +238,10 @@ internal class CategoryAccumulator(
 
     fun idFor(name: String): Long {
         return categoryIds.getOrPut(name) { stableId(providerId, type, name, hasher) }
+    }
+
+    fun register(name: String, categoryId: Long) {
+        categoryIds.putIfAbsent(name, categoryId)
     }
 
     fun entities(): List<CategoryEntity> {

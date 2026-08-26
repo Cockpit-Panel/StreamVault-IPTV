@@ -72,8 +72,6 @@ class ProviderDaoTest {
         id = id,
         name = name,
         type = ProviderType.M3U,
-        serverUrl = "https://example.com/$id.m3u",
-        m3uUrl = "https://example.com/$id.m3u",
         isActive = isActive
     )
 }

@@ -17,10 +17,12 @@ import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.PlaybackHistory
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.VodCategoryHydrationRequest
 import com.streamvault.domain.repository.FavoriteRepository
 import com.streamvault.domain.repository.MovieRepository
 import com.streamvault.domain.repository.PlaybackHistoryRepository
 import com.streamvault.domain.repository.ProviderRepository
+import com.streamvault.domain.repository.M3uClassificationRepository
 import com.streamvault.domain.usecase.ContinueWatchingResult
 import com.streamvault.domain.usecase.ContinueWatchingScope
 import com.streamvault.domain.usecase.GetContinueWatching
@@ -29,9 +31,7 @@ import com.streamvault.app.ui.screens.vod.createVodGroup
 import com.streamvault.app.ui.screens.vod.incrementVodSelectedCategoryLoadLimit
 import com.streamvault.app.ui.screens.vod.buildVodPreviewCatalog
 import com.streamvault.app.ui.screens.vod.buildVodSearchCatalog
-import com.streamvault.app.ui.screens.vod.loadVodDialogSelection
 import com.streamvault.app.ui.screens.vod.loadVodReorderItems
-import com.streamvault.app.ui.screens.vod.markVodFavorites
 import com.streamvault.app.ui.screens.vod.matchesVodGroupMembership
 import com.streamvault.app.ui.screens.vod.moveVodItemDown
 import com.streamvault.app.ui.screens.vod.moveVodItemUp
@@ -60,6 +60,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -81,7 +82,8 @@ class MoviesViewModel @Inject constructor(
     private val favoriteRepository: FavoriteRepository,
     private val getContinueWatching: GetContinueWatching,
     private val getCustomCategories: GetCustomCategories,
-    private val parentalControlManager: ParentalControlManager
+    private val parentalControlManager: ParentalControlManager,
+    private val m3uClassificationRepository: M3uClassificationRepository
 ) : ViewModel() {
     private companion object {
         const val UNCATEGORIZED = "Uncategorized"
@@ -105,6 +107,8 @@ class MoviesViewModel @Inject constructor(
     private val _selectedLibrarySortBy = MutableStateFlow(LibrarySortBy.LIBRARY)
     private val _previewBatchSize = MutableStateFlow(INITIAL_PREVIEW_BATCH_SIZE)
     private var activeProviderId: Long? = null
+    private var remotePageRequestInFlight = false
+    private var initialRemoteRequestInFlight = false
 
     private data class PreviewLoadResult(
         val snapshot: MovieCatalogSnapshot,
@@ -130,6 +134,7 @@ class MoviesViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         hasActiveProvider = provider != null,
+                        isM3uProvider = provider?.type == ProviderType.M3U,
                         isLoading = if (provider == null) false else it.isLoading,
                         isLoadingSelectedCategory = if (provider == null) false else it.isLoadingSelectedCategory,
                         isLoadingPreviewRows = if (provider == null) false else it.isLoadingPreviewRows
@@ -214,7 +219,11 @@ class MoviesViewModel @Inject constructor(
                                     categoryIds = categoryIds,
                                     limitPerCategory = VodBrowseDefaults.PREVIEW_ROW_LIMIT
                                 ).map { providerPreviews ->
-                                    val isLoading = categoryIds.all { id -> providerPreviews[id].isNullOrEmpty() }
+                                    // The repository includes an entry for every category whose
+                                    // preview query is active. An empty list is a valid result (and
+                                    // can also be populated later by Room); it must not keep the
+                                    // category paginator permanently locked in its loading state.
+                                    val isLoading = categoryIds.none(providerPreviews::containsKey)
                                     val hasMore = params.providerCategories.size > batchSize
                                     PreviewLoadResult(buildPreviewCatalog(params, providerPreviews), isLoading, hasMore)
                                 }
@@ -305,17 +314,44 @@ class MoviesViewModel @Inject constructor(
                 .filterNotNull()
                 .flatMapLatest { provider ->
                     combine(
+                        movieRepository.getCategoryItemCounts(provider.id),
+                        movieRepository.getLibraryCount(provider.id),
+                        movieRepository.getCategories(provider.id)
+                    ) { counts, libraryCount, categories ->
+                        Triple(counts, libraryCount, categories)
+                    }
+                }
+                .collectLatest { (counts, libraryCount, categories) ->
+                    val countsByName = categories.associate { category ->
+                        category.name to (counts[category.id] ?: 0)
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            categoryCounts = state.categoryCounts + countsByName,
+                            libraryCount = libraryCount
+                        )
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            providerRepository.getActiveProvider()
+                .filterNotNull()
+                .flatMapLatest { provider ->
+                    combine(
                         favoriteRepository.getAllFavorites(provider.id, ContentType.MOVIE),
                         getCustomCategories(provider.id, ContentType.MOVIE),
                         movieRepository.getCategories(provider.id),
+                        movieRepository.getCategoryItemCounts(provider.id),
                         preferencesRepository.getHiddenCategoryIds(provider.id, ContentType.MOVIE),
                         preferencesRepository.getCategorySortMode(provider.id, ContentType.MOVIE)
                     ) { values ->
                         val allFavorites = values[0] as List<com.streamvault.domain.model.Favorite>
                         val customCategories = values[1] as List<Category>
                         val providerCategories = values[2] as List<Category>
-                        val hiddenCategoryIds = values[3] as Set<Long>
-                        val sortMode = values[4] as CategorySortMode
+                        val providerCategoryCounts = values[3] as Map<Long, Int>
+                        val hiddenCategoryIds = values[4] as Set<Long>
+                        val sortMode = values[5] as CategorySortMode
                         MovieCategorySelectionDependencies(
                             allFavorites = allFavorites,
                             customCategories = customCategories,
@@ -324,6 +360,7 @@ class MoviesViewModel @Inject constructor(
                                 hiddenCategoryIds = hiddenCategoryIds,
                                 sortMode = sortMode
                             ),
+                            providerCategoryCounts = providerCategoryCounts,
                             hiddenCategoryIds = hiddenCategoryIds
                         )
                     }.combine(
@@ -353,10 +390,16 @@ class MoviesViewModel @Inject constructor(
                             allFavorites = dependencies.allFavorites,
                             customCategories = dependencies.customCategories,
                             providerCategories = dependencies.providerCategories,
+                            selectedProviderCategoryHasItems = dependencies.providerCategories
+                                .firstOrNull { it.name == selection.selectedCategory }
+                                ?.id
+                                ?.let { categoryId -> (dependencies.providerCategoryCounts[categoryId] ?: 0) > 0 }
+                                ?: false,
                             hiddenCategoryIds = dependencies.hiddenCategoryIds
                         )
                     }
                 }
+                .distinctUntilChanged()
                 .flatMapLatest { request ->
                     flow {
                         emit(loadSelectedCategoryItems(request))
@@ -369,7 +412,7 @@ class MoviesViewModel @Inject constructor(
                             selectedCategoryLoadedCount = snapshot.loadedCount,
                             selectedCategoryTotalCount = snapshot.totalCount,
                             canLoadMoreSelectedCategory = snapshot.canLoadMore,
-                            isLoadingSelectedCategory = false
+                            isLoadingSelectedCategory = initialRemoteRequestInFlight && snapshot.items.isEmpty()
                         )
                     }
                 }
@@ -444,32 +487,20 @@ class MoviesViewModel @Inject constructor(
                         emptyList()
                     } else {
                         movieRepository.getMoviesByIds(favoriteIds).first().orderByIds(favoriteIds)
-                    }.let { movies ->
-                        markVodFavorites(movies, globalFavoriteIds, Movie::id) { movie, isFavorite ->
-                            movie.copy(isFavorite = isFavorite)
-                        }
-                    }
+                    }.markMovieFavorites(globalFavoriteIds)
                     val continuePreview = if (continueIds.isEmpty()) {
                         emptyList()
                     } else {
                         movieRepository.getMoviesByIds(continueIds).first().orderByIds(continueIds)
-                    }.let { movies ->
-                        markVodFavorites(movies, globalFavoriteIds, Movie::id) { movie, isFavorite ->
-                            movie.copy(isFavorite = isFavorite)
-                        }
-                    }
+                    }.markMovieFavorites(globalFavoriteIds)
 
                     _uiState.update {
                         it.copy(
                             libraryLensRows = mapOf(
                                 MovieLibraryLens.FAVORITES to favoritePreview,
                                 MovieLibraryLens.CONTINUE to continuePreview,
-                                MovieLibraryLens.TOP_RATED to markVodFavorites(dependencies.topRated, globalFavoriteIds, Movie::id) { movie, isFavorite ->
-                                    movie.copy(isFavorite = isFavorite)
-                                },
-                                MovieLibraryLens.FRESH to markVodFavorites(dependencies.fresh, globalFavoriteIds, Movie::id) { movie, isFavorite ->
-                                    movie.copy(isFavorite = isFavorite)
-                                }
+                                MovieLibraryLens.TOP_RATED to dependencies.topRated.markMovieFavorites(globalFavoriteIds),
+                                MovieLibraryLens.FRESH to dependencies.fresh.markMovieFavorites(globalFavoriteIds)
                             ).filterValues { rows -> rows.isNotEmpty() }
                         )
                     }
@@ -529,6 +560,45 @@ class MoviesViewModel @Inject constructor(
                 isLoadingSelectedCategory = isLoadingSelectedCategory
             )
         }
+        val providerId = activeProviderId ?: return
+        val categoryId = resolveProviderCategoryId(categoryName) ?: return
+        initialRemoteRequestInFlight = true
+        _uiState.update { it.copy(isLoadingSelectedCategory = true) }
+        viewModelScope.launch {
+            try {
+                movieRepository.requestCategoryHydration(
+                    providerId,
+                    categoryId,
+                    VodCategoryHydrationRequest.OPEN
+                )
+            } finally {
+                initialRemoteRequestInFlight = false
+                _uiState.update { it.copy(isLoadingSelectedCategory = false) }
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                providerRepository.getActiveProvider(),
+                _uiState.map { state ->
+                    state.providerCategories.firstOrNull { it.name == state.selectedCategory }?.id
+                }.distinctUntilChanged()
+            ) { provider, categoryId -> provider?.id to categoryId }
+                .flatMapLatest { (providerId, categoryId) ->
+                    if (providerId == null || categoryId == null) flowOf(null)
+                    else movieRepository.observeCategoryHydration(providerId, categoryId)
+                }
+                .collectLatest { hydration ->
+                    hydration ?: return@collectLatest
+                    _uiState.update {
+                        it.copy(
+                            isLoadingSelectedCategory = hydration.isInitialLoading || initialRemoteRequestInFlight,
+                            isLoadingMoreSelectedCategory = hydration.isAppending || remotePageRequestInFlight,
+                            selectedCategoryRawPageSize = hydration.pageSize
+                        )
+                    }
+                }
+        }
     }
 
     fun selectFullLibraryBrowse() {
@@ -536,10 +606,30 @@ class MoviesViewModel @Inject constructor(
     }
 
     fun loadMoreSelectedCategory() {
+        val needsRemotePage = _uiState.value.selectedCategoryLoadedCount >=
+            _uiState.value.selectedCategoryTotalCount
         incrementVodSelectedCategoryLoadLimit(
             canLoadMore = _uiState.value.canLoadMoreSelectedCategory,
             selectedCategoryLoadLimit = _selectedCategoryLoadLimit
         )
+        if (!needsRemotePage) return
+        val providerId = activeProviderId ?: return
+        val categoryId = resolveProviderCategoryId(_uiState.value.selectedCategory) ?: return
+        if (remotePageRequestInFlight) return
+        remotePageRequestInFlight = true
+        _uiState.update { it.copy(isLoadingMoreSelectedCategory = true) }
+        viewModelScope.launch {
+            try {
+                movieRepository.requestCategoryHydration(
+                    providerId,
+                    categoryId,
+                    VodCategoryHydrationRequest.NEXT_PAGE
+                )
+            } finally {
+                remotePageRequestInFlight = false
+                _uiState.update { it.copy(isLoadingMoreSelectedCategory = false) }
+            }
+        }
     }
 
     fun loadMorePreviewRows() {
@@ -630,21 +720,19 @@ class MoviesViewModel @Inject constructor(
 
     fun onShowDialog(movie: Movie) {
         viewModelScope.launch {
-            val dialogSelection = loadVodDialogSelection(
-                item = movie,
-                providerId = movie.providerId,
-                itemId = movie.id,
-                contentType = ContentType.MOVIE,
-                favoriteRepository = favoriteRepository,
-                copyWithFavorite = { currentMovie, isFavorite ->
-                    currentMovie.copy(isFavorite = isFavorite)
-                }
-            )
+            val rawMovieIds = movie.rawMovieIdsForActions()
+            val memberships = rawMovieIds
+                .flatMap { rawMovieId -> favoriteRepository.getGroupMemberships(movie.providerId, rawMovieId, ContentType.MOVIE) }
+                .map { groupId -> -kotlin.math.abs(groupId) }
+                .distinct()
+            val isFavorite = rawMovieIds.any { rawMovieId ->
+                favoriteRepository.isFavorite(movie.providerId, rawMovieId, ContentType.MOVIE)
+            }
             _uiState.update {
                 it.copy(
                     showDialog = true,
-                    selectedMovieForDialog = dialogSelection.selectedItem,
-                    dialogGroupMemberships = dialogSelection.groupMemberships
+                    selectedMovieForDialog = movie.copy(isFavorite = isFavorite),
+                    dialogGroupMemberships = memberships
                 )
             }
         }
@@ -654,16 +742,33 @@ class MoviesViewModel @Inject constructor(
         _uiState.update { it.copy(showDialog = false, selectedMovieForDialog = null) }
     }
 
+    fun moveM3uMovieBackToLive(movie: Movie) {
+        viewModelScope.launch {
+            val provider = providerRepository.getActiveProvider().first() ?: return@launch
+            if (provider.type != ProviderType.M3U) return@launch
+            when (val result = m3uClassificationRepository.moveMovieBackToLive(provider.id, movie.id)) {
+                is Result.Success -> {
+                    onDismissDialog()
+                    _uiState.update { it.copy(userMessage = "Moved '${movie.name}' back to Live TV") }
+                }
+                is Result.Error -> _uiState.update { it.copy(userMessage = result.message) }
+                Result.Loading -> Unit
+            }
+        }
+    }
+
     fun addFavorite(movie: Movie) {
         viewModelScope.launch {
-            setVodFavorite(movie.providerId, movie.id, ContentType.MOVIE, true, favoriteRepository)
+            setVodFavorite(movie.providerId, movie.selectedRawMovieId(), ContentType.MOVIE, true, favoriteRepository)
             _uiState.update { it.copy(selectedMovieForDialog = movie.copy(isFavorite = true)) }
         }
     }
 
     fun removeFavorite(movie: Movie) {
         viewModelScope.launch {
-            setVodFavorite(movie.providerId, movie.id, ContentType.MOVIE, false, favoriteRepository)
+            movie.rawMovieIdsForActions().forEach { rawMovieId ->
+                setVodFavorite(movie.providerId, rawMovieId, ContentType.MOVIE, false, favoriteRepository)
+            }
             _uiState.update { it.copy(selectedMovieForDialog = movie.copy(isFavorite = false)) }
         }
     }
@@ -672,7 +777,7 @@ class MoviesViewModel @Inject constructor(
         viewModelScope.launch {
             val memberships = updateVodGroupMembership(
                 providerId = movie.providerId,
-                itemId = movie.id,
+                itemId = movie.selectedRawMovieId(),
                 groupId = group.id,
                 contentType = ContentType.MOVIE,
                 shouldBeMember = true,
@@ -684,14 +789,20 @@ class MoviesViewModel @Inject constructor(
 
     fun removeFromGroup(movie: Movie, group: Category) {
         viewModelScope.launch {
-            val memberships = updateVodGroupMembership(
-                providerId = movie.providerId,
-                itemId = movie.id,
-                groupId = group.id,
-                contentType = ContentType.MOVIE,
-                shouldBeMember = false,
-                favoriteRepository = favoriteRepository
-            )
+            movie.rawMovieIdsForActions().forEach { rawMovieId ->
+                updateVodGroupMembership(
+                    providerId = movie.providerId,
+                    itemId = rawMovieId,
+                    groupId = group.id,
+                    contentType = ContentType.MOVIE,
+                    shouldBeMember = false,
+                    favoriteRepository = favoriteRepository
+                )
+            }
+            val memberships = movie.rawMovieIdsForActions()
+                .flatMap { rawMovieId -> favoriteRepository.getGroupMemberships(movie.providerId, rawMovieId, ContentType.MOVIE) }
+                .map { groupId -> -kotlin.math.abs(groupId) }
+                .distinct()
             _uiState.update { it.copy(dialogGroupMemberships = memberships) }
         }
     }
@@ -712,7 +823,7 @@ class MoviesViewModel @Inject constructor(
                     val memberships = if (selectedMovie != null) {
                         updateVodGroupMembership(
                             providerId = selectedMovie.providerId,
-                            itemId = selectedMovie.id,
+                            itemId = selectedMovie.selectedRawMovieId(),
                             groupId = result.data.id,
                             contentType = ContentType.MOVIE,
                             shouldBeMember = true,
@@ -873,6 +984,15 @@ class MoviesViewModel @Inject constructor(
     fun enterCategoryReorderMode(category: Category) {
         dismissCategoryOptions()
         viewModelScope.launch {
+            if (_uiState.value.providerCategories.any { it.id == category.id }) {
+                activeProviderId?.let { providerId ->
+                    movieRepository.requestCategoryHydration(
+                        providerId,
+                        category.id,
+                        VodCategoryHydrationRequest.COMPLETE
+                    )
+                }
+            }
             val moviesInView = loadReorderMovies(category)
             _uiState.update {
                 it.copy(
@@ -954,7 +1074,7 @@ class MoviesViewModel @Inject constructor(
             hiddenProviderCategoryIds = params.hiddenCategoryIds,
             loadItemsByIds = { ids -> movieRepository.getMoviesByIds(ids).first() },
             providerPreviews = providerPreviews,
-            itemId = Movie::id,
+            itemIds = { movie -> movie.rawMovieIdsForActions() },
             itemCategoryId = Movie::categoryId,
             copyWithFavorite = { movie, isFavorite -> movie.copy(isFavorite = isFavorite) }
         )
@@ -980,7 +1100,7 @@ class MoviesViewModel @Inject constructor(
             customCategories = customCategories,
             providerCategories = providerCategories,
             hiddenProviderCategoryIds = hiddenCategoryIds,
-            itemId = Movie::id,
+            itemIds = { movie -> movie.rawMovieIdsForActions() },
             itemCategoryId = Movie::categoryId,
             itemCategoryName = Movie::categoryName,
             copyWithFavorite = { movie, isFavorite -> movie.copy(isFavorite = isFavorite) },
@@ -1126,9 +1246,7 @@ class MoviesViewModel @Inject constructor(
             }
         }
 
-        val enrichedItems = markVodFavorites(selectedItems, globalFavoriteIds, Movie::id) { movie, isFavorite ->
-            movie.copy(isFavorite = isFavorite)
-        }
+        val enrichedItems = selectedItems.markMovieFavorites(globalFavoriteIds)
         return SelectedMovieCategorySnapshot(
             items = enrichedItems,
             loadedCount = enrichedItems.size,
@@ -1151,6 +1269,15 @@ class MoviesViewModel @Inject constructor(
         val movieMap = associateBy { it.id }
         return ids.mapNotNull { movieMap[it] }
     }
+
+    private fun List<Movie>.markMovieFavorites(globalFavoriteIds: Set<Long>): List<Movie> = map { movie ->
+        movie.copy(isFavorite = movie.rawMovieIdsForActions().any { rawMovieId -> rawMovieId in globalFavoriteIds })
+    }
+
+    private fun Movie.selectedRawMovieId(): Long = selectedVariantId ?: id
+
+    private fun Movie.rawMovieIdsForActions(): List<Long> =
+        variants.map { it.rawMovieId }.ifEmpty { listOf(selectedRawMovieId()) }
 
     private fun applyLocalBrowseToMovies(
         items: List<Movie>,
@@ -1242,6 +1369,7 @@ private data class MovieCategorySelectionDependencies(
     val allFavorites: List<com.streamvault.domain.model.Favorite>,
     val customCategories: List<Category>,
     val providerCategories: List<Category>,
+    val providerCategoryCounts: Map<Long, Int>,
     val hiddenCategoryIds: Set<Long>
 )
 
@@ -1255,6 +1383,7 @@ private data class SelectedMovieCategoryRequest(
     val allFavorites: List<com.streamvault.domain.model.Favorite>,
     val customCategories: List<Category>,
     val providerCategories: List<Category>,
+    val selectedProviderCategoryHasItems: Boolean,
     val hiddenCategoryIds: Set<Long>
 )
 
@@ -1287,6 +1416,8 @@ data class MoviesUiState(
     val selectedCategoryTotalCount: Int = 0,
     val canLoadMoreSelectedCategory: Boolean = false,
     val isLoadingSelectedCategory: Boolean = false,
+    val isLoadingMoreSelectedCategory: Boolean = false,
+    val selectedCategoryRawPageSize: Int = 0,
     val searchQuery: String = "",
     val selectedLibraryFilterType: LibraryFilterType = LibraryFilterType.ALL,
     val selectedLibrarySortBy: LibrarySortBy = LibrarySortBy.LIBRARY,
@@ -1295,6 +1426,7 @@ data class MoviesUiState(
     val continueWatching: List<PlaybackHistory> = emptyList(),
     val hasProviders: Boolean = false,
     val hasActiveProvider: Boolean = false,
+    val isM3uProvider: Boolean = false,
     val isLoading: Boolean = true,
     val isLoadingPreviewRows: Boolean = false,
     val hasMorePreviewRows: Boolean = false,

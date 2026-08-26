@@ -41,7 +41,7 @@ internal class FfmpegExtensionSupport(
 
 @UnstableApi
 internal class ReflectiveFfmpegLibrary(
-    @VisibleForTesting
+    @get:VisibleForTesting
     internal val libraryClassProvider: () -> Class<*>? = {
         runCatching { Class.forName(FFMPEG_LIBRARY_CLASS_NAME) }.getOrNull()
     }

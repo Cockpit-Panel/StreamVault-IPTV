@@ -8,7 +8,11 @@ import com.streamvault.app.plugins.PluginConfigurationAction
 import com.streamvault.app.plugins.PluginConfigurationField
 import com.streamvault.app.plugins.PluginConfigurationSchema
 import com.streamvault.app.plugins.StreamVaultPluginManager
+import com.streamvault.app.plugins.StreamVaultPluginOwner
+import com.streamvault.app.plugins.owner
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.provider.ProviderSource
+import com.streamvault.domain.provider.ProviderSourceRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,11 +32,12 @@ import kotlinx.serialization.json.put
 
 data class PluginsUiState(
     val plugins: List<InstalledStreamVaultPlugin> = emptyList(),
+    val providerSources: List<ProviderSource> = emptyList(),
     val installUrl: String = "",
     val isLoading: Boolean = false,
     val isInstalling: Boolean = false,
     val isConfigurationLoading: Boolean = false,
-    val activePluginId: String? = null,
+    val activePluginOwner: StreamVaultPluginOwner? = null,
     val configuration: ActivePluginConfiguration? = null,
     val syncProgress: String? = null,
     val userMessage: String? = null
@@ -53,7 +58,8 @@ data class ActivePluginConfiguration(
 
 @HiltViewModel
 class PluginsViewModel @Inject constructor(
-    private val pluginManager: StreamVaultPluginManager
+    private val pluginManager: StreamVaultPluginManager,
+    private val providerSourceRegistry: ProviderSourceRegistry
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(PluginsUiState(isLoading = true))
     val uiState: StateFlow<PluginsUiState> = _uiState.asStateFlow()
@@ -70,17 +76,19 @@ class PluginsViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, syncProgress = null) }
             val result = runCatching { pluginManager.discoverPlugins() }
-            _uiState.update {
-                it.copy(
+            val sources = runCatching { providerSourceRegistry.sources() }
+            _uiState.update { state ->
+                state.copy(
                     plugins = result.getOrDefault(emptyList()),
+                    providerSources = sources.getOrElse { state.providerSources },
                     isLoading = false,
-                    configuration = it.configuration?.let { configuration ->
+                    configuration = state.configuration?.let { configuration ->
                         val refreshedPlugin = result.getOrDefault(emptyList())
-                            .firstOrNull { plugin -> plugin.manifest.id == configuration.plugin.manifest.id }
+                            .firstOrNull { plugin -> plugin.owner == configuration.plugin.owner }
                             ?: configuration.plugin
                         configuration.copy(plugin = refreshedPlugin)
                     },
-                    userMessage = result.exceptionOrNull()?.message
+                    userMessage = result.exceptionOrNull()?.message ?: sources.exceptionOrNull()?.message
                 )
             }
         }
@@ -123,7 +131,7 @@ class PluginsViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    activePluginId = plugin.manifest.id,
+                    activePluginOwner = plugin.owner,
                     syncProgress = if (enabled) "Activating ${plugin.displayName}..." else "Deactivating ${plugin.displayName}...",
                     userMessage = null
                 )
@@ -132,10 +140,13 @@ class PluginsViewModel @Inject constructor(
                 _uiState.update { it.copy(syncProgress = progress) }
             }
             val refreshed = runCatching { pluginManager.discoverPlugins() }.getOrDefault(_uiState.value.plugins)
+            val refreshedSources = runCatching { providerSourceRegistry.sources() }
+                .getOrDefault(_uiState.value.providerSources)
             _uiState.update {
                 it.copy(
                     plugins = refreshed,
-                    activePluginId = null,
+                    providerSources = refreshedSources,
+                    activePluginOwner = null,
                     syncProgress = null,
                     userMessage = result.message
                 )
@@ -154,7 +165,7 @@ class PluginsViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     isConfigurationLoading = true,
-                    activePluginId = plugin.manifest.id,
+                    activePluginOwner = plugin.owner,
                     userMessage = null
                 )
             }
@@ -163,7 +174,7 @@ class PluginsViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             isConfigurationLoading = false,
-                            activePluginId = null,
+                            activePluginOwner = null,
                             userMessage = result.message
                         )
                     }
@@ -174,7 +185,7 @@ class PluginsViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             isConfigurationLoading = false,
-                            activePluginId = null,
+                            activePluginOwner = null,
                             configuration = ActivePluginConfiguration(
                                 plugin = snapshot.plugin,
                                 schema = snapshot.schema,

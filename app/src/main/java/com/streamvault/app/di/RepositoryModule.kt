@@ -7,6 +7,19 @@ import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.data.security.AndroidKeystoreCredentialCrypto
 import com.streamvault.data.security.CredentialCrypto
 import com.streamvault.data.sync.ProviderSyncStateReaderImpl
+import com.streamvault.data.sync.CatalogHydrationCommands
+import com.streamvault.data.sync.ProviderSyncCommands
+import com.streamvault.data.sync.ProviderSyncLifecycle
+import com.streamvault.data.sync.ProviderSyncStateSource
+import com.streamvault.data.sync.SyncManager
+import com.streamvault.data.provider.RoomProviderSnapshotRepository
+import com.streamvault.data.provider.DefaultProviderCapabilityRegistry
+import com.streamvault.data.provider.JellyfinCapabilityFactory
+import com.streamvault.data.provider.M3uCapabilityFactory
+import com.streamvault.data.provider.StalkerCapabilityFactory
+import com.streamvault.data.provider.XtreamCapabilityFactory
+import com.streamvault.data.remote.xtream.PlaybackObservationCoordinator
+import com.streamvault.data.remote.xtream.PlaybackObservationSink
 import com.streamvault.data.validation.ProviderSetupInputValidatorImpl
 import com.streamvault.domain.manager.ParentalPinVerifier
 import com.streamvault.domain.manager.ProviderSetupInputValidator
@@ -14,6 +27,11 @@ import com.streamvault.domain.manager.ProviderSyncStateReader
 import com.streamvault.data.repository.*
 import com.streamvault.domain.manager.ParentalControlSessionStore
 import com.streamvault.domain.repository.*
+import com.streamvault.domain.manager.BackupRestoreStatusStore
+import com.streamvault.data.manager.BackupRestoreStatusStoreImpl
+import com.streamvault.domain.provider.ProviderCapabilityRegistry
+import com.streamvault.domain.provider.ProviderSourceRegistry
+import com.streamvault.app.plugins.StreamVaultPluginManager
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -27,9 +45,14 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class RepositoryModule {
+    @Binds @Singleton
+    abstract fun bindBackupRestoreStatusStore(impl: BackupRestoreStatusStoreImpl): BackupRestoreStatusStore
 
     @Binds @Singleton
     abstract fun bindProviderRepository(impl: ProviderRepositoryImpl): ProviderRepository
+
+    @Binds @Singleton
+    abstract fun bindProviderSnapshotRepository(impl: RoomProviderSnapshotRepository): ProviderSnapshotRepository
 
     @Binds @Singleton
     abstract fun bindChannelRepository(impl: ChannelRepositoryImpl): ChannelRepository
@@ -42,6 +65,9 @@ abstract class RepositoryModule {
 
     @Binds @Singleton
     abstract fun bindSeriesRepository(impl: SeriesRepositoryImpl): SeriesRepository
+
+    @Binds @Singleton
+    abstract fun bindVodRepository(impl: VodRepositoryImpl): VodRepository
 
     @Binds @Singleton
     abstract fun bindSearchRepository(impl: SearchRepositoryImpl): SearchRepository
@@ -60,6 +86,9 @@ abstract class RepositoryModule {
 
     @Binds @Singleton
     abstract fun bindPlaybackHistoryRepository(impl: PlaybackHistoryRepositoryImpl): PlaybackHistoryRepository
+
+    @Binds @Singleton
+    abstract fun bindM3uClassificationRepository(impl: M3uClassificationRepositoryImpl): M3uClassificationRepository
 
     @Binds @Singleton
     abstract fun bindExternalRatingsRepository(impl: ExternalRatingsRepositoryImpl): ExternalRatingsRepository
@@ -101,7 +130,25 @@ abstract class RepositoryModule {
     abstract fun bindProviderSyncStateReader(impl: ProviderSyncStateReaderImpl): ProviderSyncStateReader
 
     @Binds @Singleton
+    abstract fun bindProviderSyncCommands(impl: SyncManager): ProviderSyncCommands
+
+    @Binds @Singleton
+    abstract fun bindCatalogHydrationCommands(impl: SyncManager): CatalogHydrationCommands
+
+    @Binds @Singleton
+    abstract fun bindProviderSyncStateSource(impl: SyncManager): ProviderSyncStateSource
+
+    @Binds @Singleton
+    abstract fun bindProviderSyncLifecycle(impl: SyncManager): ProviderSyncLifecycle
+
+    @Binds @Singleton
     abstract fun bindCredentialCrypto(impl: AndroidKeystoreCredentialCrypto): CredentialCrypto
+
+    @Binds @Singleton
+    abstract fun bindProviderSourceRegistry(impl: StreamVaultPluginManager): ProviderSourceRegistry
+
+    @Binds @Singleton
+    abstract fun bindPlaybackObservationSink(impl: PlaybackObservationCoordinator): PlaybackObservationSink
 
     companion object {
         @Provides
@@ -115,5 +162,16 @@ abstract class RepositoryModule {
         fun provideM3uParser(): com.streamvault.data.parser.M3uParser {
             return com.streamvault.data.parser.M3uParser()
         }
+
+        @Provides
+        @Singleton
+        fun provideProviderCapabilityRegistry(
+            xtream: XtreamCapabilityFactory,
+            stalker: StalkerCapabilityFactory,
+            m3u: M3uCapabilityFactory,
+            jellyfin: JellyfinCapabilityFactory
+        ): ProviderCapabilityRegistry = DefaultProviderCapabilityRegistry(
+            listOf(xtream, stalker, m3u, jellyfin)
+        )
     }
 }

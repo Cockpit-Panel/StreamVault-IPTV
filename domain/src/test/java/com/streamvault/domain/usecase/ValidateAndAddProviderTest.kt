@@ -3,19 +3,39 @@ package com.streamvault.domain.usecase
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.domain.manager.ProviderCredentials
 import com.streamvault.domain.manager.ProviderSetupInputValidator
+import com.streamvault.domain.manager.ValidatedJellyfinProviderInput
+import com.streamvault.domain.manager.ValidatedJellyfinQuickConnectProviderInput
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.manager.ValidatedM3uProviderInput
 import com.streamvault.domain.manager.ValidatedStalkerProviderInput
 import com.streamvault.domain.manager.ValidatedXtreamProviderInput
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
+import com.streamvault.domain.model.JellyfinConfig
+import com.streamvault.domain.model.M3uConfig
 import com.streamvault.domain.model.ProviderEpgSyncMode
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderSavedWithSyncErrorException
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.StalkerAuthMode
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerReadinessInconclusiveException
+import com.streamvault.domain.model.StalkerTransportChallenge
+import com.streamvault.domain.model.StalkerTransportChallengeReason
+import com.streamvault.domain.model.StalkerTransportConsentRequiredException
+import com.streamvault.domain.model.StalkerTransportGrant
+import com.streamvault.domain.model.StalkerTransportMode
+import com.streamvault.domain.model.StalkerTransportOrigin
+import com.streamvault.domain.model.StalkerConfig
+import com.streamvault.domain.model.XtreamConfig
+import com.streamvault.domain.repository.ProviderDeleteProgress
 import com.streamvault.domain.repository.ProviderRepository
+import com.streamvault.domain.repository.ProviderSetupRequest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -431,6 +451,8 @@ class ValidateAndAddProviderTest {
                         username = "",
                         password = "",
                         name = "MAG",
+                        httpUserAgent = "Stalker Agent/1.0",
+                        httpHeaders = "Referer: | X-Test: enabled",
                         deviceProfile = "MAG250",
                         timezone = "UTC",
                         locale = "en"
@@ -448,6 +470,8 @@ class ValidateAndAddProviderTest {
                 username = "",
                 password = "",
                 name = " MAG ",
+                httpUserAgent = " Stalker Agent/1.0 ",
+                httpHeaders = " Referer: | X-Test: enabled ",
                 deviceProfile = " MAG250 ",
                 timezone = " UTC ",
                 locale = " en ",
@@ -465,6 +489,8 @@ class ValidateAndAddProviderTest {
                 username = "",
                 password = "",
                 name = "MAG",
+                httpUserAgent = "Stalker Agent/1.0",
+                httpHeaders = "Referer: | X-Test: enabled",
                 deviceProfile = "MAG250",
                 timezone = "UTC",
                 locale = "en",
@@ -472,6 +498,95 @@ class ValidateAndAddProviderTest {
                 id = 21L
             )
         )
+    }
+
+    @Test
+    fun `maps Stalker transport challenge without retaining credentials in a token`() = runTest {
+        val challenge = StalkerTransportChallenge(
+            reason = StalkerTransportChallengeReason.CLEARTEXT_HTTP,
+            origin = StalkerTransportOrigin("http", "portal.example.com", 80),
+            displayHost = "portal.example.com",
+            detailCode = "CLEARTEXT_REQUIRES_CONSENT"
+        )
+        val repository = FakeProviderRepository().apply {
+            stalkerResult = Result.error(
+                "Transport consent required",
+                StalkerTransportConsentRequiredException(challenge)
+            )
+        }
+        val useCase = ValidateAndAddProvider(
+            providerSetupInputValidator = FakeProviderSetupInputValidator(),
+            providerRepository = repository
+        )
+
+        val result = useCase.loginStalker(
+            StalkerProviderSetupCommand(
+                portalUrl = "http://portal.example.com",
+                macAddress = "00:1A:79:12:34:56",
+                name = "MAG",
+                password = "must-not-be-in-challenge"
+            )
+        )
+
+        assertThat(result).isEqualTo(
+            ValidateAndAddProviderResult.TransportConsentRequired(challenge)
+        )
+        val consentResult = result as ValidateAndAddProviderResult.TransportConsentRequired
+        assertThat(consentResult.challenge.toString()).doesNotContain("must-not-be-in-challenge")
+    }
+
+    @Test
+    fun `maps authenticated but inconclusive Live readiness to explicit save choice`() = runTest {
+        val repository = FakeProviderRepository().apply {
+            stalkerResult = Result.error(
+                "Live readiness inconclusive",
+                StalkerReadinessInconclusiveException(
+                    evidenceCode = "LIVE_BUDGET_EXHAUSTED",
+                    message = "Authentication succeeded, but Live TV could not be verified."
+                )
+            )
+        }
+        val useCase = ValidateAndAddProvider(
+            providerSetupInputValidator = FakeProviderSetupInputValidator(),
+            providerRepository = repository
+        )
+
+        val result = useCase.loginStalker(
+            StalkerProviderSetupCommand(
+                portalUrl = "https://portal.example.com",
+                macAddress = "00:1A:79:12:34:56",
+                name = "MAG",
+                saveWithoutVerification = true
+            )
+        )
+
+        assertThat(result).isEqualTo(
+            ValidateAndAddProviderResult.VerificationInconclusive(
+                "Authentication succeeded, but Live TV could not be verified."
+            )
+        )
+        assertThat(repository.lastStalkerCall?.saveWithoutVerification).isTrue()
+    }
+
+    @Test
+    fun `passes explicit repair connection permission to repository`() = runTest {
+        val repository = FakeProviderRepository()
+        val useCase = ValidateAndAddProvider(
+            providerSetupInputValidator = FakeProviderSetupInputValidator(),
+            providerRepository = repository
+        )
+
+        useCase.loginStalker(
+            StalkerProviderSetupCommand(
+                portalUrl = "https://portal.example.com",
+                macAddress = "00:1A:79:12:34:56",
+                name = "MAG",
+                existingProviderId = 42L,
+                repairConnection = true
+            )
+        )
+
+        assertThat(repository.lastStalkerCall?.repairConnection).isTrue()
     }
 }
 
@@ -502,9 +617,25 @@ private class FakeProviderSetupInputValidator(
             username = "",
             password = "",
             name = "Provider",
+            httpUserAgent = "",
+            httpHeaders = "",
             deviceProfile = "MAG250",
             timezone = "UTC",
             locale = "en"
+        )
+    ),
+    private val jellyfinResult: Result<ValidatedJellyfinProviderInput> = Result.success(
+        ValidatedJellyfinProviderInput(
+            serverUrl = "https://jellyfin.example.com",
+            username = "user",
+            password = "secret",
+            name = "Jellyfin"
+        )
+    ),
+    private val jellyfinQuickConnectResult: Result<ValidatedJellyfinQuickConnectProviderInput> = Result.success(
+        ValidatedJellyfinQuickConnectProviderInput(
+            serverUrl = "https://jellyfin.example.com",
+            name = "Jellyfin"
         )
     )
 ) : ProviderSetupInputValidator {
@@ -533,14 +664,30 @@ private class FakeProviderSetupInputValidator(
         username: String,
         password: String,
         allowBlankPassword: Boolean,
+        httpUserAgent: String,
+        httpHeaders: String,
         deviceProfile: String,
         timezone: String,
         locale: String,
         serialNumber: String,
         deviceId: String,
         deviceId2: String,
-        signature: String
+        signature: String,
+        stalkerAdvancedOptionsJson: String
     ): Result<ValidatedStalkerProviderInput> = stalkerResult
+
+    override fun validateJellyfin(
+        serverUrl: String,
+        username: String,
+        password: String,
+        name: String,
+        allowBlankPassword: Boolean
+    ): Result<ValidatedJellyfinProviderInput> = jellyfinResult
+
+    override fun validateJellyfinQuickConnect(
+        serverUrl: String,
+        name: String
+    ): Result<ValidatedJellyfinQuickConnectProviderInput> = jellyfinQuickConnectResult
 }
 
 private data class XtreamCall(
@@ -573,6 +720,8 @@ private data class StalkerCall(
     val username: String,
     val password: String,
     val name: String,
+    val httpUserAgent: String,
+    val httpHeaders: String,
     val deviceProfile: String,
     val timezone: String,
     val locale: String,
@@ -580,6 +729,12 @@ private data class StalkerCall(
     val deviceId: String = "",
     val deviceId2: String = "",
     val signature: String = "",
+    val stalkerAdvancedOptionsJson: String = "",
+    val protocolPreference: StalkerProtocolPreference = StalkerProtocolPreference.AUTO,
+    val transportGrant: StalkerTransportGrant? = null,
+    val saveWithoutVerification: Boolean = false,
+    val repairConnection: Boolean = false,
+    val requestedProfileId: String = StalkerCompatibilityProfileIds.AUTO,
     val epgSyncMode: ProviderEpgSyncMode,
     val id: Long?
 )
@@ -602,7 +757,10 @@ private class FakeProviderRepository : ProviderRepository {
 
     override suspend fun updateProvider(provider: Provider): Result<Unit> = error("Not used in test")
 
-    override suspend fun deleteProvider(id: Long): Result<Unit> = error("Not used in test")
+    override suspend fun deleteProvider(
+        id: Long,
+        onProgress: ((ProviderDeleteProgress) -> Unit)?
+    ): Result<com.streamvault.domain.repository.ProviderDeleteOutcome> = error("Not used in test")
 
     override suspend fun getAllProviderCredentials(): List<ProviderCredentials> = emptyList()
 
@@ -614,7 +772,45 @@ private class FakeProviderRepository : ProviderRepository {
 
     override suspend fun setActiveProvider(id: Long): Result<Unit> = error("Not used in test")
 
-    override suspend fun loginXtream(
+    override suspend fun setupProvider(
+        request: ProviderSetupRequest,
+        onProgress: ((String) -> Unit)?,
+        onCode: ((String) -> Unit)?
+    ): Result<Provider> = when (request) {
+        is ProviderSetupRequest.Configured -> when (val config = request.configuration) {
+            is XtreamConfig -> loginXtream(
+                config.serverUrl, config.username, config.password, request.name,
+                config.httpUserAgent, config.httpHeaders, config.fastSyncEnabled,
+                config.epgSyncMode, config.liveSyncMode, config.guideSourcePolicy,
+                config.channelLogoSourcePolicy, onProgress, request.existingProviderId
+            )
+            is M3uConfig -> validateM3u(
+                config.playlistUrl, request.name, config.httpUserAgent, config.httpHeaders,
+                config.epgSyncMode, config.vodClassificationEnabled, config.guideSourcePolicy,
+                config.channelLogoSourcePolicy, onProgress, request.existingProviderId
+            )
+            is StalkerConfig -> loginStalker(
+                config.portalUrl, config.device.macAddress, request.name, config.authMode,
+                config.username, config.password, config.httpUserAgent, config.httpHeaders,
+                config.device.deviceProfile, config.device.timezone, config.device.locale,
+                config.device.serialNumber, config.device.deviceId, config.device.deviceId2,
+                config.device.signature, config.advancedOptionsJson, config.protocolPreference,
+                config.transportGrant, request.saveWithoutVerification, request.repairConnection,
+                config.requestedProfileId, config.epgSyncMode, config.catalogMode,
+                config.guideSourcePolicy, config.channelLogoSourcePolicy, onProgress,
+                request.existingProviderId
+            )
+            is JellyfinConfig -> loginJellyfin(
+                config.serverUrl, config.username, config.credential, request.name,
+                onProgress, request.existingProviderId
+            )
+        }
+        is ProviderSetupRequest.JellyfinQuickConnect -> loginJellyfinQuickConnect(
+            request.serverUrl, request.name, onCode, onProgress, request.existingProviderId
+        )
+    }
+
+    suspend fun loginXtream(
         serverUrl: String,
         username: String,
         password: String,
@@ -624,6 +820,8 @@ private class FakeProviderRepository : ProviderRepository {
         xtreamFastSyncEnabled: Boolean,
         epgSyncMode: ProviderEpgSyncMode,
         xtreamLiveSyncMode: ProviderXtreamLiveSyncMode,
+        guideSourcePolicy: GuideSourcePolicy,
+        channelLogoSourcePolicy: ChannelLogoSourcePolicy,
         onProgress: ((String) -> Unit)?,
         id: Long?
     ): Result<Provider> {
@@ -631,13 +829,15 @@ private class FakeProviderRepository : ProviderRepository {
         return xtreamResult ?: Result.success(provider(id = id ?: 1L, name = name, type = ProviderType.XTREAM_CODES))
     }
 
-    override suspend fun validateM3u(
+    suspend fun validateM3u(
         url: String,
         name: String,
         httpUserAgent: String,
         httpHeaders: String,
         epgSyncMode: ProviderEpgSyncMode,
         m3uVodClassificationEnabled: Boolean,
+        guideSourcePolicy: GuideSourcePolicy,
+        channelLogoSourcePolicy: ChannelLogoSourcePolicy,
         onProgress: ((String) -> Unit)?,
         id: Long?
     ): Result<Provider> {
@@ -645,13 +845,15 @@ private class FakeProviderRepository : ProviderRepository {
         return m3uResult ?: Result.success(provider(id = id ?: 2L, name = name, type = ProviderType.M3U, m3uUrl = url))
     }
 
-    override suspend fun loginStalker(
+    suspend fun loginStalker(
         portalUrl: String,
         macAddress: String,
         name: String,
         authMode: StalkerAuthMode,
         username: String,
         password: String,
+        httpUserAgent: String,
+        httpHeaders: String,
         deviceProfile: String,
         timezone: String,
         locale: String,
@@ -659,7 +861,16 @@ private class FakeProviderRepository : ProviderRepository {
         deviceId: String,
         deviceId2: String,
         signature: String,
+        stalkerAdvancedOptionsJson: String,
+        protocolPreference: StalkerProtocolPreference,
+        transportGrant: StalkerTransportGrant?,
+        saveWithoutVerification: Boolean,
+        repairConnection: Boolean,
+        requestedProfileId: String,
         epgSyncMode: ProviderEpgSyncMode,
+        catalogMode: StalkerCatalogMode,
+        guideSourcePolicy: GuideSourcePolicy,
+        channelLogoSourcePolicy: ChannelLogoSourcePolicy,
         onProgress: ((String) -> Unit)?,
         id: Long?
     ): Result<Provider> {
@@ -670,6 +881,8 @@ private class FakeProviderRepository : ProviderRepository {
             username = username,
             password = password,
             name = name,
+            httpUserAgent = httpUserAgent,
+            httpHeaders = httpHeaders,
             deviceProfile = deviceProfile,
             timezone = timezone,
             locale = locale,
@@ -677,6 +890,12 @@ private class FakeProviderRepository : ProviderRepository {
             deviceId = deviceId,
             deviceId2 = deviceId2,
             signature = signature,
+            stalkerAdvancedOptionsJson = stalkerAdvancedOptionsJson,
+            protocolPreference = protocolPreference,
+            transportGrant = transportGrant,
+            saveWithoutVerification = saveWithoutVerification,
+            repairConnection = repairConnection,
+            requestedProfileId = requestedProfileId,
             epgSyncMode = epgSyncMode,
             id = id
         )
@@ -685,6 +904,8 @@ private class FakeProviderRepository : ProviderRepository {
                 serverUrl = portalUrl,
                 username = username,
                 password = password,
+                httpUserAgent = httpUserAgent,
+                httpHeaders = httpHeaders,
                 stalkerMacAddress = macAddress,
                 stalkerAuthMode = authMode,
                 stalkerDeviceProfile = deviceProfile,
@@ -694,6 +915,40 @@ private class FakeProviderRepository : ProviderRepository {
                 stalkerDeviceId = deviceId,
                 stalkerDeviceId2 = deviceId2,
                 stalkerSignature = signature
+            )
+        )
+    }
+
+    suspend fun loginJellyfin(
+        serverUrl: String,
+        username: String,
+        password: String,
+        name: String,
+        onProgress: ((String) -> Unit)?,
+        id: Long?
+    ): Result<Provider> {
+        return Result.success(
+            provider(id = id ?: 4L, name = name, type = ProviderType.JELLYFIN).copy(
+                serverUrl = serverUrl,
+                username = username,
+                password = password
+            )
+        )
+    }
+
+    suspend fun loginJellyfinQuickConnect(
+        serverUrl: String,
+        name: String,
+        onCode: ((String) -> Unit)?,
+        onProgress: ((String) -> Unit)?,
+        id: Long?
+    ): Result<Provider> {
+        onCode?.invoke("ABCD")
+        return Result.success(
+            provider(id = id ?: 5L, name = name, type = ProviderType.JELLYFIN).copy(
+                serverUrl = serverUrl,
+                username = name,
+                password = "quick-connect-token"
             )
         )
     }

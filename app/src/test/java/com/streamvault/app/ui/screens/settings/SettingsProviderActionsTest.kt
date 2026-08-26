@@ -7,7 +7,7 @@ import com.streamvault.app.tvinput.TvInputChannelSyncManager
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.data.sync.SyncManager
 import com.streamvault.domain.model.ActiveLiveSource
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.repository.CombinedM3uRepository
@@ -56,6 +56,17 @@ class SettingsProviderActionsTest {
     )
 
     @Test
+    fun providerWithFutureSyncTimestampIsStaleAfterBackwardClockJump() {
+        assertThat(
+            shouldAutoSyncProvider(
+                lastSyncedAt = 10_001L,
+                now = 10_000L,
+                staleAfterMillis = 86_400_000L
+            )
+        ).isTrue()
+    }
+
+    @Test
     fun setActiveProvider_refreshesProviderScopedTvSurfaces() = runTest(StandardTestDispatcher()) {
         val provider = Provider(
             id = 7L,
@@ -80,12 +91,20 @@ class SettingsProviderActionsTest {
 
     @Test
     fun deleteProvider_refreshesProviderScopedTvSurfaces() = runTest(StandardTestDispatcher()) {
-        whenever(providerRepository.deleteProvider(7L)).thenReturn(Result.success(Unit))
+        whenever(providerRepository.deleteProvider(eq(7L), any())).thenReturn(
+            Result.success(
+                com.streamvault.domain.repository.ProviderDeleteOutcome(
+                    providerId = 7L,
+                    pendingCleanupActions = 0,
+                    reconciliationRequested = true
+                )
+            )
+        )
 
         actions.deleteProvider(this, 7L)
         advanceUntilIdle()
 
-        verify(providerRepository).deleteProvider(7L)
+        verify(providerRepository).deleteProvider(eq(7L), any())
         verify(watchNextManager).refreshWatchNext()
         verify(launcherRecommendationsManager).refreshRecommendations(force = true)
         verify(tvInputChannelSyncManager).refreshTvInputCatalog()
@@ -93,8 +112,35 @@ class SettingsProviderActionsTest {
     }
 
     @Test
+    fun deleteProvider_surfacesLibraryDeletedWhileCleanupIsPending() = runTest(StandardTestDispatcher()) {
+        whenever(providerRepository.deleteProvider(eq(7L), any())).thenReturn(
+            Result.success(
+                com.streamvault.domain.repository.ProviderDeleteOutcome(
+                    providerId = 7L,
+                    pendingCleanupActions = 3,
+                    reconciliationRequested = true
+                )
+            )
+        )
+
+        actions.deleteProvider(this, 7L)
+        advanceUntilIdle()
+
+        assertThat(uiState.value.userMessage)
+            .isEqualTo("Provider library deleted; final cleanup continues")
+    }
+
+    @Test
     fun deleteProvider_stillCompletesSuccessWhenFollowUpRefreshFails() = runTest(StandardTestDispatcher()) {
-        whenever(providerRepository.deleteProvider(7L)).thenReturn(Result.success(Unit))
+        whenever(providerRepository.deleteProvider(eq(7L), any())).thenReturn(
+            Result.success(
+                com.streamvault.domain.repository.ProviderDeleteOutcome(
+                    providerId = 7L,
+                    pendingCleanupActions = 0,
+                    reconciliationRequested = true
+                )
+            )
+        )
         doThrow(IllegalStateException("refresh boom")).whenever(launcherRecommendationsManager)
             .refreshRecommendations(force = true)
         var onSuccessCalled = false
@@ -102,7 +148,7 @@ class SettingsProviderActionsTest {
         actions.deleteProvider(this, 7L, onSuccess = { onSuccessCalled = true })
         advanceUntilIdle()
 
-        verify(providerRepository).deleteProvider(7L)
+        verify(providerRepository).deleteProvider(eq(7L), any())
         verify(watchNextManager).refreshWatchNext()
         verify(launcherRecommendationsManager).refreshRecommendations(force = true)
         verify(tvInputChannelSyncManager).refreshTvInputCatalog()

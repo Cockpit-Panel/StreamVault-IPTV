@@ -39,6 +39,9 @@ data class DownloadEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "completed_at") val completedAt: Long? = null,
     @ColumnInfo(name = "failure_reason") val failureReason: String? = null,
+    @ColumnInfo(name = "owner_id") val ownerId: String? = null,
+    @ColumnInfo(name = "owner_epoch") val ownerEpoch: Long = 0L,
+    @ColumnInfo(name = "heartbeat_at") val heartbeatAt: Long? = null,
     @ColumnInfo(name = "series_id") val seriesId: Long? = null,
     @ColumnInfo(name = "season_number") val seasonNumber: Int? = null,
     @ColumnInfo(name = "episode_number") val episodeNumber: Int? = null

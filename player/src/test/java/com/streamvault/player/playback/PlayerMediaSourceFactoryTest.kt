@@ -7,12 +7,18 @@ import org.junit.Test
 class PlayerMediaSourceFactoryTest {
 
     @Test
-    fun `live mpeg ts extractor uses hls mode to avoid finite progressive duration`() {
-        val factory = liveMpegTsExtractorsFactory()
-        val modeField = factory::class.java.getDeclaredField("tsMode").apply {
-            isAccessible = true
-        }
+    fun `direct live mpeg ts policy declares single pmt and live duration`() {
+        assertThat(DIRECT_LIVE_MPEG_TS_POLICY.extractorMode)
+            .isEqualTo(LiveMpegTsPolicy.ExtractorMode.SINGLE_PMT)
+        assertThat(DIRECT_LIVE_MPEG_TS_POLICY.duration)
+            .isEqualTo(LiveMpegTsPolicy.DurationPolicy.LIVE_UNKNOWN)
+        assertThat(DIRECT_LIVE_MPEG_TS_POLICY.reconnect)
+            .isEqualTo(LiveMpegTsPolicy.ReconnectPolicy.RECREATE_SOURCE)
+    }
 
-        assertThat(modeField.getInt(factory)).isEqualTo(TsExtractor.MODE_HLS)
+    @Test
+    fun `policy maps to the Media3 single pmt mode`() {
+        assertThat(DIRECT_LIVE_MPEG_TS_POLICY.media3ExtractorMode)
+            .isEqualTo(TsExtractor.MODE_SINGLE_PMT)
     }
 }

@@ -1,6 +1,7 @@
 package com.streamvault.app.ui.screens.player
 
 import com.streamvault.domain.model.Movie
+import com.streamvault.domain.model.VodMovieVariant
 import com.streamvault.domain.util.movieVariantQualityScore
 import java.util.Locale
 
@@ -14,17 +15,18 @@ internal suspend fun PlayerViewModel.tryFallbackToAvcMovieVariant(
 ): Boolean {
     if (currentContentType != com.streamvault.domain.model.ContentType.MOVIE) return false
     if (currentProviderId <= 0L || currentContentId <= 0L) return false
-    if (hasRetriedWithAvcMovieVariant) return false
+    if (playerRecoveryCoordinator.retriedWithAvcMovieVariant) return false
     if (!isActivePlaybackSession(requestVersion, playbackUrl)) return false
 
-    val currentMovie = movieRepository.getMovie(currentContentId) ?: return false
-    val variants = movieRepository.getMovieVariants(currentContentId)
-    val fallbackMovie = selectAvcMovieFallbackVariant(currentMovie, variants) ?: return false
-    val fallbackStreamInfo = movieRepository.getStreamInfo(fallbackMovie).getOrNull() ?: return false
+    val currentMovie = playerContentResolver.getMovie(currentContentId) ?: return false
+    val variants = playerContentResolver.getMovieVariants(currentContentId)
+    val fallbackVariant = selectAvcMovieFallbackVariant(currentMovie, variants) ?: return false
+    val fallbackMovie = playerContentResolver.getMovie(fallbackVariant.rawMovieId) ?: return false
+    val fallbackStreamInfo = playerContentResolver.getMovieStreamInfo(fallbackMovie).getOrNull() ?: return false
 
     if (!isActivePlaybackSession(requestVersion, playbackUrl)) return false
 
-    hasRetriedWithAvcMovieVariant = true
+    playerRecoveryCoordinator.retriedWithAvcMovieVariant = true
     currentContentId = fallbackMovie.id
     currentStreamUrl = fallbackMovie.streamUrl
     currentTitle = fallbackMovie.name
@@ -46,18 +48,18 @@ internal suspend fun PlayerViewModel.tryFallbackToAvcMovieVariant(
 
 internal fun selectAvcMovieFallbackVariant(
     currentMovie: Movie,
-    variants: List<Movie>
-): Movie? {
+    variants: List<VodMovieVariant>
+): VodMovieVariant? {
     val candidateVariants = variants.asSequence()
-        .filter { it.id != currentMovie.id }
+        .filter { it.rawMovieId != currentMovie.id }
         .filter { it.streamUrl.isNotBlank() }
         .sortedWith(
-            compareByDescending<Movie> { movieCodecFallbackPriority(it.name) }
+            compareByDescending<VodMovieVariant> { movieCodecFallbackPriority(it.name) }
                 .thenByDescending { movieVariantQualityScore(it.name) }
                 .thenByDescending { it.addedAt }
                 .thenByDescending { it.rating }
                 .thenBy { it.name.lowercase(Locale.ROOT) }
-                .thenBy { it.id }
+                .thenBy { it.rawMovieId }
         )
 
     return candidateVariants.firstOrNull { movieCodecFallbackPriority(it.name) > 0 }

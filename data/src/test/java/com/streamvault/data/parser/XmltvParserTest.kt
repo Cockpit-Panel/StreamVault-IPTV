@@ -9,6 +9,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.time.LocalDateTime
+import java.time.ZoneId
 import java.util.TimeZone
 import java.util.zip.GZIPOutputStream
 
@@ -93,7 +95,7 @@ class XmltvParserTest {
             </tv>
         """.trimIndent()
 
-        val programs = parser.parse(xml.byteInputStream())
+        val programs = parser.parse(xml.byteInputStream(), timezoneId = "UTC")
 
         assertThat(programs).hasSize(2)
         // Both programs should have non-zero timestamps
@@ -141,7 +143,7 @@ class XmltvParserTest {
             </tv>
         """.trimIndent()
 
-        val programs = parser.parse(xml.byteInputStream())
+        val programs = parser.parse(xml.byteInputStream(), timezoneId = "Pacific/Honolulu")
 
         assertThat(programs).hasSize(1)
         val prog = programs[0]
@@ -170,50 +172,67 @@ class XmltvParserTest {
     }
 
     @Test
-    fun `parse_noOffsetTimestamp_defaultsToSystemTimezoneWhenTimezoneMissing`() {
-        val originalTimeZone = TimeZone.getDefault()
-        try {
-            TimeZone.setDefault(TimeZone.getTimeZone("Europe/Berlin"))
-            val xml = """
-                <?xml version="1.0"?>
-                <tv>
-                  <programme start="20250101120000" stop="20250101130000" channel="ch1">
-                    <title>Timezone Test</title>
-                  </programme>
-                </tv>
-            """.trimIndent()
-
-            val programs = parser.parse(xml.byteInputStream())
-
-            assertThat(programs).hasSize(1)
-            assertThat(programs.single().startTime).isEqualTo(1_735_729_200_000L)
-        } finally {
-            TimeZone.setDefault(originalTimeZone)
-        }
-    }
-
-      @Test
-      fun `parse_noOffsetTimestamp_defaultsToSystemTimezoneWhenTimezoneInvalid`() {
-        val originalTimeZone = TimeZone.getDefault()
-        try {
-          TimeZone.setDefault(TimeZone.getTimeZone("Europe/Berlin"))
-          val xml = """
+    fun `parse_noOffsetTimestamp_isRejectedIndependentlyOfDeviceTimezone`() {
+        val xml = """
             <?xml version="1.0"?>
             <tv>
               <programme start="20250101120000" stop="20250101130000" channel="ch1">
-              <title>Timezone Test</title>
+                <title>Timezone Test</title>
               </programme>
             </tv>
-          """.trimIndent()
+        """.trimIndent()
 
-          val programs = parser.parse(xml.byteInputStream(), timezoneId = "Mars/Olympus")
-
-          assertThat(programs).hasSize(1)
-          assertThat(programs.single().startTime).isEqualTo(1_735_729_200_000L)
+        val original = TimeZone.getDefault()
+        try {
+            listOf("Asia/Jerusalem", "America/Los_Angeles").forEach { deviceZone ->
+                TimeZone.setDefault(TimeZone.getTimeZone(deviceZone))
+                assertThat(parser.parse(xml.byteInputStream())).isEmpty()
+            }
         } finally {
-          TimeZone.setDefault(originalTimeZone)
+            TimeZone.setDefault(original)
         }
-      }
+    }
+
+    @Test
+    fun `parse_explicitTimezone_appliesDstRules`() {
+        val xml = """
+            <?xml version="1.0"?>
+            <tv>
+              <programme start="20250115120000" stop="20250115130000" channel="ch1">
+                <title>Winter</title>
+              </programme>
+              <programme start="20250715120000" stop="20250715130000" channel="ch1">
+                <title>Summer</title>
+              </programme>
+            </tv>
+        """.trimIndent()
+        val zone = ZoneId.of("Europe/Amsterdam")
+
+        val programs = parser.parse(xml.byteInputStream(), timezoneId = zone.id)
+
+        assertThat(programs.map { it.startTime }).containsExactly(
+            LocalDateTime.of(2025, 1, 15, 12, 0).atZone(zone).toInstant().toEpochMilli(),
+            LocalDateTime.of(2025, 7, 15, 12, 0).atZone(zone).toInstant().toEpochMilli()
+        ).inOrder()
+    }
+
+    @Test
+    fun `parse_noOffsetTimestamp_rejectsInvalidTimezoneConfiguration`() {
+        val xml = """
+            <?xml version="1.0"?>
+            <tv>
+              <programme start="20250101120000" stop="20250101130000" channel="ch1">
+                <title>Timezone Test</title>
+              </programme>
+            </tv>
+        """.trimIndent()
+
+        val failure = runCatching {
+            parser.parse(xml.byteInputStream(), timezoneId = "Mars/Olympus")
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+    }
 
     @Test
     fun `parse_emptyStream_returnsEmpty`() {
@@ -466,6 +485,108 @@ class XmltvParserTest {
 
         assertThat(programmes).hasSize(1)
         assertThat(programmes.single().title).isEqualTo("Valid News")
+    }
+
+    @Test
+    fun `parseStreamingWithChannels_enforcesChannelAndProgrammeCounts`() = runTest {
+        val twoChannels = """
+            <tv>
+              <channel id="one"><display-name>One</display-name></channel>
+              <channel id="two"><display-name>Two</display-name></channel>
+            </tv>
+        """.trimIndent()
+        val twoProgrammes = """
+            <tv>
+              <programme start="20250101120000 +0000" stop="20250101130000 +0000" channel="one"><title>One</title></programme>
+              <programme start="20250101130000 +0000" stop="20250101140000 +0000" channel="one"><title>Two</title></programme>
+            </tv>
+        """.trimIndent()
+
+        val channelFailure = runCatching {
+            parser.parseStreamingWithChannels(
+                inputStream = twoChannels.byteInputStream(),
+                onChannel = {},
+                onProgramme = {},
+                limits = XmltvIngestionLimits(maxChannels = 1)
+            )
+        }.exceptionOrNull()
+        val programmeFailure = runCatching {
+            parser.parseStreamingWithChannels(
+                inputStream = twoProgrammes.byteInputStream(),
+                onChannel = {},
+                onProgramme = {},
+                limits = XmltvIngestionLimits(maxProgrammes = 1)
+            )
+        }.exceptionOrNull()
+
+        assertThat(channelFailure).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat((channelFailure as XmltvLimitExceeded).kind).isEqualTo(XmltvLimitKind.CHANNELS)
+        assertThat(programmeFailure).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat((programmeFailure as XmltvLimitExceeded).kind).isEqualTo(XmltvLimitKind.PROGRAMMES)
+    }
+
+    @Test
+    fun `parseStreamingWithChannels_rejectsVeryLongPersistedText`() = runTest {
+        val xml = """
+            <tv>
+              <programme start="20250101120000 +0000" stop="20250101130000 +0000" channel="one">
+                <title>News</title><desc>${"x".repeat(33)}</desc>
+              </programme>
+            </tv>
+        """.trimIndent()
+
+        val failure = runCatching {
+            parser.parseStreamingWithChannels(
+                inputStream = xml.byteInputStream(),
+                onChannel = {},
+                onProgramme = {},
+                limits = XmltvIngestionLimits(maxFieldChars = 32)
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat((failure as XmltvLimitExceeded).kind).isEqualTo(XmltvLimitKind.FIELD_LENGTH)
+    }
+
+    @Test
+    fun `parseStreamingWithChannels_rejectsExcessiveNesting`() = runTest {
+        val xml = "<tv><programme><desc><b>nested</b></desc></programme></tv>"
+
+        val failure = runCatching {
+            parser.parseStreamingWithChannels(
+                inputStream = xml.byteInputStream(),
+                onChannel = {},
+                onProgramme = {},
+                limits = XmltvIngestionLimits(maxXmlDepth = 3)
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat((failure as XmltvLimitExceeded).kind).isEqualTo(XmltvLimitKind.XML_DEPTH)
+    }
+
+    @Test
+    fun `parseStreamingWithChannels_boundsCategoriesPerProgramme`() = runTest {
+        val xml = """
+            <tv>
+              <programme start="20250101120000 +0000" stop="20250101130000 +0000" channel="one">
+                <title>News</title><category>News</category><category>Current affairs</category>
+              </programme>
+            </tv>
+        """.trimIndent()
+
+        val failure = runCatching {
+            parser.parseStreamingWithChannels(
+                inputStream = xml.byteInputStream(),
+                onChannel = {},
+                onProgramme = {},
+                limits = XmltvIngestionLimits(maxCategoriesPerProgramme = 1)
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat((failure as XmltvLimitExceeded).kind)
+            .isEqualTo(XmltvLimitKind.CATEGORIES_PER_PROGRAMME)
     }
 
     @Test

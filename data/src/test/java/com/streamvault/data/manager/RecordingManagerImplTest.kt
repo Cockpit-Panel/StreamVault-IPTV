@@ -2,6 +2,7 @@ package com.streamvault.data.manager
 
 import android.app.NotificationManager
 import android.content.ContentResolver
+import android.database.sqlite.SQLiteException
 import android.content.Context
 import com.google.common.truth.Truth.assertThat
 import com.google.gson.Gson
@@ -23,13 +24,16 @@ import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.RecordingFailureCategory
 import com.streamvault.domain.model.RecordingRecurrence
+import com.streamvault.domain.model.RecordingReconciliationResult
 import com.streamvault.domain.model.RecordingRequest
 import com.streamvault.domain.model.RecordingSourceType
 import com.streamvault.domain.model.RecordingStatus
 import com.streamvault.domain.model.Result
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Test
@@ -184,7 +188,7 @@ class RecordingManagerImplTest {
         val manager = createManager()
         val result = manager.reconcileRecordingState()
 
-        assertThat(result).isInstanceOf(com.streamvault.domain.model.Result.Success::class.java)
+        assertThat(result).isInstanceOf(RecordingReconciliationResult.Complete::class.java)
         verify(recordingRunDao, atLeastOnce()).update(
             argThat {
                 id == staleRun.id &&
@@ -193,6 +197,94 @@ class RecordingManagerImplTest {
             }
         )
         verify(recordingServiceLauncher, never()).startCapture(any(), any())
+    }
+
+    @Test
+    fun `reconcileRecordingState persists unarmed schedules while exact alarms are unavailable`(): Unit = runBlocking {
+        val scheduled = scheduledRun(id = "unarmed")
+        whenever(alarmScheduler.canScheduleExactAlarms()).thenReturn(false)
+        whenever(recordingRunDao.getAlarmManagedScheduledRuns()).thenReturn(listOf(scheduled))
+
+        val result = createManager().reconcileRecordingState()
+
+        assertThat(result).isInstanceOf(RecordingReconciliationResult.Complete::class.java)
+        verify(recordingRunDao, atLeastOnce()).setExactAlarmArmed(eq(scheduled.id), eq(false), any())
+        verify(alarmScheduler, never()).scheduleStart(any(), any())
+    }
+
+    @Test
+    fun `reconcileRecordingState quarantines malformed row and reports partial outcome`(): Unit = runBlocking {
+        val malformed = scheduledRun(id = "malformed-row")
+        whenever(recordingRunDao.getAlarmManagedScheduledRuns()).thenReturn(listOf(malformed))
+        whenever(recordingRunDao.getById(malformed.id)).thenReturn(malformed)
+        whenever(alarmScheduler.scheduleStart(malformed.id, malformed.scheduledStartMs)).thenReturn(
+            Result.error("Malformed legacy schedule", IllegalArgumentException("bad timestamp"))
+        )
+
+        val result = createManager().reconcileRecordingState()
+
+        assertThat(result).isInstanceOf(RecordingReconciliationResult.Partial::class.java)
+        val partial = result as RecordingReconciliationResult.Partial
+        assertThat(partial.summary.rowsInspected).isEqualTo(1)
+        assertThat(partial.summary.rowsQuarantined).isEqualTo(1)
+        assertThat(partial.rowFailures.single().recordingId).isEqualTo(malformed.id)
+        verify(recordingRunDao, atLeastOnce()).update(
+            argThat {
+                id == malformed.id &&
+                    status == RecordingStatus.FAILED &&
+                    failureReason?.contains("Malformed legacy schedule") == true
+            }
+        )
+    }
+
+    @Test
+    fun `reconciliation failure classification separates transient infrastructure from permanent data`() {
+        val lockedDatabase: SQLiteException = mock()
+        val constraintFailure: SQLiteException = mock()
+        whenever(lockedDatabase.message).thenReturn("database is locked")
+        whenever(constraintFailure.message).thenReturn("constraint failed")
+
+        assertThat(isTransientRecordingReconciliationFailure(IOException("offline"))).isTrue()
+        assertThat(isTransientRecordingReconciliationFailure(lockedDatabase)).isTrue()
+        assertThat(isTransientRecordingReconciliationFailure(constraintFailure)).isFalse()
+        assertThat(isTransientRecordingReconciliationFailure(IllegalArgumentException("bad row"))).isFalse()
+    }
+
+    @Test
+    fun `reconcileRecordingState propagates cancellation without terminal classification`() = runBlocking {
+        val manager = createManager()
+        whenever(recordingRunDao.getAlarmManagedScheduledRuns())
+            .thenThrow(CancellationException("test cancellation"))
+
+        var cancellation: CancellationException? = null
+        try {
+            manager.reconcileRecordingState()
+        } catch (caught: CancellationException) {
+            cancellation = caught
+        }
+
+        assertThat(cancellation).isNotNull()
+        assertThat(cancellation?.message).isEqualTo("test cancellation")
+    }
+
+    @Test
+    fun `foreground service timeout joins capture and persists a terminal reason`() = runBlocking {
+        val activeRun = scheduledRun(id = "quota-timeout", status = RecordingStatus.RECORDING)
+        whenever(recordingRunDao.getById(activeRun.id)).thenReturn(activeRun)
+
+        val manager = createManager()
+        val result = manager.stopRecordingForForegroundServiceTimeout(activeRun.id)
+
+        assertThat(result).isInstanceOf(Result.Success::class.java)
+        verify(alarmScheduler).cancel(activeRun.id)
+        verify(recordingRunDao).update(
+            argThat {
+                id == activeRun.id &&
+                    status == RecordingStatus.FAILED &&
+                    failureReason?.contains("foreground-service time allowance") == true &&
+                    terminalAtMs != null
+            }
+        )
     }
 
     private fun createManager() = RecordingManagerImpl(

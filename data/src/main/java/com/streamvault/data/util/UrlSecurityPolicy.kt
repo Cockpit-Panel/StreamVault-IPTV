@@ -65,12 +65,13 @@ object UrlSecurityPolicy {
         if (containsNewlines(url)) {
             return "Playlist sources must use HTTP, HTTPS, or point to a local file."
         }
-        val scheme = parseScheme(url) ?: return "Playlist sources must use HTTP, HTTPS, or point to a local file."
+        val withScheme = ensureScheme(url.trim())
+        val scheme = parseScheme(withScheme) ?: return "Playlist sources must use HTTP, HTTPS, or point to a local file."
         if (scheme in playlistLocalSchemes) {
             return null
         }
         return validateRemoteUrl(
-            url = url,
+            url = withScheme,
             allowedSchemes = playlistSourceSchemes,
             invalidSchemeMessage = "Playlist sources must use HTTP, HTTPS, or point to a local file.",
             missingHostMessage = "Playlist sources must include a host.",
@@ -86,7 +87,8 @@ object UrlSecurityPolicy {
             url.startsWith("content://") -> null  // SAF local file; validated by OS file picker
             // Allow http:// as well as https:// — many IPTV portals serve their XMLTV
             // EPG endpoint over plain HTTP on non-standard ports (same policy as playlists).
-            !containsNewlines(url) && hasAllowedScheme(url, playlistSourceSchemes) -> null
+            // Bare hostnames are accepted here too and resolved before persistence.
+            !containsNewlines(url) && hasAllowedScheme(ensureScheme(url.trim()), playlistSourceSchemes) -> null
             else -> "EPG URLs must use HTTP, HTTPS, or select a local file."
         }
     }
@@ -120,6 +122,16 @@ object UrlSecurityPolicy {
             ?.lowercase(Locale.ROOT)
     }
 
+    // Matches an RFC-3986 scheme prefix (e.g. http://, https://, file://, content://)
+    // so schemeless input can be detected reliably rather than via a loose "://" search.
+    private val SCHEME_PREFIX_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+    // Prepend https:// to schemeless input so it can be parsed and host-checked.
+    // resolveUrlProtocol (applied before persistence) later downgrades to http://
+    // when the server doesn't actually serve HTTPS.
+    private fun ensureScheme(url: String): String =
+        if (SCHEME_PREFIX_REGEX.containsMatchIn(url)) url else "https://$url"
+
     private fun validateRemoteUrl(
         url: String,
         allowedSchemes: Set<String>,
@@ -131,7 +143,8 @@ object UrlSecurityPolicy {
     ): String? {
         if (containsNewlines(url)) return invalidSchemeMessage
 
-        val uri = runCatching { URI(url.trim()) }.getOrNull() ?: return invalidSchemeMessage
+        val withScheme = ensureScheme(url.trim())
+        val uri = runCatching { URI(withScheme) }.getOrNull() ?: return invalidSchemeMessage
         val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return invalidSchemeMessage
         if (scheme !in allowedSchemes) return invalidSchemeMessage
         if (uri.host.isNullOrBlank()) return missingHostMessage

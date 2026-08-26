@@ -1,6 +1,8 @@
 package com.streamvault.app.ui.screens.epg
 
 import android.view.inputmethod.InputMethodManager
+import com.streamvault.app.ui.model.ArchiveReplayMechanism
+import com.streamvault.app.ui.model.archivePlaybackCapability
 import com.streamvault.app.ui.model.isArchivePlayable
 import com.streamvault.app.ui.model.guideLookupKey
 import androidx.compose.foundation.BorderStroke
@@ -77,7 +79,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.tv.material3.Border
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
@@ -146,6 +150,9 @@ fun FullEpgScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val overrideUiState by viewModel.overrideUiState.collectAsStateWithLifecycle()
     val programReminderUiState by viewModel.programReminderUiState.collectAsStateWithLifecycle()
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        viewModel.reconcileProgramReminders()
+    }
     var selectedProgram by remember { mutableStateOf<Pair<Channel, Program>?>(null) }
     var focusedChannel by remember { mutableStateOf<Channel?>(null) }
     var focusedProgram by remember { mutableStateOf<Program?>(null) }
@@ -249,6 +256,12 @@ fun FullEpgScreen(
         LaunchedEffect(message) {
             android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
             viewModel.clearRecordingMessage()
+        }
+    }
+    uiState.reminderMessage?.let { message ->
+        LaunchedEffect(message) {
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+            viewModel.clearReminderMessage()
         }
     }
 
@@ -837,20 +850,25 @@ private fun GuideProviderTroubleshootingCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = OnSurface
             )
+            val archiveCapability = channel.archivePlaybackCapability()
             val channelReason = when {
-                !channel.catchUpSupported && !program.hasArchive ->
+                !archiveCapability.advertisedByProvider && !program.hasArchive ->
                     stringResource(R.string.epg_provider_troubleshooting_no_archive)
-                channel.catchUpSupported && channel.catchUpSource.isNullOrBlank() ->
-                    stringResource(R.string.epg_provider_troubleshooting_missing_template)
-                channel.streamId <= 0L ->
-                    stringResource(R.string.epg_provider_troubleshooting_missing_stream_id)
+                !archiveCapability.canBuildReplayCandidate ->
+                    stringResource(R.string.epg_provider_troubleshooting_incomplete_metadata)
+                archiveCapability.mechanism == ArchiveReplayMechanism.XTREAM_STREAM_ID ->
+                    stringResource(R.string.epg_provider_troubleshooting_xtream_ready)
+                archiveCapability.mechanism == ArchiveReplayMechanism.STALKER_ARCHIVE_TOKEN ->
+                    stringResource(R.string.epg_provider_troubleshooting_stalker_ready)
+                archiveCapability.mechanism == ArchiveReplayMechanism.M3U_TEMPLATE ->
+                    stringResource(R.string.epg_provider_troubleshooting_m3u_best_effort)
                 else ->
                     stringResource(R.string.epg_provider_troubleshooting_ready)
             }
             Text(
                 text = channelReason,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (program.hasArchive) Primary else OnSurfaceDim
+                color = if (archiveCapability.canBuildReplayCandidate) Primary else OnSurfaceDim
             )
             if (isGuideStale) {
                 Text(

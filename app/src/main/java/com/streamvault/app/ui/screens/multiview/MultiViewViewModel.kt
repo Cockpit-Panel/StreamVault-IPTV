@@ -286,6 +286,7 @@ class MultiViewViewModel @Inject constructor(
                         localEngine.setFastRetryOnTransientFailures(
                             preferencesRepository.playerFastRetryOnTransientFailures.first()
                         )
+                        localEngine.setPlaybackBufferMode(preferencesRepository.playerPlaybackBufferMode.first())
                         val streamInfo = when (val result = channelRepository.getStreamInfo(channel)) {
                             is Result.Success -> result.data
                             is Result.Error -> throw IllegalStateException(result.message)

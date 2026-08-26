@@ -62,6 +62,7 @@ import com.streamvault.app.R
 import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.components.shell.StatusPill
 import com.streamvault.app.ui.design.AppColors
+import com.streamvault.app.ui.model.archivePlaybackCapability
 import com.streamvault.app.ui.screens.player.PlayerDiagnosticsUiState
 import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createTimeFormat
@@ -353,7 +354,7 @@ fun ChannelListOverlay(
                                             containerColor = AppColors.BrandMuted
                                         )
                                     }
-                                    if (channel.catchUpSupported) {
+                                    if (channel.archivePlaybackCapability().canBuildReplayCandidate) {
                                         StatusPill(
                                             label = stringResource(R.string.player_archive_badge),
                                             containerColor = AppColors.Warning,
@@ -570,12 +571,16 @@ fun EpgOverlay(
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
                             )
-                            if (currentChannel.catchUpSupported) {
+                            val archiveCapability = currentChannel.archivePlaybackCapability()
+                            if (archiveCapability.canBuildReplayCandidate) {
+                                val catchUpLabel = archiveCapability.windowDays?.let { days ->
+                                    stringResource(R.string.epg_catchup_available, days)
+                                } ?: stringResource(R.string.epg_catchup_available_unknown)
                                 Spacer(Modifier.height(8.dp))
                                 if (onOpenArchiveBrowser != null) {
                                     QuickActionButton(
                                         icon = stringResource(R.string.player_catchup_badge),
-                                        label = stringResource(R.string.epg_catchup_available, currentChannel.catchUpDays),
+                                        label = catchUpLabel,
                                         onClick = {
                                             onOverlayInteracted()
                                             onOpenArchiveBrowser()
@@ -584,7 +589,7 @@ fun EpgOverlay(
                                     )
                                 } else {
                                     StatusPill(
-                                        label = stringResource(R.string.epg_catchup_available, currentChannel.catchUpDays),
+                                        label = catchUpLabel,
                                         containerColor = AppColors.BrandMuted
                                     )
                                 }
@@ -847,7 +852,14 @@ fun DiagnosticsOverlay(
                             PlayerMetaRow(stringResource(R.string.player_diagnostics_source), diagnostics.providerSourceLabel)
                         }
                         PlayerOverlaySectionLabel(stringResource(R.string.player_diagnostics_section_playback))
-                        PlayerMetaRow(stringResource(R.string.player_diagnostics_decoder), diagnostics.decoderMode.name)
+                        PlayerMetaRow(
+                            stringResource(R.string.player_diagnostics_audio_decoder_mode),
+                            diagnostics.audioDecoderMode.name
+                        )
+                        PlayerMetaRow(
+                            stringResource(R.string.player_diagnostics_video_decoder_mode),
+                            diagnostics.videoDecoderMode.name
+                        )
                         PlayerMetaRow(stringResource(R.string.player_diagnostics_active_decoder), diagnostics.activeDecoderName)
                         PlayerMetaRow(stringResource(R.string.player_diagnostics_surface), diagnostics.renderSurfaceType)
                         PlayerMetaRow(stringResource(R.string.player_diagnostics_stream_class), diagnostics.streamClassLabel)

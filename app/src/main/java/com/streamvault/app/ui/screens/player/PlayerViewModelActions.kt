@@ -1,64 +1,103 @@
 package com.streamvault.app.ui.screens.player
 
 import androidx.lifecycle.viewModelScope
+import com.streamvault.app.R
 import com.streamvault.app.cast.CastMediaRequest
+import com.streamvault.app.cast.CastMediaRequestBuildResult
+import com.streamvault.app.cast.CastMediaRequestUnsupportedReason
+import com.streamvault.app.cast.CastPlaybackEvent
+import com.streamvault.app.cast.CastPlaybackReportMode
+import com.streamvault.app.cast.CastRewriteRequiredReason
 import com.streamvault.app.cast.CastStartResult
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.RecordingRecurrence
 import com.streamvault.domain.model.RecordingRequest
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.StreamInfo
-import com.streamvault.domain.model.StreamType
 import com.streamvault.domain.usecase.ScheduleRecordingCommand
 import kotlinx.coroutines.launch
 
 fun PlayerViewModel.castCurrentMedia(onRouteSelectionRequired: () -> Unit) {
     viewModelScope.launch {
-        if (currentStreamUrl.isCastUnsupportedProtocol()) {
-            showPlayerNotice(
-                message = "RTSP and RTMP streams are not supported for casting.",
-                recoveryType = PlayerRecoveryType.SOURCE
-            )
-            return@launch
-        }
-
-        val request = buildCastRequest()
-        if (request == null) {
-            showPlayerNotice(
-                message = "This item cannot be sent to a Cast receiver.",
-                recoveryType = PlayerRecoveryType.SOURCE
-            )
-            return@launch
-        }
-
-        when (castManager.startCasting(request)) {
-            CastStartResult.STARTED -> {
-                playerEngine.pause()
+        castPlaybackReportMode = CastPlaybackReportMode.NONE
+        val request = when (val result = buildCastRequestResult()) {
+            is PlayerCastRequestResult.Success -> result.request
+            is PlayerCastRequestResult.Failure -> {
                 showPlayerNotice(
-                    message = "Casting to the connected device.",
+                    message = result.message,
+                    recoveryType = PlayerRecoveryType.SOURCE
+                )
+                return@launch
+            }
+        }
+
+        when (playerCastCoordinator.startCasting(request)) {
+            CastStartResult.STARTED -> {
+                castPlaybackReportMode = CastPlaybackReportMode.SUCCESS_AND_FAILURE
+                showPlayerNotice(
+                    message = appContext.getString(R.string.cast_started),
                     recoveryType = PlayerRecoveryType.NETWORK
                 )
             }
 
-            CastStartResult.ROUTE_SELECTION_REQUIRED -> onRouteSelectionRequired()
+            CastStartResult.ROUTE_SELECTION_REQUIRED -> {
+                castPlaybackReportMode = CastPlaybackReportMode.SUCCESS_AND_FAILURE
+                onRouteSelectionRequired()
+            }
 
-            CastStartResult.UNAVAILABLE -> showPlayerNotice(
-                message = "Google Cast is unavailable on this device.",
-                recoveryType = PlayerRecoveryType.SOURCE
-            )
+            CastStartResult.UNAVAILABLE -> {
+                castPlaybackReportMode = CastPlaybackReportMode.NONE
+                showPlayerNotice(
+                    message = appContext.getString(R.string.cast_unavailable),
+                    recoveryType = PlayerRecoveryType.SOURCE
+                )
+            }
 
-            CastStartResult.UNSUPPORTED -> showPlayerNotice(
-                message = "This stream format is not supported by Google Cast.",
-                recoveryType = PlayerRecoveryType.SOURCE
-            )
+            CastStartResult.UNSUPPORTED -> {
+                castPlaybackReportMode = CastPlaybackReportMode.NONE
+                showPlayerNotice(
+                    message = toPlayerCastUnsupportedMessage(request),
+                    recoveryType = PlayerRecoveryType.SOURCE
+                )
+            }
         }
     }
 }
 
-fun PlayerViewModel.stopCasting() {
-    castManager.stopCasting()
+internal fun PlayerViewModel.observeCastPlaybackEvents() {
+    viewModelScope.launch {
+        playerCastCoordinator.playbackEvents.collect { event ->
+            handleCastPlaybackEvent(event)
+        }
+    }
+}
+
+private fun PlayerViewModel.handleCastPlaybackEvent(event: CastPlaybackEvent) {
+    val reportMode = castPlaybackReportMode
+    if (reportMode == CastPlaybackReportMode.NONE) return
+    if (event is CastPlaybackEvent.RouteSelectionCancelled) {
+        castPlaybackReportMode = CastPlaybackReportMode.NONE
+        return
+    }
+    val isSuccess = event is CastPlaybackEvent.MediaLoadSucceeded
+    if (isSuccess && reportMode == CastPlaybackReportMode.FAILURES_ONLY) {
+        castPlaybackReportMode = CastPlaybackReportMode.NONE
+        return
+    }
+    castPlaybackReportMode = CastPlaybackReportMode.NONE
+    if (isSuccess) {
+        playerEngine.pause()
+    }
     showPlayerNotice(
-        message = "Cast session disconnected.",
+        message = toPlayerCastPlaybackMessage(event),
+        recoveryType = if (isSuccess) PlayerRecoveryType.NETWORK else PlayerRecoveryType.SOURCE
+    )
+}
+
+fun PlayerViewModel.stopCasting() {
+    playerCastCoordinator.stopCasting()
+    showPlayerNotice(
+        message = appContext.getString(R.string.cast_disconnected),
         recoveryType = PlayerRecoveryType.NETWORK
     )
 }
@@ -71,7 +110,7 @@ fun PlayerViewModel.startManualRecording() {
     }
     viewModelScope.launch {
         val now = System.currentTimeMillis()
-        val result = recordingManager.startManualRecording(
+        val result = playerRecordingCoordinator.startManualRecording(
             RecordingRequest(
                 providerId = currentProviderId,
                 channelId = channel.id,
@@ -104,7 +143,7 @@ fun PlayerViewModel.scheduleWeeklyRecording() {
 
 private fun PlayerViewModel.scheduleRecordingInternal(recurrence: RecordingRecurrence) {
     viewModelScope.launch {
-        val result = scheduleRecordingUseCase(
+        val result = playerRecordingCoordinator.scheduleRecording(
             ScheduleRecordingCommand(
                 contentType = currentContentType,
                 providerId = currentProviderId,
@@ -133,7 +172,7 @@ private fun PlayerViewModel.scheduleRecordingInternal(recurrence: RecordingRecur
 fun PlayerViewModel.stopCurrentRecording() {
     val recording = currentChannelRecording.value ?: return
     viewModelScope.launch {
-        val result = recordingManager.stopRecording(recording.id)
+        val result = playerRecordingCoordinator.stopRecording(recording.id)
         if (result is Result.Error) {
             showPlayerNotice(message = result.message)
         } else {
@@ -143,99 +182,162 @@ fun PlayerViewModel.stopCurrentRecording() {
 }
 
 internal suspend fun PlayerViewModel.buildCastRequest(): CastMediaRequest? {
+    return (buildCastRequestResult() as? PlayerCastRequestResult.Success)?.request
+}
+
+internal suspend fun PlayerViewModel.buildCastRequestResult(): PlayerCastRequestResult {
     return when (currentContentType) {
         ContentType.LIVE -> {
-            val channel = currentChannel.value ?: return null
+            val channel = currentChannel.value
+                ?: return PlayerCastRequestResult.Failure(
+                    toPlayerCastMessage(CastMediaRequestUnsupportedReason.STREAM_UNAVAILABLE)
+                )
             // Use preferStableUrl = true for Cast: the credential-based portal URL
             // does not expire, unlike the tokenized direct-source CDN URL.
-            val streamInfo = channelRepository.getStreamInfo(channel, preferStableUrl = true)
-                .getOrNull() ?: return null
-            streamInfo.toCastRequest(
-                title = mediaTitle.value ?: channel.name,
-                subtitle = currentProgram.value?.title,
-                artworkUrl = channel.logoUrl ?: currentArtworkUrl,
-                isLive = true,
-                startPositionMs = 0L
+            val streamInfo = playerChannelCoordinator.getStreamInfo(channel, preferStableUrl = true)
+                .getOrNull()
+                ?: return PlayerCastRequestResult.Failure(
+                    toPlayerCastMessage(CastMediaRequestUnsupportedReason.STREAM_UNAVAILABLE)
+                )
+            toPlayerCastRequestResult(
+                playerCastCoordinator.buildFromStreamInfo(
+                    streamInfo = streamInfo,
+                    title = mediaTitle.value ?: channel.name,
+                    subtitle = currentProgram.value?.title,
+                    artworkUrl = channel.logoUrl ?: currentArtworkUrl,
+                    isLive = true,
+                    startPositionMs = 0L
+                )
             )
         }
 
-        ContentType.MOVIE -> {
-            val movie = movieRepository.getMovie(currentContentId)
-            val streamInfo = movie?.let { movieRepository.getStreamInfo(it).getOrNull() }
+        ContentType.MOVIE,
+        ContentType.VOD -> {
+            val movie = playerContentResolver.getMovie(currentContentId)
+            val repositoryStreamInfo = movie?.let { playerContentResolver.getMovieStreamInfo(it).getOrNull() }
+            val streamInfo = selectPreferredVodCastStreamInfo(
+                activeStreamInfo = currentResolvedStreamInfo.takeIf { currentContentType == ContentType.MOVIE },
+                activePlaybackUrl = currentResolvedPlaybackUrl,
+                fallbackStreamInfo = repositoryStreamInfo
+            )
                 ?: return directCastRequest()
-            streamInfo.toCastRequest(
-                title = currentTitle.ifBlank { movie.name },
-                subtitle = movie.genre,
-                artworkUrl = currentArtworkUrl ?: movie.posterUrl ?: movie.backdropUrl,
-                isLive = false,
-                startPositionMs = playerEngine.currentPosition.value
+            toPlayerCastRequestResult(
+                playerCastCoordinator.buildFromStreamInfo(
+                    streamInfo = streamInfo,
+                    title = currentTitle.ifBlank { movie?.name.orEmpty() },
+                    subtitle = movie?.genre,
+                    artworkUrl = currentArtworkUrl ?: movie?.posterUrl ?: movie?.backdropUrl,
+                    isLive = false,
+                    startPositionMs = playerEngine.currentPosition.value
+                )
             )
         }
 
         ContentType.SERIES,
-        ContentType.SERIES_EPISODE -> directCastRequest()
+        ContentType.SERIES_EPISODE -> buildSeriesCastRequestResult()
     }
 }
 
-internal fun PlayerViewModel.directCastRequest(): CastMediaRequest? {
-    val url = currentStreamUrl.takeIf { it.isNotBlank() } ?: return null
-    return StreamInfo(url = url).toCastRequest(
-        title = currentTitle,
-        subtitle = null,
-        artworkUrl = currentArtworkUrl,
-        isLive = false,
-        startPositionMs = playerEngine.currentPosition.value
+private suspend fun PlayerViewModel.buildSeriesCastRequestResult(): PlayerCastRequestResult {
+    val resolution = resolvePlaybackStreamResolution(
+        logicalUrl = currentStreamUrl,
+        internalContentId = currentStableEpisodeId?.takeIf { it > 0L } ?: currentContentId,
+        providerId = currentProviderId,
+        contentType = currentContentType,
+    )
+    resolution.credentialFailureMessage?.let { message ->
+        return PlayerCastRequestResult.Failure(message)
+    }
+    resolution.resolutionFailureMessage?.let { message ->
+        return PlayerCastRequestResult.Failure(message)
+    }
+    val streamInfo = selectPreferredVodCastStreamInfo(
+        activeStreamInfo = currentResolvedStreamInfo.takeIf {
+            currentContentType == ContentType.SERIES || currentContentType == ContentType.SERIES_EPISODE
+        },
+        activePlaybackUrl = currentResolvedPlaybackUrl,
+        fallbackStreamInfo = resolution.streamInfo
+    )
+        ?: return PlayerCastRequestResult.Failure(
+            toPlayerCastMessage(CastMediaRequestUnsupportedReason.STREAM_UNAVAILABLE)
+        )
+    val episode = currentEpisode.value
+    val series = currentSeries.value
+    val castTitle = if (series != null && episode != null) {
+        "${series.name} - S${episode.seasonNumber}E${episode.episodeNumber}"
+    } else {
+        currentTitle.ifBlank { episode?.let(::buildEpisodePlaybackTitle).orEmpty() }
+    }
+    return toPlayerCastRequestResult(
+        playerCastCoordinator.buildFromStreamInfo(
+            streamInfo = streamInfo,
+            title = castTitle,
+            subtitle = episode?.title,
+            artworkUrl = currentArtworkUrl ?: episode?.coverUrl ?: series?.posterUrl ?: series?.backdropUrl,
+            isLive = false,
+            startPositionMs = playerEngine.currentPosition.value
+        )
     )
 }
 
-internal fun StreamInfo.toCastRequest(
-    title: String,
-    subtitle: String?,
-    artworkUrl: String?,
-    isLive: Boolean,
-    startPositionMs: Long
-): CastMediaRequest? {
-    val resolvedUrl = url.takeIf { it.isNotBlank() } ?: return null
-    val mimeType = when (inferCastStreamType()) {
-        StreamType.HLS -> "application/x-mpegURL"
-        StreamType.DASH -> "application/dash+xml"
-        StreamType.SMOOTH_STREAMING -> "application/vnd.ms-sstr+xml"
-        StreamType.MPEG_TS -> "video/mp2t"
-        StreamType.RTSP -> return null
-        StreamType.PROGRESSIVE,
-        StreamType.UNKNOWN -> "video/*"
-    }
-    return CastMediaRequest(
-        url = resolvedUrl,
-        title = title.ifBlank { this.title ?: "StreamVault" },
-        subtitle = subtitle,
-        artworkUrl = artworkUrl,
-        mimeType = mimeType,
-        isLive = isLive,
-        startPositionMs = if (isLive) 0L else startPositionMs
+internal fun PlayerViewModel.directCastRequest(): PlayerCastRequestResult {
+    val url = currentStreamUrl.takeIf { it.isNotBlank() }
+        ?: return PlayerCastRequestResult.Failure(
+            toPlayerCastMessage(CastMediaRequestUnsupportedReason.EMPTY_URL)
+        )
+    return toPlayerCastRequestResult(
+        playerCastCoordinator.buildFromStreamInfo(
+            streamInfo = StreamInfo(url = url),
+            title = currentTitle,
+            subtitle = null,
+            artworkUrl = currentArtworkUrl,
+            isLive = false,
+            startPositionMs = playerEngine.currentPosition.value
+        )
     )
 }
 
-internal fun StreamInfo.inferCastStreamType(): StreamType {
-    if (streamType != StreamType.UNKNOWN) {
-        return streamType
-    }
-    val normalizedUrl = url.lowercase()
-    return when {
-        normalizedUrl.endsWith(".m3u8") -> StreamType.HLS
-        normalizedUrl.endsWith(".mpd") -> StreamType.DASH
-        normalizedUrl.contains(".isml/manifest") || normalizedUrl.contains(".ism/manifest") ||
-            normalizedUrl.endsWith(".ism") || normalizedUrl.endsWith(".isml") -> StreamType.SMOOTH_STREAMING
-        normalizedUrl.endsWith(".ts") -> StreamType.MPEG_TS
-        normalizedUrl.startsWith("rtsp") -> StreamType.RTSP
-        else -> StreamType.PROGRESSIVE
-    }
+private fun PlayerViewModel.toPlayerCastRequestResult(
+    result: CastMediaRequestBuildResult
+): PlayerCastRequestResult = when (result) {
+    is CastMediaRequestBuildResult.Success -> PlayerCastRequestResult.Success(result.request)
+    is CastMediaRequestBuildResult.Unsupported -> PlayerCastRequestResult.Failure(toPlayerCastMessage(result.reason))
 }
 
-private fun String.isCastUnsupportedProtocol(): Boolean {
-    val normalizedUrl = trim().lowercase()
-    return normalizedUrl.startsWith("rtsp://") ||
-        normalizedUrl.startsWith("rtsps://") ||
-        normalizedUrl.startsWith("rtmp://") ||
-        normalizedUrl.startsWith("rtmps://")
+sealed interface PlayerCastRequestResult {
+    data class Success(val request: CastMediaRequest) : PlayerCastRequestResult
+    data class Failure(val message: String) : PlayerCastRequestResult
 }
+
+private fun PlayerViewModel.toPlayerCastMessage(
+    reason: CastMediaRequestUnsupportedReason
+): String = appContext.getString(
+    when (reason) {
+        CastMediaRequestUnsupportedReason.STREAM_UNAVAILABLE,
+        CastMediaRequestUnsupportedReason.EMPTY_URL -> R.string.cast_item_unavailable
+        CastMediaRequestUnsupportedReason.UNSUPPORTED_PROTOCOL -> R.string.cast_protocol_unsupported
+        CastMediaRequestUnsupportedReason.DRM_PROTECTED -> R.string.cast_drm_unsupported
+    }
+)
+
+private fun PlayerViewModel.toPlayerCastUnsupportedMessage(request: CastMediaRequest): String = appContext.getString(
+    when (request.rewriteRequiredReason) {
+        CastRewriteRequiredReason.LOCAL_URI -> R.string.cast_local_url_unsupported
+        CastRewriteRequiredReason.CUSTOM_HEADERS -> R.string.cast_headers_unsupported
+        CastRewriteRequiredReason.CUSTOM_USER_AGENT -> R.string.cast_user_agent_unsupported
+        CastRewriteRequiredReason.PROXY -> R.string.cast_proxy_unsupported
+        CastRewriteRequiredReason.INVALID_SSL,
+        CastRewriteRequiredReason.SCOPED_TRANSPORT -> R.string.cast_invalid_ssl_unsupported
+        null -> R.string.cast_stream_unsupported
+    }
+)
+
+private fun PlayerViewModel.toPlayerCastPlaybackMessage(event: CastPlaybackEvent): String = appContext.getString(
+    when (event) {
+        is CastPlaybackEvent.MediaLoadSucceeded -> R.string.cast_started
+        is CastPlaybackEvent.MediaLoadFailed -> R.string.cast_load_failed
+        is CastPlaybackEvent.SessionStartFailed -> R.string.cast_session_failed
+        is CastPlaybackEvent.ReceiverUnavailable -> R.string.cast_receiver_unavailable
+        CastPlaybackEvent.RouteSelectionCancelled -> R.string.cast_selection_cancelled
+    }
+)

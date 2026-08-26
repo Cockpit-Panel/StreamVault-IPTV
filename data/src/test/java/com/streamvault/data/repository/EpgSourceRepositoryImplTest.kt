@@ -10,29 +10,33 @@ import com.streamvault.data.local.dao.ChannelEpgMappingDao
 import com.streamvault.data.local.dao.EpgChannelDao
 import com.streamvault.data.local.dao.EpgProgrammeDao
 import com.streamvault.data.local.dao.EpgSourceDao
-import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.dao.ProviderEpgSourceDao
 import com.streamvault.data.local.entity.ChannelEpgMappingEntity
 import com.streamvault.data.local.entity.EpgChannelEntity
 import com.streamvault.data.local.entity.EpgProgrammeEntity
 import com.streamvault.data.local.entity.EpgSourceEntity
-import com.streamvault.data.local.entity.ProviderEntity
 import com.streamvault.data.local.entity.ProviderEpgSourceEntity
 import com.streamvault.data.parser.XmltvParser
+import com.streamvault.data.parser.XmltvIngestionLimits
+import com.streamvault.data.parser.XmltvLimitExceeded
+import com.streamvault.data.parser.XmltvLimitKind
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.EpgMatchType
 import com.streamvault.domain.model.EpgSourceType
 import com.streamvault.domain.model.Result
-import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.XmltvTimezonePolicy
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.FilterInputStream
+import java.io.InputStream
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -40,6 +44,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Before
 import org.junit.Test
+import org.junit.Assert.assertThrows
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.argThat
@@ -49,6 +54,7 @@ import org.mockito.kotlin.eq
 import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.isNull
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.verifyNoMoreInteractions
@@ -57,11 +63,86 @@ import java.util.zip.GZIPOutputStream
 
 class EpgSourceRepositoryImplTest {
 
+    @Test
+    fun `limitEpgInput rejects bytes after the configured decompressed limit`() {
+        val input = limitEpgInput(ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)), maxBytes = 3)
+
+        assertThat(input.read(ByteArray(3))).isEqualTo(3)
+        assertThrows(IOException::class.java) { input.read() }
+    }
+
+    @Test
+    fun `limitEpgInput accepts input exactly at the configured limit`() {
+        val input = limitEpgInput(ByteArrayInputStream(byteArrayOf(1, 2, 3)), maxBytes = 3)
+
+        assertThat(input.readBytes()).hasLength(3)
+    }
+
+    @Test
+    fun `small gzip is rejected when expansion crosses decompressed boundary`() {
+        val expanded = "<tv><desc>${"x".repeat(512)}</desc></tv>".toByteArray()
+        val compressed = gzip(expanded)
+        val limits = XmltvIngestionLimits(
+            maxRawBytes = compressed.size.toLong(),
+            maxDecompressedBytes = 128
+        )
+
+        val error = assertThrows(XmltvLimitExceeded::class.java) {
+            openLimitedXmltvInput(
+                ByteArrayInputStream(compressed),
+                "https://example.com/guide.gz",
+                XmltvParser(),
+                limits
+            ).use(InputStream::readBytes)
+        }
+
+        assertThat(error.kind).isEqualTo(XmltvLimitKind.DECOMPRESSED_BYTES)
+    }
+
+    @Test
+    fun `chunked gzip cannot bypass decompressed boundary`() {
+        val expanded = "<tv><desc>${"y".repeat(512)}</desc></tv>".toByteArray()
+        val compressed = gzip(expanded)
+        val chunked = object : FilterInputStream(ByteArrayInputStream(compressed)) {
+            override fun read(bytes: ByteArray, off: Int, len: Int): Int =
+                super.read(bytes, off, len.coerceAtMost(3))
+        }
+
+        val error = assertThrows(XmltvLimitExceeded::class.java) {
+            openLimitedXmltvInput(
+                chunked,
+                "https://example.com/chunked",
+                XmltvParser(),
+                XmltvIngestionLimits(
+                    maxRawBytes = compressed.size.toLong(),
+                    maxDecompressedBytes = 128
+                )
+            ).use(InputStream::readBytes)
+        }
+
+        assertThat(error.kind).isEqualTo(XmltvLimitKind.DECOMPRESSED_BYTES)
+    }
+
+    @Test
+    fun `compressed transport is rejected at the smaller raw boundary`() {
+        val compressed = gzip("<tv>${"z".repeat(512)}</tv>".toByteArray())
+
+        val error = assertThrows(XmltvLimitExceeded::class.java) {
+            openLimitedXmltvInput(
+                ByteArrayInputStream(compressed),
+                "https://example.com/guide.gz",
+                XmltvParser(),
+                XmltvIngestionLimits(maxRawBytes = compressed.size.toLong() - 1, maxDecompressedBytes = 10_000)
+            ).use(InputStream::readBytes)
+        }
+
+        assertThat(error.kind).isEqualTo(XmltvLimitKind.RAW_BYTES)
+    }
+
     private val context: Context = mock()
     private val contentResolver: ContentResolver = mock()
     private val epgSourceDao: EpgSourceDao = mock()
     private val providerEpgSourceDao: ProviderEpgSourceDao = mock()
-    private val providerDao: ProviderDao = mock()
     private val channelEpgMappingDao: ChannelEpgMappingDao = mock()
     private val epgChannelDao: EpgChannelDao = mock()
     private val epgProgrammeDao: EpgProgrammeDao = mock()
@@ -84,13 +165,11 @@ class EpgSourceRepositoryImplTest {
         whenever(epgHttpClientBuilder.readTimeout(any<Long>(), any())).thenReturn(epgHttpClientBuilder)
         whenever(epgHttpClientBuilder.build()).thenReturn(okHttpClient)
         runBlocking {
-            whenever(providerDao.getById(any())).thenReturn(null)
         }
         repository = EpgSourceRepositoryImpl(
             context = context,
             epgSourceDao = epgSourceDao,
             providerEpgSourceDao = providerEpgSourceDao,
-            providerDao = providerDao,
             channelEpgMappingDao = channelEpgMappingDao,
             epgChannelDao = epgChannelDao,
             epgProgrammeDao = epgProgrammeDao,
@@ -241,7 +320,7 @@ class EpgSourceRepositoryImplTest {
     }
 
     @Test
-    fun `refreshSource returns typed error when parser hits oversized chunked response`() = runTest {
+    fun `refreshSource returns typed error cleans staging and preserves active rows on overflow`() = runTest {
         val source = EpgSourceEntity(
             id = 10L,
             name = "Primary",
@@ -252,15 +331,23 @@ class EpgSourceRepositoryImplTest {
         whenever(contentResolver.openInputStream(Uri.parse(source.url))).thenReturn(ByteArrayInputStream("<tv/>".toByteArray()))
         whenever(xmltvParser.maybeDecompressGzip(eq(source.url), any())).thenAnswer { it.arguments[1] }
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(emptyList())
-        doAnswer { throw IOException("EPG response too large (>200 MB)") }
+        doAnswer { throw XmltvLimitExceeded(XmltvLimitKind.PROGRAMMES, 1_000_000) }
             .whenever(xmltvParser)
-            .parseStreamingWithChannels(any(), anyOrNull(), any(), any())
+            .parseStreamingWithChannels(any(), anyOrNull(), any(), any(), any())
 
         val result = repository.refreshSource(10L)
 
         assertThat(result is Result.Error).isTrue()
-        assertThat((result as Result.Error).message).isEqualTo("EPG response exceeded 200 MB limit")
-        verify(epgSourceDao).updateRefreshError(eq(10L), eq("EPG response exceeded 200 MB limit"), any())
+        assertThat((result as Result.Error).exception).isInstanceOf(XmltvLimitExceeded::class.java)
+        assertThat(result.message).isEqualTo("EPG programmes exceeded safety limit")
+        verify(epgProgrammeDao, times(2)).deleteBySource(-10L)
+        verify(epgChannelDao, times(2)).deleteBySource(-10L)
+        verify(epgSourceDao, times(2)).delete(-10L)
+        verify(epgProgrammeDao, never()).deleteBySource(10L)
+        verify(epgChannelDao, never()).deleteBySource(10L)
+        verify(epgProgrammeDao, never()).moveToSource(any(), any())
+        verify(epgChannelDao, never()).moveToSource(any(), any())
+        verify(epgSourceDao).updateRefreshError(eq(10L), eq("EPG programmes exceeded safety limit"), any())
     }
 
     @Test
@@ -296,7 +383,6 @@ class EpgSourceRepositoryImplTest {
             context = context,
             epgSourceDao = epgSourceDao,
             providerEpgSourceDao = providerEpgSourceDao,
-            providerDao = providerDao,
             channelEpgMappingDao = channelEpgMappingDao,
             epgChannelDao = epgChannelDao,
             epgProgrammeDao = epgProgrammeDao,
@@ -309,7 +395,7 @@ class EpgSourceRepositoryImplTest {
 
         whenever(epgSourceDao.getById(10L)).thenReturn(source)
         whenever(okHttpClient.newCall(any())).thenReturn(call)
-        whenever(call.execute()).thenReturn(response)
+        enqueueResponse(call, response)
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(emptyList())
 
         val result = repositoryWithRealParser.refreshSource(10L)
@@ -348,7 +434,7 @@ class EpgSourceRepositoryImplTest {
     }
 
     @Test
-    fun `refreshSource does not force identity encoding for remote downloads`() = runTest {
+    fun `refreshSource requests identity encoding so raw bytes are bounded before decompression`() = runTest {
         val source = EpgSourceEntity(
             id = 10L,
             name = "MyEPG",
@@ -367,14 +453,14 @@ class EpgSourceRepositoryImplTest {
 
         whenever(epgSourceDao.getById(10L)).thenReturn(source)
         whenever(okHttpClient.newCall(requestCaptor.capture())).thenReturn(call)
-        whenever(call.execute()).thenReturn(response)
+        enqueueResponse(call, response)
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(emptyList())
         whenever(xmltvParser.maybeDecompressGzip(eq(source.url), any())).thenAnswer { it.arguments[1] }
 
         val result = repository.refreshSource(10L)
 
         assertThat(result is Result.Success).isTrue()
-        assertThat(requestCaptor.firstValue.header("Accept-Encoding")).isNull()
+        assertThat(requestCaptor.firstValue.header("Accept-Encoding")).isEqualTo("identity")
     }
 
     @Test
@@ -398,7 +484,7 @@ class EpgSourceRepositoryImplTest {
 
         whenever(epgSourceDao.getById(10L)).thenReturn(source)
         whenever(okHttpClient.newCall(any())).thenReturn(call)
-        whenever(call.execute()).thenReturn(response)
+        enqueueResponse(call, response)
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(listOf(7L, 8L))
 
         val result = repository.refreshSource(10L)
@@ -410,11 +496,13 @@ class EpgSourceRepositoryImplTest {
     }
 
     @Test
-    fun `refreshSource passes shared provider timezone to parser when assignments agree`() = runTest {
+    fun `refreshSource uses explicit source timezone regardless of assignments`() = runTest {
         val source = EpgSourceEntity(
             id = 10L,
             name = "Primary",
-            url = "https://example.com/epg.xml"
+            url = "https://example.com/epg.xml",
+            timezonePolicy = XmltvTimezonePolicy.EXPLICIT_ZONE,
+            timezoneId = "America/New_York"
         )
         val request = Request.Builder().url(source.url).build()
         val response = Response.Builder()
@@ -428,36 +516,18 @@ class EpgSourceRepositoryImplTest {
 
         whenever(epgSourceDao.getById(10L)).thenReturn(source)
         whenever(okHttpClient.newCall(any())).thenReturn(call)
-        whenever(call.execute()).thenReturn(response)
+        enqueueResponse(call, response)
         whenever(xmltvParser.maybeDecompressGzip(eq(source.url), any())).thenAnswer { it.arguments[1] }
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(listOf(7L, 8L))
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
-                id = 7L,
-                name = "Provider 7",
-                type = ProviderType.M3U,
-                serverUrl = "https://provider7.example.com",
-                stalkerDeviceTimezone = "America/New_York"
-            )
-        )
-        whenever(providerDao.getById(8L)).thenReturn(
-            ProviderEntity(
-                id = 8L,
-                name = "Provider 8",
-                type = ProviderType.M3U,
-                serverUrl = "https://provider8.example.com",
-                stalkerDeviceTimezone = "America/New_York"
-            )
-        )
 
         val result = repository.refreshSource(10L)
 
         assertThat(result is Result.Success).isTrue()
-        verify(xmltvParser).parseStreamingWithChannels(any(), eq("America/New_York"), any(), any())
+        verify(xmltvParser).parseStreamingWithChannels(any(), eq("America/New_York"), any(), any(), any())
     }
 
     @Test
-    fun `refreshSource falls back to system timezone when assigned providers disagree`() = runTest {
+    fun `refreshSource requires offsets when source has no timezone override`() = runTest {
         val source = EpgSourceEntity(
             id = 10L,
             name = "Primary",
@@ -475,32 +545,34 @@ class EpgSourceRepositoryImplTest {
 
         whenever(epgSourceDao.getById(10L)).thenReturn(source)
         whenever(okHttpClient.newCall(any())).thenReturn(call)
-        whenever(call.execute()).thenReturn(response)
+        enqueueResponse(call, response)
         whenever(xmltvParser.maybeDecompressGzip(eq(source.url), any())).thenAnswer { it.arguments[1] }
         whenever(providerEpgSourceDao.getProviderIdsForSourceSync(10L)).thenReturn(listOf(7L, 8L))
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
-                id = 7L,
-                name = "Provider 7",
-                type = ProviderType.M3U,
-                serverUrl = "https://provider7.example.com",
-                stalkerDeviceTimezone = "America/New_York"
-            )
-        )
-        whenever(providerDao.getById(8L)).thenReturn(
-            ProviderEntity(
-                id = 8L,
-                name = "Provider 8",
-                type = ProviderType.M3U,
-                serverUrl = "https://provider8.example.com",
-                stalkerDeviceTimezone = "Europe/London"
-            )
-        )
 
         val result = repository.refreshSource(10L)
 
         assertThat(result is Result.Success).isTrue()
-        verify(xmltvParser).parseStreamingWithChannels(any(), isNull(), any(), any())
+        verify(xmltvParser).parseStreamingWithChannels(any(), isNull(), any(), any(), any())
+    }
+
+    @Test
+    fun `timezone policy validation accepts only valid explicit IANA zones`() {
+        val valid = validateXmltvTimezonePolicy(
+            XmltvTimezonePolicy.EXPLICIT_ZONE,
+            " Europe/Amsterdam "
+        )
+        val invalid = validateXmltvTimezonePolicy(
+            XmltvTimezonePolicy.EXPLICIT_ZONE,
+            "Mars/Olympus"
+        )
+        val missing = validateXmltvTimezonePolicy(
+            XmltvTimezonePolicy.EXPLICIT_ZONE,
+            null
+        )
+
+        assertThat((valid as Result.Success).data).isEqualTo("Europe/Amsterdam")
+        assertThat(invalid).isInstanceOf(Result.Error::class.java)
+        assertThat(missing).isInstanceOf(Result.Error::class.java)
     }
 
     private class CloseTrackingInputStream : ByteArrayInputStream(byteArrayOf()) {
@@ -511,6 +583,13 @@ class EpgSourceRepositoryImplTest {
             closed = true
             super.close()
         }
+    }
+
+    private fun enqueueResponse(call: Call, response: Response) {
+        doAnswer { invocation ->
+            (invocation.arguments[0] as Callback).onResponse(call, response)
+            null
+        }.whenever(call).enqueue(any())
     }
 
     private fun gzip(bytes: ByteArray): ByteArray {

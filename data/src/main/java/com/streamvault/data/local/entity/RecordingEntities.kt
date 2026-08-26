@@ -9,6 +9,7 @@ import com.streamvault.domain.model.RecordingFailureCategory
 import com.streamvault.domain.model.RecordingRecurrence
 import com.streamvault.domain.model.RecordingSourceType
 import com.streamvault.domain.model.RecordingStatus
+import com.streamvault.domain.model.ProgramReminderDeliveryState
 
 @Entity(
     tableName = "recording_schedules",
@@ -104,6 +105,7 @@ data class RecordingRunEntity(
     val priority: Int = 0,
     @ColumnInfo(name = "alarm_start_at_ms") val alarmStartAtMs: Long? = null,
     @ColumnInfo(name = "alarm_stop_at_ms") val alarmStopAtMs: Long? = null,
+    @ColumnInfo(name = "exact_alarm_armed") val exactAlarmArmed: Boolean = true,
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
 )
@@ -155,6 +157,13 @@ data class ProgramReminderEntity(
     @ColumnInfo(name = "lead_time_minutes") val leadTimeMinutes: Int = 5,
     @ColumnInfo(name = "is_dismissed") val isDismissed: Boolean = false,
     @ColumnInfo(name = "notified_at") val notifiedAt: Long? = null,
+    @ColumnInfo(name = "exact_alarm_armed") val exactAlarmArmed: Boolean = true,
+    @ColumnInfo(name = "delivery_state")
+    val deliveryState: ProgramReminderDeliveryState = ProgramReminderDeliveryState.PENDING,
+    @ColumnInfo(name = "delivery_attempt_token") val deliveryAttemptToken: String? = null,
+    @ColumnInfo(name = "delivery_attempted_at") val deliveryAttemptedAt: Long? = null,
+    @ColumnInfo(name = "delivery_attempt_count") val deliveryAttemptCount: Int = 0,
+    @ColumnInfo(name = "delivery_failure_reason") val deliveryFailureReason: String? = null,
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -182,5 +191,6 @@ data class RecordingRunWithSchedule(
     @ColumnInfo(name = "failure_reason") val failureReason: String? = null,
     @ColumnInfo(name = "terminal_at_ms") val terminalAtMs: Long? = null,
     @ColumnInfo(name = "schedule_enabled") val scheduleEnabled: Boolean,
+    @ColumnInfo(name = "exact_alarm_armed") val exactAlarmArmed: Boolean,
     val priority: Int
 )

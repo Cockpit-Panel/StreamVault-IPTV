@@ -73,7 +73,7 @@ import com.streamvault.app.ui.theme.*
 import com.streamvault.domain.model.ActiveLiveSource
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.Channel
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -538,6 +538,29 @@ fun HomeScreen(
                     if (fallbackCategory.id != selectedCategory.id) {
                         viewModel.selectCategory(fallbackCategory)
                     }
+                }
+
+                LaunchedEffect(
+                    uiState.shouldAutoFocusFirstChannelOnEntry,
+                    uiState.selectedCategory?.id,
+                    uiState.isLoading,
+                    uiState.filteredChannels,
+                    hasOverlay,
+                    isReorderMode
+                ) {
+                    if (!uiState.shouldAutoFocusFirstChannelOnEntry || hasOverlay || isReorderMode) {
+                        return@LaunchedEffect
+                    }
+                    if (uiState.isLoading) return@LaunchedEffect
+
+                    val firstChannelId = uiState.filteredChannels.firstOrNull()?.id
+                    if (firstChannelId != null) {
+                        lastFocusedChannelId = firstChannelId
+                        preferredRestoreTarget = FocusRestoreTarget.CHANNEL.name
+                        pendingRestoreTarget = FocusRestoreTarget.CHANNEL
+                        focusRestoreNonce++
+                    }
+                    viewModel.consumeInitialChannelFocusRequest()
                 }
 
                 LaunchedEffect(

@@ -37,6 +37,9 @@ import com.streamvault.app.ui.design.FocusSpec
 import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.theme.OnSurfaceDim
 import com.streamvault.app.ui.theme.Primary
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
+import com.streamvault.domain.model.ProviderType
 
 internal fun LazyListScope.epgSourcesSection(
     uiState: SettingsUiState,
@@ -81,6 +84,9 @@ internal fun LazyListScope.epgSourcesSection(
                 pendingDelete = uiState.epgPendingDeleteSourceId == source.id,
                 onToggleEnabled = { enabled -> viewModel.toggleEpgSourceEnabled(source.id, enabled) },
                 onRefresh = { viewModel.refreshEpgSource(source.id) },
+                onUpdateTimezone = { timezoneId, onSuccess, onError ->
+                    viewModel.updateEpgSourceTimezone(source, timezoneId, onSuccess, onError)
+                },
                 onSetPendingDelete = { pending ->
                     viewModel.setPendingDeleteEpgSource(if (pending) source.id else null)
                 },
@@ -124,6 +130,15 @@ internal fun LazyListScope.epgSourcesSection(
                 onRemove = { epgSourceId -> viewModel.unassignEpgSourceFromProvider(provider.id, epgSourceId) },
                 onAssign = { epgSourceId -> viewModel.assignEpgSourceToProvider(provider.id, epgSourceId) }
             )
+            if (supportsGuideAndLogoPolicy(provider.type)) {
+                ProviderGuideAndLogoPolicyCard(
+                    providerName = provider.name,
+                    guideSourcePolicy = provider.guideSourcePolicy,
+                    channelLogoSourcePolicy = provider.channelLogoSourcePolicy,
+                    onGuideSourceSelected = { policy -> viewModel.setGuideSourcePolicy(provider.id, policy) },
+                    onLogoSourceSelected = { policy -> viewModel.setChannelLogoSourcePolicy(provider.id, policy) }
+                )
+            }
         }
     }
 
@@ -152,6 +167,106 @@ internal fun LazyListScope.epgSourcesSection(
             )
         }
     }
+}
+
+@Composable
+private fun ProviderGuideAndLogoPolicyCard(
+    providerName: String,
+    guideSourcePolicy: GuideSourcePolicy,
+    channelLogoSourcePolicy: ChannelLogoSourcePolicy,
+    onGuideSourceSelected: (GuideSourcePolicy) -> Unit,
+    onLogoSourceSelected: (ChannelLogoSourcePolicy) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF152333))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = "$providerName Guide Controls",
+            style = MaterialTheme.typography.titleSmall,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Choose whether guide data comes from external XMLTV, supplier data, or stays disabled, then decide which logo source wins.",
+            style = MaterialTheme.typography.bodySmall,
+            color = OnSurfaceDim
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            GuideSourcePolicy.entries.forEach { policy ->
+                PolicyChip(
+                    text = guideSourceLabel(policy),
+                    selected = guideSourcePolicy == policy,
+                    onClick = { onGuideSourceSelected(policy) }
+                )
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChannelLogoSourcePolicy.entries.forEach { policy ->
+                PolicyChip(
+                    text = logoSourceLabel(policy),
+                    selected = channelLogoSourcePolicy == policy,
+                    onClick = { onLogoSourceSelected(policy) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PolicyChip(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    TvClickableSurface(
+        onClick = onClick,
+        modifier = Modifier,
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(999.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (selected) Primary.copy(alpha = 0.22f) else Color(0xFF0F1B29),
+            focusedContainerColor = if (selected) Primary.copy(alpha = 0.32f) else Color(0xFF1A2A3B)
+        ),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(BorderStroke(1.dp, if (selected) Primary else Color(0xFF2D4358))),
+            focusedBorder = Border(BorderStroke(2.dp, Primary))
+        ),
+        glow = ClickableSurfaceDefaults.glow(),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.02f)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White
+        )
+    }
+}
+
+private fun guideSourceLabel(policy: GuideSourcePolicy): String = when (policy) {
+    GuideSourcePolicy.AUTO -> "Auto"
+    GuideSourcePolicy.EXTERNAL_ONLY -> "Use external EPG only"
+    GuideSourcePolicy.PROVIDER_ONLY -> "Use supplier EPG only"
+    GuideSourcePolicy.DISABLED -> "Disable guide data"
+}
+
+private fun logoSourceLabel(policy: ChannelLogoSourcePolicy): String = when (policy) {
+    ChannelLogoSourcePolicy.SUPPLIER_PREFERRED -> "Supplier logos first"
+    ChannelLogoSourcePolicy.EPG_PREFERRED -> "Prefer EPG logos"
+    ChannelLogoSourcePolicy.SUPPLIER_ONLY -> "Supplier logos only"
+    ChannelLogoSourcePolicy.EPG_ONLY -> "EPG logos only"
+}
+
+private fun supportsGuideAndLogoPolicy(providerType: ProviderType): Boolean = when (providerType) {
+    ProviderType.XTREAM_CODES,
+    ProviderType.STALKER_PORTAL,
+    ProviderType.M3U -> true
+    ProviderType.JELLYFIN -> false
 }
 
 @Composable

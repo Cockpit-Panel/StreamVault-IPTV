@@ -7,12 +7,11 @@ import com.streamvault.player.PlaybackState
 import com.streamvault.player.PlayerError
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 private const val PROVIDER_AUTH_RETRY_GRACE_MS = 1_200L
 
 internal fun PlayerViewModel.buildRecoveryActions(recoveryType: PlayerRecoveryType): List<PlayerNoticeAction> {
-    return buildPlayerRecoveryActions(
+    return PlayerRecoveryPolicy.buildActions(
         hasAlternateStream = hasAlternateStream(),
         hasLastChannel = hasLastChannel(),
         shouldOfferGuide = recoveryType == PlayerRecoveryType.CATCH_UP && currentContentType == ContentType.LIVE
@@ -22,26 +21,15 @@ internal fun PlayerViewModel.buildRecoveryActions(recoveryType: PlayerRecoveryTy
 internal fun shouldAttemptProviderAuthRetry(
     providerType: ProviderType,
     contentType: ContentType
-): Boolean = contentType == ContentType.LIVE &&
-    (providerType == ProviderType.XTREAM_CODES || providerType == ProviderType.STALKER_PORTAL)
+): Boolean = PlayerRecoveryPolicy.shouldAttemptProviderAuthRetry(providerType, contentType)
 
 internal fun shouldCooldownLivePreloadAfterError(message: String?): Boolean {
-    val normalized = message.orEmpty().lowercase(Locale.ROOT)
-    return "401" in normalized ||
-        "403" in normalized ||
-        "429" in normalized ||
-        "509" in normalized ||
-        "forbidden" in normalized ||
-        "unauthorized" in normalized ||
-        "too many" in normalized ||
-        "max connection" in normalized ||
-        "provider limit" in normalized ||
-        "connection limit" in normalized
+    return PlayerRecoveryPolicy.shouldCooldownLivePreloadAfterError(message)
 }
 
 internal fun PlayerViewModel.cooldownLivePreloadForCurrentProvider(reason: String) {
     val providerId = currentProviderId.takeIf { it > 0L } ?: return
-    if (livePreloadCooldownProviderIds.add(providerId)) {
+    if (playerRecoveryCoordinator.markLivePreloadCoolingDown(providerId)) {
         appendRecoveryAction("Disabled live preload for provider: $reason")
         playerEngine.preload(null)
     }
@@ -52,7 +40,7 @@ internal suspend fun PlayerViewModel.tryRefreshXtreamPlaybackAfterAuthError(
     requestVersion: Long,
     playbackUrl: String
 ): Boolean {
-    if (hasRetriedXtreamAuthRefresh) return false
+    if (!playerRecoveryCoordinator.canRetryXtreamAuthRefresh()) return false
     if (error !is PlayerError.NetworkError) return false
     if (!isAuthExpiryPlaybackError(error.message)) return false
     if (!isXtreamPlaybackSession()) return false
@@ -66,7 +54,7 @@ internal suspend fun PlayerViewModel.tryRefreshXtreamPlaybackAfterAuthError(
 
     if (!isActivePlaybackSession(requestVersion, playbackUrl)) return false
 
-    hasRetriedXtreamAuthRefresh = true
+    playerRecoveryCoordinator.markXtreamAuthRefreshRetried()
     probePassedPlaybackKeys.remove(
         resolvePlaybackProbeCacheKey(
             currentStreamUrl = currentStreamUrl,
@@ -78,8 +66,7 @@ internal suspend fun PlayerViewModel.tryRefreshXtreamPlaybackAfterAuthError(
     appendRecoveryAction("Retrying provider playback from a fresh live URL")
     delay(PROVIDER_AUTH_RETRY_GRACE_MS)
     if (!isActivePlaybackSession(requestVersion, playbackUrl)) return true
-    currentResolvedPlaybackUrl = ""
-    currentResolvedStreamInfo = null
+    clearResolvedStream()
     playerEngine.preload(null)
     if (!preparePlayer(refreshedStreamInfo, requestVersion, probeBeforePlayback = false)) return true
     playerEngine.play()
@@ -88,7 +75,7 @@ internal suspend fun PlayerViewModel.tryRefreshXtreamPlaybackAfterAuthError(
 
 internal suspend fun PlayerViewModel.isXtreamPlaybackSession(): Boolean {
     val providerId = currentProviderId.takeIf { it > 0L } ?: return false
-    val provider = providerRepository.getProvider(providerId) ?: return false
+    val provider = playerProviderCoordinator.getProvider(providerId) ?: return false
     return shouldAttemptProviderAuthRetry(provider.type, currentContentType)
 }
 
@@ -108,7 +95,7 @@ internal fun PlayerViewModel.scheduleZapBufferWatchdog(targetIndex: Int) {
     if (!zapAutoRevertEnabled) return
     zapBufferWatchdogJob?.cancel()
     val requestVersion = prepareRequestVersion
-    zapBufferWatchdogJob = viewModelScope.launch {
+    zapBufferWatchdogJob = playbackSessionScope(requestVersion)?.launch {
         repeat(15) {
             delay(1000)
             if (!isActivePlaybackSession(requestVersion)) return@launch

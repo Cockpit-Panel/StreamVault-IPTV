@@ -1,18 +1,53 @@
 package com.streamvault.domain.repository
 
 import com.streamvault.domain.manager.ProviderCredentials
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.Program
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderEpgSyncMode
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.StalkerAuthMode
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerTransportGrant
 import kotlinx.coroutines.flow.Flow
+
+sealed interface ProviderSetupRequest {
+    data class Configured(
+        val name: String,
+        val configuration: com.streamvault.domain.model.ProviderConfiguration,
+        val existingProviderId: Long? = null,
+        val saveWithoutVerification: Boolean = false,
+        val repairConnection: Boolean = false
+    ) : ProviderSetupRequest
+
+    data class JellyfinQuickConnect(
+        val serverUrl: String,
+        val name: String,
+        val existingProviderId: Long? = null
+    ) : ProviderSetupRequest
+}
 
 data class LiveStreamProgramRequest(
     val streamId: Long,
     val epgChannelId: String? = null
 )
+
+data class ProviderDeleteProgress(
+    val message: String,
+    val fraction: Float? = null
+)
+
+data class ProviderDeleteOutcome(
+    val providerId: Long,
+    val pendingCleanupActions: Int,
+    val reconciliationRequested: Boolean
+) {
+    val cleanupPending: Boolean get() = pendingCleanupActions > 0
+}
 
 interface ProviderRepository {
     fun getProviders(): Flow<List<Provider>>
@@ -20,7 +55,10 @@ interface ProviderRepository {
     suspend fun getProvider(id: Long): Provider?
     suspend fun addProvider(provider: Provider): Result<Long>
     suspend fun updateProvider(provider: Provider): Result<Unit>
-    suspend fun deleteProvider(id: Long): Result<Unit>
+    suspend fun deleteProvider(
+        id: Long,
+        onProgress: ((ProviderDeleteProgress) -> Unit)? = null
+    ): Result<ProviderDeleteOutcome>
 
     /**
      * Returns cleartext credentials for all providers that have both a
@@ -42,25 +80,10 @@ interface ProviderRepository {
     ): Boolean
 
     suspend fun setActiveProvider(id: Long): Result<Unit>
-    suspend fun loginXtream(serverUrl: String, username: String, password: String, name: String, httpUserAgent: String = "", httpHeaders: String = "", xtreamFastSyncEnabled: Boolean, epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND, xtreamLiveSyncMode: ProviderXtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO, onProgress: ((String) -> Unit)? = null, id: Long? = null): Result<Provider>
-    suspend fun validateM3u(url: String, name: String, httpUserAgent: String = "", httpHeaders: String = "", epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND, m3uVodClassificationEnabled: Boolean = false, onProgress: ((String) -> Unit)? = null, id: Long? = null): Result<Provider>
-    suspend fun loginStalker(
-        portalUrl: String,
-        macAddress: String,
-        name: String,
-        authMode: StalkerAuthMode = StalkerAuthMode.AUTO,
-        username: String = "",
-        password: String = "",
-        deviceProfile: String = "",
-        timezone: String = "",
-        locale: String = "",
-        serialNumber: String = "",
-        deviceId: String = "",
-        deviceId2: String = "",
-        signature: String = "",
-        epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
+    suspend fun setupProvider(
+        request: ProviderSetupRequest,
         onProgress: ((String) -> Unit)? = null,
-        id: Long? = null
+        onCode: ((String) -> Unit)? = null
     ): Result<Provider>
     suspend fun refreshProviderData(
         providerId: Long,
@@ -69,6 +92,8 @@ interface ProviderRepository {
         epgSyncModeOverride: ProviderEpgSyncMode? = null,
         onProgress: ((String) -> Unit)? = null
     ): Result<Unit>
+    suspend fun buildStalkerSearchIndexOnce(providerId: Long): Result<Unit> =
+        Result.error("Complete Stalker indexing is unavailable")
     suspend fun getProgramsForLiveStream(
         providerId: Long,
         streamId: Long,

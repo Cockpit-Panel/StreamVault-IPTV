@@ -22,7 +22,7 @@ import com.streamvault.data.remote.xtream.OkHttpXtreamApiService
 import com.streamvault.data.remote.xtream.XtreamApiService
 import com.streamvault.data.remote.xtream.XtreamProvider
 import com.streamvault.domain.model.Channel
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.SyncMetadata
 import java.util.concurrent.atomic.AtomicInteger
@@ -711,6 +711,28 @@ class SyncManagerXtreamLiveStrategyTest {
         assertThat(payload.stagedAcceptedCount).isEqualTo(1)
         assertThat(requestedCategoryIds).containsExactly("12")
         assertThat(requestCount.get()).isEqualTo(1)
+
+        requestedCategoryIds.clear()
+        requestCount.set(0)
+        val restorePayload = strategy.syncXtreamLiveCatalog(
+            provider = provider,
+            api = xtreamProvider,
+            existingMetadata = SyncMetadata(provider.id),
+            hiddenLiveCategoryIds = setOf(13L),
+            onProgress = null,
+            runtimeProfile = testRuntimeProfile(
+                tier = DeviceSyncTier.HIGH,
+                batchSize = 100,
+                maxCategoryConcurrency = 2
+            ),
+            trackInitialLiveOnboarding = false,
+            effectiveLiveSyncMethod = EffectiveXtreamLiveSyncMethod.STREAM_ALL,
+            requiredHiddenLiveCategoryIds = setOf(13L)
+        )
+
+        assertThat(restorePayload.stagedAcceptedCount).isEqualTo(2)
+        assertThat(requestedCategoryIds).containsExactly("12", "13")
+        Unit
     }
 
     @Test
@@ -1025,7 +1047,7 @@ class SyncManagerXtreamLiveStrategyTest {
             liveCategorySequentialModeWarning = "Live category sync used sequential mode.",
             isCurrentlyLowOnMemory = isCurrentlyLowOnMemory,
             stageChannelItems = stageChannelItems,
-            syncProgressBus = SyncProgressBus()
+            emitProgress = { _, _ -> }
         )
     }
 

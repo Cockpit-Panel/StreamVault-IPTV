@@ -14,6 +14,10 @@ data class StreamVaultPluginManifest(
     val versionCode: Long = 0L,
     val description: String = "",
     val capabilities: List<String> = emptyList(),
+    /** Explicit URL ownership for playback and cast hooks. `*` is an intentional catch-all. */
+    val playbackUrlSchemes: List<String> = emptyList(),
+    val playbackUrlHosts: List<String> = emptyList(),
+    val playbackPriority: Int = 0,
     val configurationMode: String? = null,
     val configurationActivityAction: String? = null,
     val providerName: String? = null
@@ -43,11 +47,56 @@ data class InstalledStreamVaultPlugin(
     val manifest: StreamVaultPluginManifest,
     val enabled: Boolean,
     val statusLabel: String = "",
-    val lastMessage: String = ""
+    val lastMessage: String = "",
+    val discoveryState: PluginDiscoveryState = PluginDiscoveryState.READY
 ) {
     val displayName: String
         get() = manifest.name.ifBlank { appLabel.ifBlank { packageName } }
 }
+
+enum class PluginDiscoveryState { LOADING, READY, PARTIAL, TIMED_OUT, ERROR }
+
+data class PluginDiscoveryStatus(
+    val state: PluginDiscoveryState,
+    val message: String = ""
+)
+
+
+data class StreamVaultPluginOwner(
+    val packageName: String,
+    val serviceClassName: String,
+    val manifestId: String
+) {
+    val component: StreamVaultPluginComponent
+        get() = StreamVaultPluginComponent(packageName, serviceClassName)
+}
+
+/**
+ * Stable Android-saveable identity for Compose item keys.
+ *
+ * Compose persists lazy-list keys through an Android Bundle. The owner itself is a Kotlin data
+ * class and cannot be written to a Bundle, so encode each component into a String while keeping
+ * the fields unambiguous even if plugin metadata contains separator characters.
+ */
+fun StreamVaultPluginOwner.toBundleSafeKey(): String = buildString {
+    appendLengthPrefixed(packageName)
+    appendLengthPrefixed(serviceClassName)
+    appendLengthPrefixed(manifestId)
+}
+
+private fun StringBuilder.appendLengthPrefixed(value: String) {
+    append(value.length)
+    append(':')
+    append(value)
+}
+
+data class StreamVaultPluginComponent(
+    val packageName: String,
+    val serviceClassName: String
+)
+
+val InstalledStreamVaultPlugin.owner: StreamVaultPluginOwner
+    get() = StreamVaultPluginOwner(packageName, serviceClassName, manifest.id)
 
 data class PluginActionResult(
     val success: Boolean,

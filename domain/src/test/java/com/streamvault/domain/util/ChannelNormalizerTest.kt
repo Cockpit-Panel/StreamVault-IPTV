@@ -116,4 +116,12 @@ class ChannelNormalizerTest {
         assertThat(fiveSeventySix.attributes.declaredHeight).isEqualTo(576)
         assertThat(fiveForty.attributes.declaredHeight).isEqualTo(540)
     }
+
+    @Test
+    fun `detects hash wrapped provider headers`() {
+        assertThat(ChannelNormalizer.isHashWrappedHeader("#### GENERAL HD/4K ####")).isTrue()
+        assertThat(ChannelNormalizer.isHashWrappedHeader("  ## SPORTS ##  ")).isTrue()
+        assertThat(ChannelNormalizer.isHashWrappedHeader("#EXTINF:-1")).isFalse()
+        assertThat(ChannelNormalizer.isHashWrappedHeader("Channel #1")).isFalse()
+    }
 }

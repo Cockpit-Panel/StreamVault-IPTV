@@ -95,7 +95,8 @@ import kotlinx.coroutines.delay
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SeriesScreen(
-    onSeriesClick: (Long) -> Unit,
+    onSeriesClick: (Series) -> Unit,
+    onSeriesIdClick: (Long) -> Unit,
     onNavigate: (String) -> Unit,
     currentRoute: String,
     viewModel: SeriesViewModel = hiltViewModel()
@@ -108,7 +109,7 @@ fun SeriesScreen(
     val initialContentFocusRequester = remember { FocusRequester() }
     var showPinDialog by remember { mutableStateOf(false) }
     var pinError by remember { mutableStateOf<String?>(null) }
-    var pendingSeriesId by remember { mutableStateOf<Long?>(null) }
+    var pendingSeries by remember { mutableStateOf<Series?>(null) }
     var pendingCategory by remember { mutableStateOf<Category?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -129,15 +130,15 @@ fun SeriesScreen(
         onDismissRequest = {
             showPinDialog = false
             pinError = null
-            pendingSeriesId = null
+            pendingSeries = null
             pendingCategory = null
         },
         onVerified = {
             showPinDialog = false
             pinError = null
-            pendingSeriesId?.let(onSeriesClick)
+            pendingSeries?.let(onSeriesClick)
             pendingCategory?.let(viewModel::unlockCategory)
-            pendingSeriesId = null
+            pendingSeries = null
             pendingCategory = null
         },
         onErrorChange = { pinError = it },
@@ -221,14 +222,14 @@ fun SeriesScreen(
                 searchQuery = uiState.searchQuery,
                 onSearchQueryChange = viewModel::setSearchQuery,
                 onSeriesClick = onSeriesClick,
-                onClearContinueWatching = { viewModel.clearContinueWatching() },
-                onProtectedSeriesClick = { seriesId ->
+                onSeriesIdClick = onSeriesIdClick,
+                onProtectedSeriesClick = { series ->
                     pendingCategory = null
-                    pendingSeriesId = seriesId
+                    pendingSeries = series
                     showPinDialog = true
                 },
                 onProtectedCategoryClick = { category ->
-                    pendingSeriesId = null
+                    pendingSeries = null
                     pendingCategory = category
                     showPinDialog = true
                 },
@@ -280,7 +281,10 @@ fun SeriesScreen(
             },
             onAddToGroup = { group -> viewModel.addToGroup(series, group) },
             onRemoveFromGroup = { group -> viewModel.removeFromGroup(series, group) },
-            onCreateGroup = { name -> viewModel.createCustomGroup(name) }
+            onCreateGroup = { name -> viewModel.createCustomGroup(name) },
+            onMoveBackToLive = if (uiState.isM3uProvider) {
+                { viewModel.moveM3uSeriesBackToLive(series) }
+            } else null
         )
     }
 
@@ -331,9 +335,9 @@ private fun SeriesVodContent(
     onSelectedSortByChange: (LibrarySortBy) -> Unit,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
-    onSeriesClick: (Long) -> Unit,
-    onClearContinueWatching: (() -> Unit)? = null,
-    onProtectedSeriesClick: (Long) -> Unit,
+    onSeriesClick: (Series) -> Unit,
+    onSeriesIdClick: (Long) -> Unit,
+    onProtectedSeriesClick: (Series) -> Unit,
     onProtectedCategoryClick: (Category) -> Unit,
     onShowDialog: (Series) -> Unit,
     onShowCategoryOptions: (String) -> Unit,
@@ -362,6 +366,7 @@ private fun SeriesVodContent(
     }
     var showCategoryPicker by remember { mutableStateOf(false) }
     val favoriteSeries = uiState.seriesByCategory[uiState.favoriteCategoryName].orEmpty()
+    val continueSeries = uiState.libraryLensRows[SeriesLibraryLens.CONTINUE].orEmpty()
     val freshSeries = uiState.libraryLensRows[SeriesLibraryLens.FRESH].orEmpty()
     val topRatedSeries = uiState.libraryLensRows[SeriesLibraryLens.TOP_RATED].orEmpty()
     val continueWatching = uiState.continueWatching
@@ -473,6 +478,7 @@ private fun SeriesVodContent(
             searchQuery = searchQuery,
             onSearchQueryChange = onSearchQueryChange,
             onSeriesClick = onSeriesClick,
+            onSeriesIdClick = onSeriesIdClick,
             onProtectedSeriesClick = onProtectedSeriesClick,
             onProtectedCategoryClick = onProtectedCategoryClick,
             onShowDialog = onShowDialog,
@@ -512,7 +518,7 @@ private fun SeriesVodContent(
                         actionLabel = stringResource(R.string.player_resume).substringBefore(" "),
                         onClick = {
                             val isLocked = isSeriesLocked(heroSeries)
-                            if (isLocked) onProtectedSeriesClick(heroSeries.id) else onSeriesClick(heroSeries.id)
+                            if (isLocked) onProtectedSeriesClick(heroSeries) else onSeriesClick(heroSeries)
                         },
                         modifier = Modifier
                             .padding(top = 8.dp, bottom = 6.dp)
@@ -587,8 +593,17 @@ private fun SeriesVodContent(
             item(key = "continue_watching") {
                 ContinueWatchingRow(
                         items = continueWatching,
-                        onItemClick = { history -> onSeriesClick(history.seriesId ?: history.contentId) },
-                        onClear = onClearContinueWatching
+                        onItemClick = { history ->
+                            val rawSeriesId = history.seriesId ?: history.contentId
+                            val presentedSeries = continueSeries.firstOrNull { series ->
+                                series.rawSeriesIdsForNavigation().contains(rawSeriesId)
+                            }
+                            if (presentedSeries != null) {
+                                onSeriesClick(presentedSeries)
+                            } else {
+                                onSeriesIdClick(rawSeriesId)
+                            }
+                        }
                     )
             }
             }
@@ -604,7 +619,7 @@ private fun SeriesVodContent(
                         SeriesCard(
                             series = series,
                             isLocked = isLocked,
-                            onClick = { if (isLocked) onProtectedSeriesClick(series.id) else onSeriesClick(series.id) },
+                            onClick = { if (isLocked) onProtectedSeriesClick(series) else onSeriesClick(series) },
                             onLongClick = { onShowDialog(series) },
                             modifier = Modifier.width(favoriteCardWidth)
                         )
@@ -623,7 +638,7 @@ private fun SeriesVodContent(
                         SeriesCard(
                             series = series,
                             isLocked = isLocked,
-                            onClick = { if (isLocked) onProtectedSeriesClick(series.id) else onSeriesClick(series.id) },
+                            onClick = { if (isLocked) onProtectedSeriesClick(series) else onSeriesClick(series) },
                             onLongClick = { onShowDialog(series) }
                         )
                 }
@@ -641,7 +656,7 @@ private fun SeriesVodContent(
                         SeriesCard(
                             series = series,
                             isLocked = isLocked,
-                            onClick = { if (isLocked) onProtectedSeriesClick(series.id) else onSeriesClick(series.id) },
+                            onClick = { if (isLocked) onProtectedSeriesClick(series) else onSeriesClick(series) },
                             onLongClick = { onShowDialog(series) }
                         )
                 }
@@ -664,7 +679,7 @@ private fun SeriesVodContent(
                     SeriesCard(
                         series = series,
                         isLocked = isLocked,
-                        onClick = { if (isLocked) onProtectedSeriesClick(series.id) else onSeriesClick(series.id) },
+                        onClick = { if (isLocked) onProtectedSeriesClick(series) else onSeriesClick(series) },
                         onLongClick = { onShowDialog(series) },
                         modifier = if (series.id == fallbackSeriesId) Modifier.focusRequester(initialFocusRequester) else Modifier
                     )
@@ -730,9 +745,10 @@ private fun SeriesVodContent(
     val modernGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
     InfiniteScrollEffect(
         gridState = modernGridState,
-        enabled = !uiState.isReorderMode,
+        enabled = uiState.vodInfiniteScroll && !uiState.isReorderMode,
         canLoadMore = uiState.canLoadMoreSelectedCategory,
-        isLoading = uiState.isLoadingSelectedCategory,
+        isLoading = uiState.isLoadingSelectedCategory || uiState.isLoadingMoreSelectedCategory,
+        prefetchDistance = uiState.selectedCategoryRawPageSize.coerceAtLeast(6),
         onLoadMore = onLoadMore
     )
     LazyVerticalGrid(
@@ -879,14 +895,29 @@ private fun SeriesVodContent(
                         if (uiState.isReorderMode) {
                             draggingSeries = if (isDraggingThis) null else series
                         } else if (isLocked) {
-                            onProtectedSeriesClick(series.id)
+                            onProtectedSeriesClick(series)
                         } else {
-                            onSeriesClick(series.id)
+                            onSeriesClick(series)
                         }
                     },
                     onLongClick = {
                         if (!uiState.isReorderMode) onShowDialog(series)
                     }
+                )
+            }
+        }
+        if (uiState.canLoadMoreSelectedCategory && !uiState.isLoadingSelectedCategory && !uiState.isLoadingMoreSelectedCategory &&
+            !uiState.vodInfiniteScroll && !uiState.isReorderMode
+        ) {
+            item(key = "load_next_series_batch", span = { GridItemSpan(maxLineSpan) }) {
+                LoadMoreCard(
+                    label = stringResource(
+                        R.string.library_load_more,
+                        uiState.selectedCategoryLoadedCount,
+                        uiState.selectedCategoryTotalCount
+                    ),
+                    onClick = onLoadMore,
+                    modifier = Modifier.padding(vertical = 12.dp)
                 )
             }
         }
@@ -902,8 +933,9 @@ private fun SeriesVodClassicContent(
     onSelectedSortByChange: (LibrarySortBy) -> Unit,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
-    onSeriesClick: (Long) -> Unit,
-    onProtectedSeriesClick: (Long) -> Unit,
+    onSeriesClick: (Series) -> Unit,
+    onSeriesIdClick: (Long) -> Unit,
+    onProtectedSeriesClick: (Series) -> Unit,
     onProtectedCategoryClick: (Category) -> Unit,
     onShowDialog: (Series) -> Unit,
     onShowCategoryOptions: (String) -> Unit,
@@ -1151,9 +1183,10 @@ private fun SeriesVodClassicContent(
             val classicGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
             InfiniteScrollEffect(
                 gridState = classicGridState,
-                enabled = !uiState.isReorderMode,
+                enabled = uiState.vodInfiniteScroll && !uiState.isReorderMode,
                 canLoadMore = uiState.canLoadMoreSelectedCategory,
-                isLoading = uiState.isLoadingSelectedCategory,
+                isLoading = uiState.isLoadingSelectedCategory || uiState.isLoadingMoreSelectedCategory,
+                prefetchDistance = uiState.selectedCategoryRawPageSize.coerceAtLeast(6),
                 onLoadMore = onLoadMore
             )
             LazyVerticalGrid(
@@ -1210,14 +1243,29 @@ private fun SeriesVodClassicContent(
                                 if (uiState.isReorderMode) {
                                     draggingSeries = if (isDraggingThis) null else series
                                 } else if (isLocked) {
-                                    onProtectedSeriesClick(series.id)
+                                    onProtectedSeriesClick(series)
                                 } else {
-                                    onSeriesClick(series.id)
+                                    onSeriesClick(series)
                                 }
                             },
                             onLongClick = {
                                 if (!uiState.isReorderMode) onShowDialog(series)
                             }
+                        )
+                    }
+                }
+                if (uiState.canLoadMoreSelectedCategory && !uiState.isLoadingSelectedCategory && !uiState.isLoadingMoreSelectedCategory &&
+                    !uiState.vodInfiniteScroll && !uiState.isReorderMode
+                ) {
+                    item(key = "load_next_series_batch_classic", span = { GridItemSpan(maxLineSpan) }) {
+                        LoadMoreCard(
+                            label = stringResource(
+                                R.string.library_load_more,
+                                uiState.selectedCategoryLoadedCount,
+                                uiState.selectedCategoryTotalCount
+                            ),
+                            onClick = onLoadMore,
+                            modifier = Modifier.padding(vertical = 12.dp)
                         )
                     }
                 }
@@ -1261,4 +1309,7 @@ private fun seriesSortChips(): List<SelectionChip> {
         )
     }
 }
+
+private fun Series.rawSeriesIdsForNavigation(): List<Long> =
+    variants.map { it.rawSeriesId }.ifEmpty { listOf(selectedVariantId ?: id) }
 

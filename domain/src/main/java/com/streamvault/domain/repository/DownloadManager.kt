@@ -36,6 +36,13 @@ interface DownloadManager {
      */
     suspend fun resumeDownload(id: String): Result<Unit>
 
+    /** Reclaims downloads whose persisted active owner died with the app process. */
+    suspend fun recoverInterruptedDownloads(): Result<Int>
+
+    /** Pauses an active download after Android exhausts the foreground-service time allowance. */
+    suspend fun pauseDownloadForForegroundServiceTimeout(id: String): Result<Unit> =
+        Result.error("Foreground-service timeout handling is not supported by this download manager.")
+
     /**
      * Cancel a download by [id].
      */

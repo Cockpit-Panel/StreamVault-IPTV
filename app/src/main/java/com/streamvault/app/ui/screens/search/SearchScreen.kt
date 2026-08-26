@@ -57,6 +57,7 @@ import com.streamvault.app.ui.interaction.mouseClickable
 import com.streamvault.app.ui.theme.*
 import com.streamvault.domain.manager.ParentalControlManager
 import com.streamvault.domain.model.Channel
+import com.streamvault.domain.model.CatalogCompleteness
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.SearchHistoryScope
@@ -191,7 +192,9 @@ class SearchViewModel @Inject constructor(
                     else results.series,
                     isLoading = false,
                     hasSearched = true,
-                    hasSearchError = results.isPartialResult,
+                    hasSearchError = results.isPartialResult &&
+                        results.catalogCompleteness == CatalogCompleteness.COMPLETE,
+                    catalogCompleteness = results.catalogCompleteness,
                     parentalControlLevel = level,
                     hasActiveProvider = true,
                     queryLength = trimmedQueryLength,
@@ -241,6 +244,13 @@ class SearchViewModel @Inject constructor(
 
         _query.value = normalizedQuery
         onSearchSubmitted()
+    }
+
+    fun buildCompleteStalkerSearchIndex() {
+        val providerId = _activeProviderId.value ?: return
+        viewModelScope.launch {
+            providerRepository.buildStalkerSearchIndexOnce(providerId)
+        }
     }
 
     fun clearRecentQueries() {
@@ -305,7 +315,7 @@ class SearchViewModel @Inject constructor(
 }
 
 private data class SearchFilterParams(
-    val provider: com.streamvault.domain.model.Provider?,
+    val provider: com.streamvault.domain.model.LegacyProvider?,
     val query: String,
     val tab: SearchTab,
     val level: Int,
@@ -343,7 +353,8 @@ data class SearchUiState(
     val parentalControlLevel: Int = 0,
     val hasActiveProvider: Boolean = false,
     val queryLength: Int = 0,
-    val unlockedCategoryIds: Set<Long> = emptySet()
+    val unlockedCategoryIds: Set<Long> = emptySet(),
+    val catalogCompleteness: CatalogCompleteness = CatalogCompleteness.COMPLETE
 ) {
     val isEmpty: Boolean get() = hasSearched && channels.isEmpty() && movies.isEmpty() && series.isEmpty()
     val totalResults: Int get() = channels.size + movies.size + series.size
@@ -608,7 +619,8 @@ fun SearchScreen(
                 else -> {
                     item {
                         SearchResultsSummaryRow(
-                            uiState = uiState
+                            uiState = uiState,
+                            onBuildCompleteIndex = viewModel::buildCompleteStalkerSearchIndex
                         )
                     }
 
@@ -1114,7 +1126,8 @@ fun SectionHeader(title: String) {
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun SearchResultsSummaryRow(
-    uiState: SearchUiState
+    uiState: SearchUiState,
+    onBuildCompleteIndex: () -> Unit
 ) {
     val countsSummary = listOf(
         stringResource(R.string.search_results_count, stringResource(R.string.search_live_tv), uiState.channels.size),
@@ -1140,6 +1153,27 @@ private fun SearchResultsSummaryRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        if (uiState.catalogCompleteness != CatalogCompleteness.COMPLETE) {
+            Text(
+                text = stringResource(
+                    when (uiState.catalogCompleteness) {
+                        CatalogCompleteness.INDEXING -> R.string.search_catalog_indexing
+                        CatalogCompleteness.TRUNCATED -> R.string.search_catalog_truncated
+                        CatalogCompleteness.PARTIAL -> R.string.search_catalog_downloaded_only
+                        CatalogCompleteness.COMPLETE -> R.string.search_catalog_complete
+                    }
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.Warning
+            )
+            if (uiState.catalogCompleteness == CatalogCompleteness.PARTIAL ||
+                uiState.catalogCompleteness == CatalogCompleteness.TRUNCATED
+            ) {
+                Button(onClick = onBuildCompleteIndex) {
+                    Text(stringResource(R.string.search_build_complete_index))
+                }
+            }
+        }
     }
 }
 

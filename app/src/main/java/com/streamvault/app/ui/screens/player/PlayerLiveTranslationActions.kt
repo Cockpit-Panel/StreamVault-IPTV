@@ -1,8 +1,6 @@
 package com.streamvault.app.ui.screens.player
 
 import androidx.lifecycle.viewModelScope
-import com.streamvault.app.player.LiveTranslationClient
-import com.streamvault.app.player.LiveTranslationSession
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.ProviderType
 import kotlinx.coroutines.flow.first
@@ -16,8 +14,8 @@ import kotlinx.coroutines.launch
  * supported live stream) any running session is stopped.
  */
 internal suspend fun PlayerViewModel.refreshLiveTranslationAvailability() {
-    val enabled = preferencesRepository.playerLiveTranslationEnabled.first()
-    val provider = if (currentProviderId > 0L) providerRepository.getProvider(currentProviderId) else null
+    val enabled = playerPreferencesCoordinator.playerLiveTranslationEnabled.first()
+    val provider = if (currentProviderId > 0L) playerProviderCoordinator.getProvider(currentProviderId) else null
     val available = shouldEnableLiveTranslationSession(enabled, currentContentType, provider?.type)
     _liveTranslationAvailable.value = available
     if (!available && liveTranslationActive.value) {
@@ -35,7 +33,7 @@ internal fun PlayerViewModel.activateLiveTranslation() {
 
 /** Invoked when the user picks a regular subtitle track or "Off" from the subtitle menu. */
 internal fun PlayerViewModel.deactivateLiveTranslation() {
-    if (!liveTranslationActive.value && liveTranslationSession == null) return
+    if (!liveTranslationActive.value && !playerTranslationCoordinator.isActive) return
     stopLiveTranslationSession()
 }
 
@@ -48,8 +46,8 @@ internal suspend fun PlayerViewModel.evaluateLiveTranslationSession() {
         stopLiveTranslationSession()
         return
     }
-    val enabled = preferencesRepository.playerLiveTranslationEnabled.first()
-    val provider = providerRepository.getProvider(currentProviderId)
+    val enabled = playerPreferencesCoordinator.playerLiveTranslationEnabled.first()
+    val provider = playerProviderCoordinator.getProvider(currentProviderId)
     if (!shouldEnableLiveTranslationSession(enabled, currentContentType, provider?.type)) {
         stopLiveTranslationSession()
         return
@@ -58,11 +56,12 @@ internal suspend fun PlayerViewModel.evaluateLiveTranslationSession() {
         stopLiveTranslationSession()
         return
     }
-    val endpoint = preferencesRepository.playerLiveTranslationEndpoint.first()
-    val session = LiveTranslationSession(
-        scope = viewModelScope,
+    val endpoint = playerPreferencesCoordinator.playerLiveTranslationEndpoint.first()
+    val sessionScope = playbackSessionScope() ?: return
+    playerTranslationCoordinator.start(
+        scope = sessionScope,
         playerEngine = playerEngine,
-        client = LiveTranslationClient(okHttpClient, endpoint),
+        endpoint = endpoint,
         logicalUrl = currentStreamUrl,
         providerId = currentProviderId,
         contentId = currentContentId,
@@ -73,14 +72,10 @@ internal suspend fun PlayerViewModel.evaluateLiveTranslationSession() {
             showPlayerNotice(message = message, recoveryType = PlayerRecoveryType.NETWORK)
         }
     )
-    stopLiveTranslationSession(clearActiveState = false)
-    liveTranslationSession = session
-    session.start()
 }
 
 internal fun PlayerViewModel.stopLiveTranslationSession(clearActiveState: Boolean = true) {
-    liveTranslationSession?.stop()
-    liveTranslationSession = null
+    playerTranslationCoordinator.stop()
     playerEngine.clearInjectedSubtitleCues()
     _liveTranslationDetectedLanguage.value = null
     if (clearActiveState) {

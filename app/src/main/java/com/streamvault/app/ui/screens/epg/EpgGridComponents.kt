@@ -53,6 +53,7 @@ import com.streamvault.app.R
 import com.streamvault.app.ui.components.ChannelLogoBadge
 import com.streamvault.app.ui.interaction.TvButton
 import com.streamvault.app.ui.interaction.TvClickableSurface
+import com.streamvault.app.ui.model.archivePlaybackCapability
 import com.streamvault.app.ui.model.guideLookupKey
 import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createTimeFormatter
@@ -352,6 +353,7 @@ fun EpgRow(
     val currentProgram by remember(programs, now) {
         derivedStateOf { programs.currentProgramAt(now) }
     }
+    val hasUsableArchive = channel.archivePlaybackCapability().canBuildReplayCandidate
     val totalDuration = (windowEnd - windowStart).coerceAtLeast(1L)
     val channelPaddingVertical = when (density) {
         GuideDensity.COMPACT -> 3.dp
@@ -451,7 +453,7 @@ fun EpgRow(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (isFavorite || channel.catchUpSupported) {
+                if (isFavorite || hasUsableArchive) {
                     Box(
                         modifier = Modifier
                             .background(
@@ -461,7 +463,7 @@ fun EpgRow(
                             .padding(horizontal = 5.dp, vertical = 1.dp)
                     ) {
                         Text(
-                            text = if (channel.catchUpSupported) stringResource(R.string.player_archive_badge) else stringResource(R.string.epg_favorite_badge),
+                            text = if (hasUsableArchive) stringResource(R.string.player_archive_badge) else stringResource(R.string.epg_favorite_badge),
                             style = MaterialTheme.typography.labelSmall,
                             color = Primary,
                             maxLines = 1,

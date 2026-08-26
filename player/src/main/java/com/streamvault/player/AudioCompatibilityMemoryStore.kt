@@ -26,17 +26,20 @@ class AudioCompatibilityMemoryStore @Inject constructor(
     fun lookup(mediaId: String, streamType: String): LearnedAudioCompatibility? {
         val encoded = preferences.getString(key(mediaId, streamType), null) ?: return null
         val parts = encoded.split(FIELD_SEPARATOR)
-        if (parts.size < 4) return null
+        if (parts.size < 5 || parts[0] != FORMAT_VERSION) {
+            preferences.edit().remove(key(mediaId, streamType)).apply()
+            return null
+        }
         return LearnedAudioCompatibility(
             mediaId = mediaId,
             streamType = streamType,
-            audioMimeTypes = parts[0]
+            audioMimeTypes = parts[2]
                 .split(LIST_SEPARATOR)
                 .map(String::trim)
                 .filter(String::isNotEmpty),
-            decision = parts[1],
-            detail = parts[2].takeIf(String::isNotBlank),
-            updatedAtMs = parts[3].toLongOrNull() ?: 0L
+            decision = parts[3],
+            detail = parts[4].takeIf(String::isNotBlank),
+            updatedAtMs = parts[1].toLongOrNull() ?: 0L
         )
     }
 
@@ -50,17 +53,20 @@ class AudioCompatibilityMemoryStore @Inject constructor(
             .map(String::trim)
             .filter(String::isNotEmpty)
             .distinct()
+        val now = System.currentTimeMillis()
         preferences.edit()
             .putString(
                 key(mediaId, streamType),
                 listOf(
+                    FORMAT_VERSION,
+                    now.toString(),
                     normalizedMimeTypes.joinToString(LIST_SEPARATOR.toString()),
                     DECISION_SOFTWARE_FFMPEG,
-                    detail.orEmpty().replace(FIELD_SEPARATOR.toString(), " "),
-                    System.currentTimeMillis().toString()
+                    detail.orEmpty().replace(FIELD_SEPARATOR.toString(), " ")
                 ).joinToString(FIELD_SEPARATOR.toString())
             )
             .apply()
+        trimToBound()
     }
 
     fun clear() {
@@ -71,8 +77,24 @@ class AudioCompatibilityMemoryStore @Inject constructor(
         return "${Build.FINGERPRINT}|${Build.MODEL}|$streamType|$mediaId"
     }
 
+    private fun trimToBound() {
+        val excess = preferences.all.size - MAX_ENTRIES
+        if (excess <= 0) return
+        val oldestKeys = preferences.all.entries
+            .sortedBy { (_, value) ->
+                (value as? String)?.split(FIELD_SEPARATOR)?.getOrNull(1)?.toLongOrNull() ?: Long.MIN_VALUE
+            }
+            .take(excess)
+            .map(Map.Entry<String, *>::key)
+        preferences.edit().also { editor -> oldestKeys.forEach(editor::remove) }.apply()
+    }
+
+    internal fun sizeForTests(): Int = preferences.all.size
+
     companion object {
         private const val PREFS_NAME = "audio_compatibility_memory"
+        private const val FORMAT_VERSION = "v2"
+        private const val MAX_ENTRIES = 512
         private const val FIELD_SEPARATOR = '|'
         private const val LIST_SEPARATOR = ','
         const val DECISION_SOFTWARE_FFMPEG = "software-ffmpeg"

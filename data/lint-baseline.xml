@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 8.10.1" type="baseline" client="gradle" dependencies="false" name="AGP (8.10.1)" variant="all" version="8.10.1">
+
+    <issue
+        id="CustomX509TrustManager"
+        message="Implementing a custom `X509TrustManager` is error-prone and likely to be insecure. It is likely to disable certificate validation altogether, and is non-trivial to implement correctly without calling Android&apos;s default implementation."
+        errorLine1="        val trustManager = object : X509TrustManager {"
+        errorLine2="                           ~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/remote/stalker/StalkerTransport.kt"
+            line="122"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="CustomX509TrustManager"
+        message="Implementing a custom `X509TrustManager` is error-prone and likely to be insecure. It is likely to disable certificate validation altogether, and is non-trivial to implement correctly without calling Android&apos;s default implementation."
+        errorLine1="                val captureManager = object : X509TrustManager {"
+        errorLine2="                                     ~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/remote/stalker/StalkerTransport.kt"
+            line="177"
+            column="38"/>
+    </issue>
+
+    <issue
+        id="UsableSpace"
+        message="Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data"
+        errorLine1="            ?: recordingsDir.usableSpace.takeIf { it > 0L }"
+        errorLine2="                             ~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/recording/RecordingSupport.kt"
+            line="154"
+            column="30"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            val uri = Uri.parse(uriString)"
+        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/BackupManagerImpl.kt"
+            line="2413"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            val uri = Uri.parse(uriString)"
+        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/BackupManagerImpl.kt"
+            line="2423"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            ?: Uri.parse(this).path?.let(::File)"
+        errorLine2="               ~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/BackupManagerImpl.kt"
+            line="2432"
+            column="16"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            DocumentFile.fromSingleUri(context, Uri.parse(outputUri))"
+        errorLine2="                                                ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/DownloadManagerImpl.kt"
+            line="610"
+            column="49"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            val uri = Uri.parse(entity.outputUri)"
+        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/DownloadManagerImpl.kt"
+            line="664"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            val tree = DocumentFile.fromTreeUri(context, Uri.parse(treeUri))"
+        errorLine2="                                                         ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/DownloadManagerImpl.kt"
+            line="679"
+            column="58"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="                val uri = Uri.parse(outputUri)"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/DownloadManagerImpl.kt"
+            line="710"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="        val segment = Uri.parse(url).lastPathSegment ?: return null"
+        errorLine2="                      ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/DownloadManagerImpl.kt"
+            line="750"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="                    context.contentResolver.openInputStream(Uri.parse(source.url))"
+        errorLine2="                                                            ~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/repository/EpgSourceRepositoryImpl.kt"
+            line="305"
+            column="61"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit()"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/remote/stalker/MinistraApiV3Provider.kt"
+            line="71"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit()"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/remote/stalker/MinistraApiV3Provider.kt"
+            line="79"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="                uri = android.net.Uri.parse(run.outputUri),"
+        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/RecordingManagerImpl.kt"
+            line="1272"
+            column="23"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="    val treeUri = runCatching { Uri.parse(treeUriString) }.getOrNull() ?: return Triple(null, null, false)"
+        errorLine2="                                ~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/recording/RecordingSupport.kt"
+            line="158"
+            column="33"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="    val uri = Uri.parse(treeUri)"
+        errorLine2="              ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/recording/RecordingSupport.kt"
+            line="185"
+            column="15"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            val document = DocumentFile.fromSingleUri(context, Uri.parse(rawUri))"
+        errorLine2="                                                               ~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/data/manager/recording/RecordingSupport.kt"
+            line="203"
+            column="64"/>
+    </issue>
+
+</issues>

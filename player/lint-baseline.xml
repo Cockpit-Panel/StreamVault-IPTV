@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 8.10.1" type="baseline" client="gradle" dependencies="false" name="AGP (8.10.1)" variant="all" version="8.10.1">
+
+    <issue
+        id="CustomX509TrustManager"
+        message="Implementing a custom `X509TrustManager` is error-prone and likely to be insecure. It is likely to disable certificate validation altogether, and is non-trivial to implement correctly without calling Android&apos;s default implementation."
+        errorLine1="    val trustAllManager = object : X509TrustManager {"
+        errorLine2="                          ~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/playback/UnsafeTlsSupport.kt"
+            line="21"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="CustomX509TrustManager"
+        message="Implementing a custom `X509TrustManager` is error-prone and likely to be insecure. It is likely to disable certificate validation altogether, and is non-trivial to implement correctly without calling Android&apos;s default implementation."
+        errorLine1="    val trustManager = object : X509TrustManager {"
+        errorLine2="                       ~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/playback/UnsafeTlsSupport.kt"
+            line="49"
+            column="24"/>
+    </issue>
+
+    <issue
+        id="UsableSpace"
+        message="Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data"
+        errorLine1="            context.cacheDir.usableSpace >= MIN_FREE_DISK_BYTES &amp;&amp;"
+        errorLine2="                             ~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/timeshift/LiveTimeshiftManager.kt"
+            line="336"
+            column="30"/>
+    </issue>
+
+    <issue
+        id="UsableSpace"
+        message="Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data"
+        errorLine1="            val freeSpace = context.cacheDir.usableSpace"
+        errorLine2="                                             ~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/timeshift/LiveTimeshiftManager.kt"
+            line="481"
+            column="46"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="            preferences.edit().remove(key(mediaId, streamType)).apply()"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/AudioCompatibilityMemoryStore.kt"
+            line="30"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit()"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/AudioCompatibilityMemoryStore.kt"
+            line="57"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit().clear().apply()"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/AudioCompatibilityMemoryStore.kt"
+            line="73"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit().also { editor -> oldestKeys.forEach(editor::remove) }.apply()"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/AudioCompatibilityMemoryStore.kt"
+            line="89"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
+        message="Use the KTX extension function `String.toUri` instead?"
+        errorLine1="            .setUri(Uri.parse(streamInfo.url))"
+        errorLine2="                    ~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/streamvault/player/playback/PlayerMediaSourceFactory.kt"
+            line="126"
+            column="21"/>
+    </issue>
+
+</issues>

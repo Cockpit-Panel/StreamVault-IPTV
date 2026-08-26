@@ -2,7 +2,6 @@ package com.streamvault.app.ui.screens.player
 
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.domain.model.ProviderType
-import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class PlayerZapActionsTest {
@@ -28,30 +27,6 @@ class PlayerZapActionsTest {
         buffer = appendNumericChannelDigit(buffer, 7)
 
         assertThat(buffer).isEqualTo("7")
-    }
-
-    @Test
-    fun `withScopedScrubbingMode disables scrubbing after success`() = runTest {
-        val states = mutableListOf<Boolean>()
-
-        withScopedScrubbingMode(states::add) {
-            "done"
-        }
-
-        assertThat(states).containsExactly(true, false).inOrder()
-    }
-
-    @Test
-    fun `withScopedScrubbingMode disables scrubbing after failure`() = runTest {
-        val states = mutableListOf<Boolean>()
-
-        runCatching {
-            withScopedScrubbingMode(states::add) {
-                error("boom")
-            }
-        }
-
-        assertThat(states).containsExactly(true, false).inOrder()
     }
 
     @Test

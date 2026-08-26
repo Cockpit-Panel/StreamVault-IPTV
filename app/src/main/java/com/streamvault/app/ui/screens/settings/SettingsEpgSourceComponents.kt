@@ -32,6 +32,7 @@ import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.theme.OnSurfaceDim
 import com.streamvault.app.ui.theme.Primary
 import com.streamvault.domain.model.EpgSource
+import com.streamvault.domain.model.XmltvTimezonePolicy
 
 @Composable
 internal fun EpgSourceCard(
@@ -40,9 +41,21 @@ internal fun EpgSourceCard(
     pendingDelete: Boolean,
     onToggleEnabled: (Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onUpdateTimezone: (String?, () -> Unit, () -> Unit) -> Unit,
     onSetPendingDelete: (Boolean) -> Unit,
     onDelete: () -> Unit
 ) {
+    var editingTimezone by remember(source.id) { mutableStateOf(false) }
+    var timezoneInput by remember(source.id, source.timezonePolicy, source.timezoneId) {
+        mutableStateOf(
+            when (source.timezonePolicy) {
+                XmltvTimezonePolicy.REQUIRE_OFFSET -> ""
+                XmltvTimezonePolicy.UTC -> "UTC"
+                XmltvTimezonePolicy.EXPLICIT_ZONE -> source.timezoneId.orEmpty()
+            }
+        )
+    }
+    var savingTimezone by remember(source.id) { mutableStateOf(false) }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -54,6 +67,68 @@ internal fun EpgSourceCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(source.name, style = MaterialTheme.typography.titleSmall, color = Color.White)
                     Text(displayableEpgUrl(source.url), style = MaterialTheme.typography.bodySmall, color = OnSurfaceDim, maxLines = 1)
+                    Text(
+                        text = when (source.timezonePolicy) {
+                            XmltvTimezonePolicy.REQUIRE_OFFSET -> "Timezone: XMLTV offset required"
+                            XmltvTimezonePolicy.UTC -> "Timezone: UTC"
+                            XmltvTimezonePolicy.EXPLICIT_ZONE -> "Timezone: ${source.timezoneId}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceDim
+                    )
+                    if (editingTimezone) {
+                        EpgSourceTextField(
+                            value = timezoneInput,
+                            onValueChange = { timezoneInput = it },
+                            placeholder = "IANA timezone, UTC, or blank to require XMLTV offsets"
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TvClickableSurface(
+                                onClick = {
+                                    savingTimezone = true
+                                    onUpdateTimezone(
+                                        timezoneInput.trim().takeIf(String::isNotEmpty),
+                                        {
+                                            savingTimezone = false
+                                            editingTimezone = false
+                                        },
+                                        { savingTimezone = false }
+                                    )
+                                },
+                                enabled = !savingTimezone,
+                                shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+                                colors = ClickableSurfaceDefaults.colors(
+                                    containerColor = Primary.copy(alpha = 0.15f),
+                                    focusedContainerColor = Primary.copy(alpha = 0.3f)
+                                ),
+                                scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+                            ) {
+                                Text(
+                                    if (savingTimezone) "Saving..." else "Save timezone",
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Primary
+                                )
+                            }
+                            TvClickableSurface(
+                                onClick = { editingTimezone = false },
+                                enabled = !savingTimezone,
+                                shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+                                colors = ClickableSurfaceDefaults.colors(
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    focusedContainerColor = Color.White.copy(alpha = 0.15f)
+                                ),
+                                scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+                            ) {
+                                Text(
+                                    "Cancel",
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = OnSurfaceDim
+                                )
+                            }
+                        }
+                    }
                     if (source.lastError != null) {
                         Text("Error: ${source.lastError}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFEF5350))
                     }
@@ -64,6 +139,23 @@ internal fun EpgSourceCard(
                 }
                 val sourceActionShape = RoundedCornerShape(8.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TvClickableSurface(
+                        onClick = { editingTimezone = !editingTimezone },
+                        shape = ClickableSurfaceDefaults.shape(sourceActionShape),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            focusedContainerColor = Color.White.copy(alpha = 0.15f)
+                        ),
+                        border = epgActionBorder(sourceActionShape),
+                        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+                    ) {
+                        Text(
+                            "Timezone",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = OnSurfaceDim
+                        )
+                    }
                     TvClickableSurface(
                         onClick = { onToggleEnabled(!source.enabled) },
                         shape = ClickableSurfaceDefaults.shape(sourceActionShape),
@@ -148,6 +240,7 @@ internal fun EpgSourceCard(
 internal fun AddEpgSourceCard(viewModel: SettingsViewModel) {
     var newName by remember { mutableStateOf("") }
     var newUrl by remember { mutableStateOf("") }
+    var newTimezoneId by remember { mutableStateOf("") }
     var isSubmitting by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -196,17 +289,24 @@ internal fun AddEpgSourceCard(viewModel: SettingsViewModel) {
                     Text("Browse", modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), style = MaterialTheme.typography.labelMedium, color = Primary)
                 }
             }
+            EpgSourceTextField(
+                value = newTimezoneId,
+                onValueChange = { newTimezoneId = it },
+                placeholder = "Timezone for offset-less dates (e.g. Europe/Amsterdam); blank requires XMLTV offsets"
+            )
             val addSourceShape = RoundedCornerShape(8.dp)
             TvClickableSurface(
                 onClick = {
                     if (!isSubmitting && newName.isNotBlank() && newUrl.isNotBlank()) {
                         val nameToSubmit = newName.trim()
                         val urlToSubmit = newUrl.trim()
+                        val timezoneToSubmit = newTimezoneId.trim().takeIf(String::isNotEmpty)
                         isSubmitting = true
-                        viewModel.addEpgSource(nameToSubmit, urlToSubmit,
+                        viewModel.addEpgSource(nameToSubmit, urlToSubmit, timezoneToSubmit,
                             onSuccess = {
                                 newName = ""
                                 newUrl = ""
+                                newTimezoneId = ""
                                 isSubmitting = false
                             },
                             onError = { isSubmitting = false }

@@ -3,7 +3,7 @@
   "device": {
     "portalUrl": "https://portal.example.com/server/load.php",
     "macAddress": "00:1A:79:AA:BB:CC",
-    "authMode": "AUTO",
+    "authMode": "MAC_PLUS_CREDENTIALS",
     "username": "alice",
     "password": "secret"
   },

@@ -26,10 +26,21 @@ class DatabaseMaintenanceManager @Inject constructor(
     private val favoriteDao: FavoriteDao,
     private val programReminderDao: ProgramReminderDao,
     private val searchHistoryDao: SearchHistoryDao,
-    private val syncManager: SyncManager
+    private val providerWorkLocks: ProviderWorkLockRegistry
 ) {
 
-    suspend fun runDailyMaintenance(now: Long = System.currentTimeMillis()): MaintenanceReport = withContext(Dispatchers.IO) {
+    suspend fun runDailyMaintenance(now: Long = System.currentTimeMillis()): MaintenanceRunResult {
+        var completedReport: MaintenanceReport? = null
+        providerWorkLocks.runWhenNoWorkActive {
+            completedReport = runDailyMaintenanceWhenAdmitted(now)
+            true
+        }
+        return completedReport
+            ?.let(MaintenanceRunResult::Completed)
+            ?: MaintenanceRunResult.DeferredForActiveSync
+    }
+
+    private suspend fun runDailyMaintenanceWhenAdmitted(now: Long): MaintenanceReport = withContext(Dispatchers.IO) {
         val oldProgramThreshold = now - programRetentionMillis()
         searchHistoryDao.pruneOlderThan(now - SEARCH_HISTORY_RETENTION_MILLIS)
         val deletedExpiredReminders = programReminderDao.deleteExpired(now - PROGRAM_REMINDER_RETENTION_MILLIS)
@@ -43,13 +54,7 @@ class DatabaseMaintenanceManager @Inject constructor(
         val statsBeforeVacuum = collectStorageStats()
         val vacuumNeeded = shouldVacuum(statsBeforeVacuum)
         val vacuumRan = if (vacuumNeeded) {
-            syncManager.runWhenNoSyncActive {
-                runVacuum()
-            }.also { ran ->
-                if (!ran) {
-                    Log.i(TAG, "VACUUM skipped: a provider sync is currently active")
-                }
-            }
+            runVacuum()
         } else {
             false
         }
@@ -67,6 +72,11 @@ class DatabaseMaintenanceManager @Inject constructor(
             statsAfterVacuum = statsAfterVacuum,
             tableStats = tableStats
         )
+    }
+
+    sealed interface MaintenanceRunResult {
+        data class Completed(val report: MaintenanceReport) : MaintenanceRunResult
+        data object DeferredForActiveSync : MaintenanceRunResult
     }
 
     @WorkerThread

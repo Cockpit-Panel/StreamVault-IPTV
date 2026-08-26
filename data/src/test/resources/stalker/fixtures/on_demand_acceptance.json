@@ -1,0 +1,60 @@
+{
+  "name": "on_demand_acceptance",
+  "device": {
+    "portalUrl": "https://portal.example.com/c",
+    "macAddress": "00:1A:79:12:34:56",
+    "authMode": "AUTO",
+    "deviceProfile": "MAG250",
+    "timezone": "Asia/Jerusalem",
+    "locale": "en"
+  },
+  "responses": [
+    { "action": "handshake", "body": "{\"js\":{\"token\":\"fixture-token\"}}" },
+    { "action": "get_profile", "body": "{\"js\":{\"id\":\"77\",\"name\":\"Acceptance\",\"status\":\"1\",\"auth_access\":true}}" },
+    { "action": "get_genres", "body": "{\"js\":[{\"id\":\"10\",\"title\":\"News\"}]}" },
+    { "action": "get_all_channels", "body": "{\"js\":{\"data\":[{\"id\":\"100\",\"name\":\"News One\",\"tv_genre_id\":\"10\",\"cmd\":\"ffmpeg http://media.invalid/live.ts\"}]}}" },
+    { "action": "get_categories", "body": "{\"js\":[{\"id\":\"20\",\"title\":\"Recent Movies\"}]}" },
+    { "action": "get_categories", "body": "{\"js\":[{\"id\":\"30\",\"title\":\"Recent Series\"}]}" },
+    { "action": "get_ordered_list", "body": "{\"js\":{\"total_items\":\"36\",\"max_page_items\":\"18\",\"data\":[{\"id\":\"201\",\"name\":\"Movie 1\",\"category_id\":\"20\"}]}}" },
+    { "action": "get_ordered_list", "body": "{\"js\":{\"total_items\":\"36\",\"max_page_items\":\"18\",\"data\":[{\"id\":\"202\",\"name\":\"Movie 2\",\"category_id\":\"20\"}]}}" },
+    { "action": "get_ordered_list", "body": "{\"js\":{\"total_items\":\"36\",\"max_page_items\":\"18\",\"data\":[{\"id\":\"301\",\"name\":\"Series 1\",\"category_id\":\"30\",\"is_series\":\"1\"}]}}" },
+    { "action": "get_ordered_list", "body": "{\"js\":{\"total_items\":\"36\",\"max_page_items\":\"18\",\"data\":[{\"id\":\"302\",\"name\":\"Series 2\",\"category_id\":\"30\",\"is_series\":\"1\"}]}}" },
+    { "action": "get_epg_info", "body": "{\"js\":[{\"id\":\"p1\",\"ch_id\":\"100\",\"name\":\"Morning News\",\"start_timestamp\":\"1700000000\",\"stop_timestamp\":\"1700003600\"}]}" },
+    { "action": "get_ordered_list", "body": "{\"js\":{\"total_items\":\"54\",\"max_page_items\":\"18\",\"data\":[{\"id\":\"203\",\"name\":\"Movie 3\",\"category_id\":\"20\"}]}}" }
+  ],
+  "operations": [
+    { "type": "MOVIE_PREVIEW", "categoryId": "20", "pages": 2 },
+    { "type": "SERIES_PREVIEW", "categoryId": "30", "pages": 2 },
+    { "type": "EPG" },
+    { "type": "BACKGROUND_INDEX", "categoryId": "20", "page": 3 }
+  ],
+  "expected": {
+    "authMode": "MAC_ONLY",
+    "portalProfile": "MAG_BASIC",
+    "bootstrapEvidence": ["handshake", "get_profile"],
+    "requestOrder": ["handshake", "get_profile"],
+    "maxAuthenticationMillis": 3000,
+    "maxReadinessMillis": 10000,
+    "maxConcurrency": 2,
+    "maxMoviePagesAfterSetup": 3,
+    "maxSeriesPagesAfterSetup": 2,
+    "acceptanceRequestOrder": [
+      "handshake",
+      "get_profile",
+      "get_genres",
+      "get_all_channels",
+      "get_categories",
+      "get_categories",
+      "get_ordered_list",
+      "get_ordered_list",
+      "get_ordered_list",
+      "get_ordered_list",
+      "get_epg_info",
+      "get_ordered_list"
+    ],
+    "requestCount": 12,
+    "orderedPages": [1, 2, 1, 2, 3],
+    "readinessMilestones": ["AUTHENTICATING", "LIVE_READY", "CATEGORIES_READY", "READY"],
+    "minResponseBytes": 1
+  }
+}

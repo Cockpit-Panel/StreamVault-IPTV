@@ -40,9 +40,9 @@ import com.streamvault.app.ui.components.shell.StatusPill
 import com.streamvault.app.ui.design.AppColors
 import com.streamvault.app.ui.interaction.TvButton
 import com.streamvault.data.sync.SyncProgressBus
+import com.streamvault.data.sync.SyncProgressAggregate
 import com.streamvault.domain.repository.ProviderRepository
 import com.streamvault.domain.sync.Section
-import com.streamvault.domain.sync.SyncProgress
 import com.streamvault.domain.usecase.M3uProviderSetupCommand
 import com.streamvault.domain.usecase.ValidateAndAddProvider
 import com.streamvault.domain.usecase.XtreamProviderSetupCommand
@@ -71,8 +71,8 @@ class WelcomeViewModel @Inject constructor(
 
     private val acceptingProgress = MutableStateFlow(true)
 
-    val syncProgress: StateFlow<SyncProgress?> =
-        combine(syncProgressBus.flow, acceptingProgress) { progress, accept ->
+    val syncProgress: StateFlow<SyncProgressAggregate?> =
+        combine(syncProgressBus.aggregate, acceptingProgress) { progress, accept ->
             if (accept) progress else null
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -125,15 +125,16 @@ class WelcomeViewModel @Inject constructor(
 @Composable
 fun WelcomeScreen(
     onNavigateToHome: () -> Unit,
+    startupReady: Boolean = true,
     onNavigateToSetup: () -> Unit,
     viewModel: WelcomeViewModel = hiltViewModel()
 ) {
     val hasProviders by viewModel.hasProviders.collectAsStateWithLifecycle()
     val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
 
-    LaunchedEffect(hasProviders) {
+    LaunchedEffect(hasProviders, startupReady) {
         when (hasProviders) {
-            true -> onNavigateToHome()
+            true -> if (startupReady) onNavigateToHome()
             false -> Unit
             null -> Unit
         }
@@ -175,7 +176,7 @@ fun WelcomeScreen(
 
 @Composable
 private fun WelcomeLoadingCard(
-    syncProgress: SyncProgress?,
+    syncProgress: SyncProgressAggregate?,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -184,16 +185,17 @@ private fun WelcomeLoadingCard(
         colors = SurfaceDefaults.colors(containerColor = AppColors.Surface.copy(alpha = 0.9f))
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 36.dp, vertical = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            val pillLabel = if (syncProgress != null) {
-                stringResource(sectionLabelRes(syncProgress.section))
+        modifier = Modifier.padding(horizontal = 36.dp, vertical = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+            val representativeProgress = syncProgress?.representative?.progress
+            val pillLabel = if (representativeProgress != null) {
+                stringResource(sectionLabelRes(representativeProgress.section))
             } else {
                 stringResource(R.string.app_name)
             }
-            val pillColor = if (syncProgress != null) {
-                sectionColor(syncProgress.section)
+            val pillColor = if (representativeProgress != null) {
+                sectionColor(representativeProgress.section)
             } else {
                 AppColors.BrandMuted
             }
@@ -202,7 +204,7 @@ private fun WelcomeLoadingCard(
                 containerColor = pillColor
             )
             Spacer(modifier = Modifier.height(18.dp))
-            if (syncProgress == null) {
+            if (representativeProgress == null) {
                 CircularProgressIndicator(color = AppColors.Brand)
                 Spacer(modifier = Modifier.height(18.dp))
             }
@@ -212,8 +214,8 @@ private fun WelcomeLoadingCard(
                 color = AppColors.TextPrimary
             )
             Spacer(modifier = Modifier.height(6.dp))
-            val subtitle = if (syncProgress != null && syncProgress.currentLabel.isNotBlank()) {
-                syncProgress.currentLabel
+            val subtitle = if (representativeProgress != null && representativeProgress.currentLabel.isNotBlank()) {
+                representativeProgress.currentLabel
             } else {
                 stringResource(R.string.welcome_loading_subtitle)
             }
@@ -222,11 +224,11 @@ private fun WelcomeLoadingCard(
                 style = MaterialTheme.typography.bodyLarge,
                 color = AppColors.TextSecondary
             )
-            if (syncProgress != null) {
+            if (representativeProgress != null) {
                 Spacer(modifier = Modifier.height(14.dp))
-                if (syncProgress.total > 0) {
+                if (representativeProgress.total > 0) {
                     LinearProgressIndicator(
-                        progress = { syncProgress.current.toFloat() / syncProgress.total.toFloat() },
+                        progress = { representativeProgress.current.toFloat() / representativeProgress.total.toFloat() },
                         modifier = Modifier.width(260.dp),
                         color = AppColors.Brand,
                         trackColor = AppColors.BrandMuted
@@ -242,7 +244,7 @@ private fun WelcomeLoadingCard(
                 Text(
                     text = stringResource(
                         R.string.sync_items_indexed_format,
-                        syncProgress.itemsIndexed
+                        representativeProgress.itemsIndexed
                     ),
                     style = MaterialTheme.typography.labelLarge,
                     color = AppColors.TextSecondary

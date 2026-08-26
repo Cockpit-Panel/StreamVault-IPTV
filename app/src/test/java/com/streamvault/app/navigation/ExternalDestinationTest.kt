@@ -27,4 +27,18 @@ class ExternalDestinationTest {
         assertThat(ExternalDestination.fromLegacyRoute("series_detail/not-a-number"))
             .isNull()
     }
+
+    @Test
+    fun fromLegacyRoute_decodesUtf8AndSkipsMalformedQueryValues() {
+        assertThat(
+            ExternalDestination.fromLegacyRoute(
+                "provider_setup?providerId=7&importUri=https%3A%2F%2Fexample.com%2Fguide%3Fname%3DCaf%C3%A9%2BTV&bad=%zz"
+            )
+        ).isEqualTo(
+            ExternalDestination.ProviderSetup(
+                providerId = 7L,
+                importUri = "https://example.com/guide?name=Café+TV"
+            )
+        )
+    }
 }

@@ -1,6 +1,7 @@
 package com.streamvault.app.ui.screens.settings
 
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.XmltvTimezonePolicy
 import com.streamvault.domain.repository.EpgSourceRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -39,10 +40,28 @@ internal class SettingsEpgActions(
         }
     }
 
-    fun addEpgSource(scope: CoroutineScope, name: String, url: String, onSuccess: () -> Unit = {}, onError: () -> Unit = {}) {
+    fun addEpgSource(
+        scope: CoroutineScope,
+        name: String,
+        url: String,
+        timezoneId: String?,
+        onSuccess: () -> Unit = {},
+        onError: () -> Unit = {}
+    ) {
         scope.launch {
             try {
-                val result = epgSourceRepository.addSource(name, url)
+                val normalizedTimezoneId = timezoneId?.trim()?.takeIf(String::isNotEmpty)
+                val timezonePolicy = when {
+                    normalizedTimezoneId == null -> XmltvTimezonePolicy.REQUIRE_OFFSET
+                    normalizedTimezoneId.equals("UTC", ignoreCase = true) -> XmltvTimezonePolicy.UTC
+                    else -> XmltvTimezonePolicy.EXPLICIT_ZONE
+                }
+                val result = epgSourceRepository.addSource(
+                    name = name,
+                    url = url,
+                    timezonePolicy = timezonePolicy,
+                    timezoneId = normalizedTimezoneId
+                )
                 if (result is Result.Error) {
                     uiState.update { it.copy(userMessage = result.message) }
                     onError()
@@ -53,6 +72,54 @@ internal class SettingsEpgActions(
                 throw cancelled
             } catch (error: Exception) {
                 showUnexpectedError(error, "Failed to add EPG source")
+                onError()
+            }
+        }
+    }
+
+    fun updateEpgSourceTimezone(
+        scope: CoroutineScope,
+        source: com.streamvault.domain.model.EpgSource,
+        timezoneId: String?,
+        onSuccess: () -> Unit = {},
+        onError: () -> Unit = {}
+    ) {
+        scope.launch {
+            try {
+                val normalizedTimezoneId = timezoneId?.trim()?.takeIf(String::isNotEmpty)
+                val timezonePolicy = when {
+                    normalizedTimezoneId == null -> XmltvTimezonePolicy.REQUIRE_OFFSET
+                    normalizedTimezoneId.equals("UTC", ignoreCase = true) -> XmltvTimezonePolicy.UTC
+                    else -> XmltvTimezonePolicy.EXPLICIT_ZONE
+                }
+                val updateResult = epgSourceRepository.updateSource(
+                    source.copy(
+                        timezonePolicy = timezonePolicy,
+                        timezoneId = normalizedTimezoneId
+                    )
+                )
+                if (updateResult is Result.Error) {
+                    uiState.update { it.copy(userMessage = updateResult.message) }
+                    onError()
+                    return@launch
+                }
+
+                val affectedProviders = epgSourceRepository.getProviderIdsForSource(source.id)
+                val refreshResult = epgSourceRepository.refreshSource(source.id)
+                if (refreshResult is Result.Error) {
+                    uiState.update {
+                        it.copy(userMessage = "Timezone saved, but refresh failed: ${refreshResult.message}")
+                    }
+                    onError()
+                } else {
+                    refreshLoadedResolutionSummaries(affectedProviders)
+                    uiState.update { it.copy(userMessage = "EPG timezone updated") }
+                    onSuccess()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                showUnexpectedError(error, "Failed to update EPG timezone")
                 onError()
             }
         }

@@ -10,7 +10,6 @@ import com.streamvault.data.local.dao.ChannelEpgMappingDao
 import com.streamvault.data.local.dao.EpgChannelDao
 import com.streamvault.data.local.dao.EpgProgrammeDao
 import com.streamvault.data.local.dao.EpgSourceDao
-import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.dao.ProviderEpgSourceDao
 import com.streamvault.data.local.entity.ChannelEpgMappingEntity
 import com.streamvault.data.local.entity.EpgChannelEntity
@@ -23,8 +22,14 @@ import com.streamvault.domain.model.EpgMatchType
 import com.streamvault.domain.model.EpgOverrideCandidate
 import com.streamvault.domain.model.EpgSourceType
 import com.streamvault.data.parser.XmltvParser
+import com.streamvault.data.parser.XmltvIngestionLimits
+import com.streamvault.data.parser.XmltvLimitExceeded
+import com.streamvault.data.parser.XmltvLimitKind
+import com.streamvault.data.util.ProviderInputSanitizer
+import com.streamvault.data.util.runSuspendCatching
 import com.streamvault.data.util.UrlSecurityPolicy
 import com.streamvault.data.remote.http.HttpRequestProfile
+import com.streamvault.data.remote.http.openCancellableResponse
 import com.streamvault.data.remote.http.safeRequestIdentitySummary
 import com.streamvault.data.remote.http.withRequestProfile
 import com.streamvault.domain.model.ChannelEpgMapping
@@ -34,31 +39,80 @@ import com.streamvault.domain.model.EpgSource
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.model.ProviderEpgSourceAssignment
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.XmltvTimezonePolicy
 import com.streamvault.domain.repository.EpgSourceRepository
+import com.streamvault.domain.util.PersistedTimestampPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import com.streamvault.domain.util.KeyedMutexRegistry
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.FilterInputStream
-import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import com.streamvault.data.remote.NetworkTimeoutConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+internal fun limitEpgInput(
+    input: InputStream,
+    maxBytes: Long = NetworkTimeoutConfig.EPG_MAX_SIZE_BYTES,
+    kind: XmltvLimitKind = XmltvLimitKind.DECOMPRESSED_BYTES,
+): InputStream = object : FilterInputStream(input) {
+    private var bytesRead = 0L
+
+    override fun read(): Int {
+        if (bytesRead >= maxBytes) {
+            return if (super.read() == -1) -1 else throw XmltvLimitExceeded(kind, maxBytes)
+        }
+        return super.read().also { if (it >= 0) bytesRead++ }
+    }
+
+    override fun read(bytes: ByteArray, off: Int, len: Int): Int {
+        if (len == 0) return 0
+        if (bytesRead >= maxBytes) {
+            return if (super.read() == -1) -1 else throw XmltvLimitExceeded(kind, maxBytes)
+        }
+        val remaining = (maxBytes - bytesRead).coerceAtMost(len.toLong()).toInt()
+        return super.read(bytes, off, remaining).also { if (it > 0) bytesRead += it }
+    }
+}
+
+internal fun openLimitedXmltvInput(
+    rawInput: InputStream,
+    url: String,
+    xmltvParser: XmltvParser,
+    limits: XmltvIngestionLimits = XmltvIngestionLimits()
+): InputStream {
+    val rawLimited = limitEpgInput(rawInput, limits.maxRawBytes, XmltvLimitKind.RAW_BYTES)
+    val decompressed = xmltvParser.maybeDecompressGzip(url, rawLimited)
+    return limitEpgInput(
+        decompressed,
+        limits.maxDecompressedBytes,
+        XmltvLimitKind.DECOMPRESSED_BYTES
+    )
+}
+
+internal fun shouldRateLimitEpgRefresh(
+    lastSuccessfulRefreshAt: Long,
+    now: Long,
+    minimumIntervalMillis: Long
+): Boolean = PersistedTimestampPolicy.isFresh(
+    lastSuccessfulRefreshAt,
+    now,
+    minimumIntervalMillis
+)
 
 @Singleton
 class EpgSourceRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val epgSourceDao: EpgSourceDao,
     private val providerEpgSourceDao: ProviderEpgSourceDao,
-    private val providerDao: ProviderDao,
     private val channelEpgMappingDao: ChannelEpgMappingDao,
     private val epgChannelDao: EpgChannelDao,
     private val epgProgrammeDao: EpgProgrammeDao,
@@ -71,13 +125,13 @@ class EpgSourceRepositoryImpl @Inject constructor(
 
     companion object {
         private const val TAG = "EpgSourceRepo"
-        private const val MAX_EPG_SIZE_BYTES = NetworkTimeoutConfig.EPG_MAX_SIZE_BYTES
+        private const val MAX_EPG_RAW_SIZE_BYTES = NetworkTimeoutConfig.EPG_MAX_RAW_SIZE_BYTES
         private const val CHANNEL_BATCH_SIZE = 500
         private const val PROGRAMME_BATCH_SIZE = 500
         private const val MIN_REFRESH_INTERVAL_MS = 5L * 60L * 1000L // 5 minutes
     }
 
-    private val sourceRefreshMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val sourceRefreshMutexes = KeyedMutexRegistry<Long>()
 
     // Dedicated client for EPG downloads: longer read timeout for large/slow feeds,
     // and no automatic Accept-Encoding: gzip (we handle gzip manually via maybeDecompressGzip).
@@ -95,20 +149,31 @@ class EpgSourceRepositoryImpl @Inject constructor(
     override suspend fun getSourceById(id: Long): EpgSource? =
         epgSourceDao.getById(id)?.toDomain()
 
-    override suspend fun addSource(name: String, url: String): Result<EpgSource> {
-        val trimmedUrl = url.trim()
-        if (trimmedUrl.isBlank()) return Result.error("URL cannot be empty")
+    override suspend fun addSource(
+        name: String,
+        url: String,
+        timezonePolicy: XmltvTimezonePolicy,
+        timezoneId: String?
+    ): Result<EpgSource> {
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) return Result.error("URL cannot be empty")
+        val trimmedUrl = ProviderInputSanitizer.resolveUrlProtocol(trimmed)
         val validationError = UrlSecurityPolicy.validateOptionalEpgUrl(trimmedUrl)
         if (validationError != null) return Result.error(validationError)
 
         val existing = epgSourceDao.getByUrl(trimmedUrl)
         if (existing != null) return Result.error("A source with this URL already exists")
+        val normalizedTimezone = validateXmltvTimezonePolicy(timezonePolicy, timezoneId)
+        if (normalizedTimezone is Result.Error) return normalizedTimezone
+        val normalizedTimezoneId = (normalizedTimezone as Result.Success).data
 
         val trimmedName = name.trim().takeIf { it.isNotEmpty() } ?: "EPG Source"
         val now = System.currentTimeMillis()
         val entity = EpgSourceEntity(
             name = trimmedName,
             url = trimmedUrl,
+            timezonePolicy = timezonePolicy,
+            timezoneId = normalizedTimezoneId,
             createdAt = now,
             updatedAt = now
         )
@@ -117,17 +182,23 @@ class EpgSourceRepositoryImpl @Inject constructor(
     }
 
     override suspend fun updateSource(source: EpgSource): Result<Unit> {
-        val trimmedUrl = source.url.trim()
+        val trimmed = source.url.trim()
+        val trimmedUrl = if (trimmed.isBlank()) trimmed else ProviderInputSanitizer.resolveUrlProtocol(trimmed)
         val validationError = UrlSecurityPolicy.validateOptionalEpgUrl(trimmedUrl)
         if (validationError != null) return Result.error(validationError)
 
         val existing = epgSourceDao.getById(source.id) ?: return Result.error("Source not found")
+        val normalizedTimezone = validateXmltvTimezonePolicy(source.timezonePolicy, source.timezoneId)
+        if (normalizedTimezone is Result.Error) return normalizedTimezone
+        val normalizedTimezoneId = (normalizedTimezone as Result.Success).data
         epgSourceDao.update(
             existing.copy(
                 name = source.name.trim().takeIf { it.isNotEmpty() } ?: existing.name,
                 url = trimmedUrl,
                 enabled = source.enabled,
                 priority = source.priority,
+                timezonePolicy = source.timezonePolicy,
+                timezoneId = normalizedTimezoneId,
                 updatedAt = System.currentTimeMillis()
             )
         )
@@ -140,6 +211,7 @@ class EpgSourceRepositoryImpl @Inject constructor(
         epgProgrammeDao.deleteBySource(id)
         epgChannelDao.deleteBySource(id)
         epgSourceDao.delete(id)
+        sourceRefreshMutexes.forget(id)
         resolveAffectedProviders(affectedProviderIds)
     }
 
@@ -212,15 +284,14 @@ class EpgSourceRepositoryImpl @Inject constructor(
         sourceId: Long,
         resolveAffectedProviders: Boolean
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        val mutex = sourceRefreshMutexes.computeIfAbsent(sourceId) { Mutex() }
-        mutex.withLock {
+        sourceRefreshMutexes.withLock(sourceId) {
             val source = epgSourceDao.getById(sourceId)
                 ?: return@withLock Result.error("Source not found")
 
             val now = System.currentTimeMillis()
 
             // Rate-limit: skip if last successful refresh was less than 5 minutes ago
-            if (source.lastRefreshAt > 0 && now - source.lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
+            if (shouldRateLimitEpgRefresh(source.lastRefreshAt, now, MIN_REFRESH_INTERVAL_MS)) {
                 Log.d(TAG, "Skipping refresh for source $sourceId: last refresh was ${(now - source.lastRefreshAt) / 1000}s ago")
                 return@withLock Result.success(Unit)
             }
@@ -244,16 +315,20 @@ class EpgSourceRepositoryImpl @Inject constructor(
                     val requestProfile = HttpRequestProfile(ownerTag = "epg-source:$sourceId")
                     val request = Request.Builder()
                         .url(source.url)
+                        // Preserve the actual wire representation so the smaller raw-byte
+                        // ceiling is enforced before our own gzip detection/decompression.
+                        .header("Accept-Encoding", "identity")
                         .apply {
                             source.etag?.let { header("If-None-Match", it) }
                             source.lastModifiedHeader?.let { header("If-Modified-Since", it) }
                         }
                         .build()
                         .withRequestProfile(requestProfile)
-                    val response = epgHttpClient.newCall(request).execute()
+                    val ownedResponse = epgHttpClient.newCall(request).openCancellableResponse()
+                    val response = ownedResponse.response
 
                     if (response.code == 304) {
-                        response.close()
+                        ownedResponse.close()
                         val now = System.currentTimeMillis()
                         epgSourceDao.updateRefreshSuccess(sourceId, now)
                         if (resolveAffectedProviders) {
@@ -268,21 +343,22 @@ class EpgSourceRepositoryImpl @Inject constructor(
                             "EPG request failed for source $sourceId (${response.request.safeRequestIdentitySummary(requestProfile)}): HTTP ${response.code}"
                         )
                         val err = "HTTP ${response.code}"
-                        response.close()
+                        ownedResponse.close()
                         epgSourceDao.updateRefreshError(sourceId, err)
                         return@withLock Result.error("Failed to download EPG: $err")
                     }
 
                     val contentLength = response.header("Content-Length")?.toLongOrNull() ?: -1L
-                    if (contentLength > MAX_EPG_SIZE_BYTES) {
-                        response.close()
-                        val err = "File too large (${contentLength / 1_048_576}MB)"
+                    if (contentLength > MAX_EPG_RAW_SIZE_BYTES) {
+                        ownedResponse.close()
+                        val exception = XmltvLimitExceeded(XmltvLimitKind.RAW_BYTES, MAX_EPG_RAW_SIZE_BYTES)
+                        val err = xmltvLimitMessage(exception)
                         epgSourceDao.updateRefreshError(sourceId, err)
-                        return@withLock Result.error(err)
+                        return@withLock Result.error(err, exception)
                     }
 
                     val bodyStream = response.body?.byteStream() ?: run {
-                        response.close()
+                        ownedResponse.close()
                         epgSourceDao.updateRefreshError(sourceId, "Empty response")
                         return@withLock Result.error("Empty EPG response")
                     }
@@ -293,7 +369,7 @@ class EpgSourceRepositoryImpl @Inject constructor(
                             try {
                                 super.close()
                             } finally {
-                                response.close()
+                                ownedResponse.close()
                             }
                         }
                     }
@@ -307,22 +383,11 @@ class EpgSourceRepositoryImpl @Inject constructor(
                 // Stage new data under a negative source ID to avoid clobbering
                 // live data during download/parse. Swap atomically on success.
                 val stagingId = -sourceId
-                val sourceTimezoneId = resolveSourceTimezoneId(sourceId)
+                val sourceTimezoneId = source.parserTimezoneId()
                 prepareStagingSource(source, stagingId)
 
                 rawInputStream.use { raw ->
-                    val limited = object : FilterInputStream(raw) {
-                        private var bytesRead = 0L
-                        override fun read(): Int {
-                            if (bytesRead >= MAX_EPG_SIZE_BYTES) throw IOException("EPG response too large (>200 MB)")
-                            return super.read().also { if (it >= 0) bytesRead++ }
-                        }
-                        override fun read(b: ByteArray, off: Int, len: Int): Int {
-                            if (bytesRead >= MAX_EPG_SIZE_BYTES) throw IOException("EPG response too large (>200 MB)")
-                            return super.read(b, off, len).also { if (it > 0) bytesRead += it }
-                        }
-                    }
-                    xmltvParser.maybeDecompressGzip(source.url, limited).use { decompressed ->
+                    openLimitedXmltvInput(raw, source.url, xmltvParser).use { decompressed ->
                         xmltvParser.parseStreamingWithChannels(
                             inputStream = decompressed,
                             timezoneId = sourceTimezoneId,
@@ -394,31 +459,31 @@ class EpgSourceRepositoryImpl @Inject constructor(
                 Log.d(TAG, "Refreshed source $sourceId: $channelCount channels, $programmeCount programmes")
                 Result.success(Unit)
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 Log.e(TAG, "Failed to refresh source $sourceId", e)
                 // Clean up any staged rows on failure
                 val stagingId = -sourceId
-                runCatching {
+                runSuspendCatching {
                     transactionRunner.inTransaction {
                         epgProgrammeDao.deleteBySource(stagingId)
                         epgChannelDao.deleteBySource(stagingId)
                         epgSourceDao.delete(stagingId)
                     }
                 }
-                val isOversizeError = e is IOException && e.message?.contains("too large", ignoreCase = true) == true
-                val statusMessage = if (isOversizeError) {
-                    "EPG response exceeded 200 MB limit"
-                } else {
-                    e.message ?: "Unknown error"
-                }
+                val limitError = e as? XmltvLimitExceeded
+                val statusMessage = limitError?.let(::xmltvLimitMessage) ?: (e.message ?: "Unknown error")
                 epgSourceDao.updateRefreshError(sourceId, statusMessage)
-                if (isOversizeError) {
-                    Result.error("EPG response exceeded 200 MB limit", e)
+                if (limitError != null) {
+                    Result.error(statusMessage, e)
                 } else {
                     Result.error("Failed to refresh EPG source: ${e.message}", e)
                 }
             }
         }
     }
+
+    private fun xmltvLimitMessage(error: XmltvLimitExceeded): String =
+        "EPG ${error.kind.label} exceeded safety limit"
 
     override suspend fun refreshAllForProvider(providerId: Long): Result<Unit> {
         val assignments = providerEpgSourceDao.getEnabledForProviderSync(providerId)
@@ -571,6 +636,8 @@ class EpgSourceRepositoryImpl @Inject constructor(
                     url = "streamvault://epg-source-staging/${source.id}",
                     enabled = false,
                     priority = Int.MAX_VALUE,
+                    timezonePolicy = source.timezonePolicy,
+                    timezoneId = source.timezoneId,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -578,26 +645,30 @@ class EpgSourceRepositoryImpl @Inject constructor(
         }
     }
 
-    private suspend fun resolveSourceTimezoneId(sourceId: Long): String? {
-        val providerTimezoneIds = providerEpgSourceDao.getProviderIdsForSourceSync(sourceId)
-            .distinct()
-            .mapNotNull { providerId ->
-                providerDao.getById(providerId)
-                    ?.stalkerDeviceTimezone
-                    ?.trim()
-                    ?.takeIf(String::isNotEmpty)
-            }
-            .distinct()
+    private fun EpgSourceEntity.parserTimezoneId(): String? = when (timezonePolicy) {
+        XmltvTimezonePolicy.REQUIRE_OFFSET -> null
+        XmltvTimezonePolicy.UTC -> "UTC"
+        XmltvTimezonePolicy.EXPLICIT_ZONE -> timezoneId
+    }
+}
 
-        return when (providerTimezoneIds.size) {
-            0 -> null
-            1 -> providerTimezoneIds.single()
-            else -> {
-                Log.w(
-                    TAG,
-                    "Source $sourceId has multiple provider timezones $providerTimezoneIds; defaulting no-offset XMLTV timestamps to system timezone"
-                )
-                null
+internal fun validateXmltvTimezonePolicy(
+    policy: XmltvTimezonePolicy,
+    timezoneId: String?
+): Result<String?> {
+    val normalized = timezoneId?.trim()?.takeIf(String::isNotEmpty)
+    return when (policy) {
+        XmltvTimezonePolicy.REQUIRE_OFFSET,
+        XmltvTimezonePolicy.UTC -> Result.success(null)
+        XmltvTimezonePolicy.EXPLICIT_ZONE -> {
+            if (normalized == null) {
+                Result.error("Choose a timezone for offset-less XMLTV timestamps")
+            } else {
+                runCatching { java.time.ZoneId.of(normalized).id }
+                    .fold(
+                        onSuccess = Result.Companion::success,
+                        onFailure = { Result.error("Invalid XMLTV timezone '$normalized'", it) }
+                    )
             }
         }
     }

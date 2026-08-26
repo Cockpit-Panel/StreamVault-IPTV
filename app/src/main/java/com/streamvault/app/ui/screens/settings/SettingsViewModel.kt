@@ -14,28 +14,31 @@ import com.streamvault.app.tvinput.TvInputChannelSyncManager
 import com.streamvault.app.ui.model.LiveTvChannelMode
 import com.streamvault.app.ui.model.LiveTvQuickFilterVisibilityMode
 import com.streamvault.app.ui.model.VodViewMode
-import com.streamvault.app.update.AppUpdateDownloadState
-import com.streamvault.app.update.AppUpdateDownloadStatus
 import com.streamvault.app.update.AppUpdateInstaller
 import com.streamvault.app.update.GitHubReleaseChecker
-import com.streamvault.app.update.GitHubReleaseInfo
+import com.streamvault.app.update.isRemoteVersionNewer
 import com.streamvault.data.local.dao.ProgramDao
 import com.streamvault.data.local.dao.XtreamIndexJobDao
 import com.streamvault.data.local.dao.XtreamLiveOnboardingDao
 import com.streamvault.data.local.entity.XtreamIndexJobEntity
 import com.streamvault.data.preferences.PreferencesRepository
-import com.streamvault.data.sync.SyncManager
+import com.streamvault.data.sync.ProviderSyncCommands
 import com.streamvault.data.sync.SyncRepairSection
+import com.streamvault.domain.model.VodCategoryLoadMode
 import com.streamvault.domain.manager.BackupConflictStrategy
 import com.streamvault.domain.manager.BackupImportPlan
 import com.streamvault.domain.manager.BackupManager
 import com.streamvault.domain.manager.BackupPreview
+import com.streamvault.domain.manager.BackupRestoreStatusStore
 import com.streamvault.domain.manager.DriveBackupSyncManager
 import com.streamvault.domain.manager.ParentalControlManager
 import com.streamvault.domain.manager.RecordingManager
 import com.streamvault.domain.model.Category
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.AppLandingDestination
 import com.streamvault.domain.model.AppTimeFormat
+import com.streamvault.domain.model.AppTopLevelDestination
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
 import com.streamvault.domain.model.CategorySortMode
 import com.streamvault.domain.model.ChannelNumberingMode
 import com.streamvault.domain.model.ContentType
@@ -48,6 +51,8 @@ import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.RecordingItem
@@ -57,8 +62,11 @@ import com.streamvault.domain.model.RemoteColorButton
 import com.streamvault.domain.model.RemoteShortcutProfile
 import com.streamvault.domain.model.RemoteShortcutSelection
 import com.streamvault.domain.model.EpgResolutionSummary
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.TimeshiftBackendPreference
 import com.streamvault.domain.model.VirtualCategoryIds
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.usecase.ExportBackup
 import com.streamvault.domain.usecase.ExportBackupCommand
 import com.streamvault.domain.usecase.ExportBackupResult
@@ -102,10 +110,11 @@ class SettingsViewModel @Inject constructor(
     private val preferencesRepository: PreferencesRepository,
     private val internetSpeedTestRunner: InternetSpeedTestRunner,
     private val backupManager: BackupManager,
+    private val backupRestoreStatusStore: BackupRestoreStatusStore,
     private val driveBackupSyncManager: DriveBackupSyncManager,
     private val recordingManager: RecordingManager,
     private val parentalControlManager: ParentalControlManager,
-    private val syncManager: SyncManager,
+    private val syncManager: ProviderSyncCommands,
     private val xtreamIndexJobDao: XtreamIndexJobDao,
     private val xtreamLiveOnboardingDao: XtreamLiveOnboardingDao,
     private val syncMetadataRepository: SyncMetadataRepository,
@@ -173,7 +182,17 @@ class SettingsViewModel @Inject constructor(
         syncManager = syncManager,
         tvInputChannelSyncManager = tvInputChannelSyncManager,
         uiState = _uiState,
-        refreshProvider = { scope, providerId, syncMode -> providerActions.refreshProvider(scope, providerId, syncMode) }
+        refreshProvider = { scope, providerId, syncMode, progressPrefix, startedAt, sectionLabel, isCancelable ->
+            providerActions.refreshProvider(
+                scope = scope,
+                providerId = providerId,
+                syncMode = syncMode,
+                progressPrefix = progressPrefix,
+                startedAt = startedAt,
+                sectionLabel = sectionLabel,
+                isCancelable = isCancelable
+            )
+        }
     )
     private val epgActions = SettingsEpgActions(
         epgSourceRepository = epgSourceRepository,
@@ -226,6 +245,11 @@ class SettingsViewModel @Inject constructor(
             uiState = _uiState
         )
         driveBackupActions.observeAuthState(viewModelScope)
+        viewModelScope.launch {
+            backupRestoreStatusStore.observeRestoreJobs().collect { jobs ->
+                _uiState.update { it.copy(backupRestoreJobs = jobs) }
+            }
+        }
     }
 
     fun refreshCrashReport() {
@@ -415,6 +439,14 @@ class SettingsViewModel @Inject constructor(
         providerActions.setM3uVodClassificationEnabled(viewModelScope, providerId, enabled)
     }
 
+    fun setGuideSourcePolicy(providerId: Long, policy: GuideSourcePolicy) {
+        providerActions.setGuideSourcePolicy(viewModelScope, providerId, policy)
+    }
+
+    fun setChannelLogoSourcePolicy(providerId: Long, policy: ChannelLogoSourcePolicy) {
+        providerActions.setChannelLogoSourcePolicy(viewModelScope, providerId, policy)
+    }
+
     fun refreshProviderClassification(providerId: Long) {
         refreshProvider(providerId)
     }
@@ -433,7 +465,49 @@ class SettingsViewModel @Inject constructor(
 
     fun setAppLandingDestination(destination: AppLandingDestination) {
         viewModelScope.launch {
-            preferencesRepository.setAppLandingDestination(destination)
+            preferencesRepository.setAppLandingDestination(
+                AppTopLevelDestination.resolveLandingDestination(
+                    preferred = destination,
+                    destinations = _uiState.value.appTopLevelDestinations
+                )
+            )
+        }
+    }
+
+    fun setAppTopLevelDestinations(destinations: List<AppTopLevelDestination>) {
+        viewModelScope.launch {
+            val normalized = AppTopLevelDestination.normalizeForStorage(destinations)
+            val currentLanding = _uiState.value.appLandingDestination
+            val resolvedLanding = AppTopLevelDestination.resolveLandingDestination(
+                preferred = currentLanding,
+                destinations = normalized
+            )
+            preferencesRepository.setAppTopLevelDestinations(normalized)
+            if (resolvedLanding != currentLanding) {
+                preferencesRepository.setAppLandingDestination(resolvedLanding)
+                _uiState.update {
+                    it.copy(
+                        userMessage = appContext.getString(
+                            R.string.settings_top_navigation_default_updated,
+                            appContext.getString(resolvedLanding.labelResId())
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun setAppHomeDashboardShelves(shelves: List<AppHomeDashboardShelf>) {
+        viewModelScope.launch {
+            preferencesRepository.setAppHomeDashboardShelves(
+                AppHomeDashboardShelf.normalizeForStorage(shelves)
+            )
+        }
+    }
+
+    fun resetAppHomeDashboardShelves() {
+        viewModelScope.launch {
+            preferencesRepository.setAppHomeDashboardShelves(AppHomeDashboardShelf.defaultOrder)
         }
     }
 
@@ -452,6 +526,12 @@ class SettingsViewModel @Inject constructor(
     fun setShowAllChannelsCategory(enabled: Boolean) {
         viewModelScope.launch {
             preferencesRepository.setShowAllChannelsCategory(enabled)
+        }
+    }
+
+    fun setShowFavoritesCategory(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setShowFavoritesCategory(enabled)
         }
     }
 
@@ -518,6 +598,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setHideDecorativeLiveRows(hide: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setHideDecorativeLiveRows(hide)
+        }
+    }
+
     fun setLiveChannelGroupingMode(mode: LiveChannelGroupingMode) {
         viewModelScope.launch {
             preferencesRepository.setLiveChannelGroupingMode(mode)
@@ -545,6 +631,26 @@ class SettingsViewModel @Inject constructor(
     fun setVodInfiniteScroll(enabled: Boolean) {
         viewModelScope.launch {
             preferencesRepository.setVodInfiniteScroll(enabled)
+        }
+    }
+
+    fun setVodCompleteOnOpen(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setVodCategoryLoadMode(
+                if (enabled) VodCategoryLoadMode.COMPLETE_ON_OPEN else VodCategoryLoadMode.PAGED
+            )
+        }
+    }
+
+    fun setVodDuplicateHandlingMode(mode: VodDuplicateHandlingMode) {
+        viewModelScope.launch {
+            preferencesRepository.setVodDuplicateHandlingMode(mode)
+        }
+    }
+
+    fun setVodVariantPreferenceMode(mode: VodVariantPreferenceMode) {
+        viewModelScope.launch {
+            preferencesRepository.setVodVariantPreferenceMode(mode)
         }
     }
 
@@ -698,6 +804,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setPlayerTimeshiftBackend(preference: TimeshiftBackendPreference) {
+        viewModelScope.launch {
+            preferencesRepository.setPlayerTimeshiftBackend(preference)
+        }
+    }
+
     fun setDefaultStopPlaybackTimerMinutes(minutes: Int) {
         viewModelScope.launch {
             preferencesRepository.setDefaultStopPlaybackTimerMinutes(minutes)
@@ -734,9 +846,21 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun setPlayerDecoderMode(mode: DecoderMode) {
+    fun setPlayerAudioDecoderMode(mode: DecoderMode) {
         viewModelScope.launch {
-            preferencesRepository.setPlayerDecoderMode(mode)
+            preferencesRepository.setPlayerAudioDecoderMode(mode)
+        }
+    }
+
+    fun setPlayerVideoDecoderMode(mode: DecoderMode) {
+        viewModelScope.launch {
+            preferencesRepository.setPlayerVideoDecoderMode(mode)
+        }
+    }
+
+    fun setPlayerPlaybackBufferMode(mode: PlaybackBufferMode) {
+        viewModelScope.launch {
+            preferencesRepository.setPlayerPlaybackBufferMode(mode)
         }
     }
 
@@ -917,14 +1041,37 @@ class SettingsViewModel @Inject constructor(
 
     fun clearHistory() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isSyncing = true) }
+            _uiState.update {
+                it.copy(
+                    isSyncing = true,
+                    syncStartedAt = 0L,
+                    syncSectionLabel = null,
+                    syncCanCancel = false
+                )
+            }
             when (val result = playbackHistoryRepository.clearAllHistory()) {
                 is Result.Success -> {
                     preferencesRepository.clearAllRecentData()
-                    _uiState.update { it.copy(isSyncing = false, userMessage = appContext.getString(R.string.settings_history_cleared)) }
+                    _uiState.update {
+                        it.copy(
+                            isSyncing = false,
+                            syncStartedAt = 0L,
+                            syncSectionLabel = null,
+                            syncCanCancel = false,
+                            userMessage = appContext.getString(R.string.settings_history_cleared)
+                        )
+                    }
                 }
                 is Result.Error -> {
-                    _uiState.update { it.copy(isSyncing = false, userMessage = "Failed to clear history: ${result.message}") }
+                    _uiState.update {
+                        it.copy(
+                            isSyncing = false,
+                            syncStartedAt = 0L,
+                            syncSectionLabel = null,
+                            syncCanCancel = false,
+                            userMessage = "Failed to clear history: ${result.message}"
+                        )
+                    }
                 }
                 Result.Loading -> Unit
             }
@@ -951,6 +1098,19 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(userMessage = message) }
     }
 
+    private fun AppLandingDestination.labelResId(): Int = when (this) {
+        AppLandingDestination.HOME -> R.string.nav_home
+        AppLandingDestination.LIVE_TV -> R.string.nav_live_tv
+        AppLandingDestination.FIRST_FAVORITE_LIVE -> R.string.settings_startup_first_favorite_live
+        AppLandingDestination.LAST_WATCHED_LIVE -> R.string.settings_startup_last_watched_live
+        AppLandingDestination.MOVIES -> R.string.nav_movies
+        AppLandingDestination.SERIES -> R.string.nav_series
+        AppLandingDestination.GUIDE -> R.string.nav_epg
+        AppLandingDestination.DOWNLOADS -> R.string.nav_downloads
+        AppLandingDestination.PLUGINS -> R.string.nav_plugins
+        AppLandingDestination.SETTINGS -> R.string.nav_settings
+    }
+
     fun refreshProvider(
         providerId: Long,
         syncMode: SettingsProviderSyncMode = SettingsProviderSyncMode.SYNC_NOW
@@ -970,6 +1130,10 @@ class SettingsViewModel @Inject constructor(
         syncActions.retryWarningAction(viewModelScope, providerId, action)
     }
 
+    fun cancelSync() {
+        syncActions.cancelSync()
+    }
+
     fun deleteProvider(providerId: Long, onSuccess: () -> Unit = {}) {
         providerActions.deleteProvider(viewModelScope, providerId, onSuccess)
     }
@@ -978,8 +1142,19 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(userMessage = null) }
     }
 
-    fun exportConfig(uriString: String, onSuccess: (() -> Unit)? = null) {
-        backupActions.exportConfig(viewModelScope, uriString, onSuccess)
+    fun exportConfig(
+        uriString: String,
+        onSuccess: (() -> Unit)? = null,
+        successMessage: String? = null,
+        onFinished: ((Boolean) -> Unit)? = null,
+    ) {
+        backupActions.exportConfig(
+            scope = viewModelScope,
+            uriString = uriString,
+            onSuccess = onSuccess,
+            successMessage = successMessage,
+            onFinished = onFinished,
+        )
     }
 
     fun inspectBackup(uriString: String) {
@@ -1024,6 +1199,63 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun toggleRestoreSyncProvider(index: Int) = backupActions.toggleRestoreProvider(index)
+
+    fun selectAllRestoreSyncProviders() = backupActions.selectAllRestoreProviders()
+
+    fun restoreSyncLater() = backupActions.dismissRestoreSyncChooser()
+
+    fun retryRestoreProvider(providerId: Long) {
+        viewModelScope.launch { backupRestoreStatusStore.retryProviders(setOf(providerId)) }
+    }
+
+    fun dismissRestoreItem(itemId: Long) {
+        viewModelScope.launch { backupRestoreStatusStore.dismissItem(itemId) }
+    }
+
+    fun dismissRestoreProvider(jobId: String, providerIdentityKey: String) {
+        viewModelScope.launch { backupRestoreStatusStore.dismissProvider(jobId, providerIdentityKey) }
+    }
+
+    fun dismissRestoreJob(jobId: String) {
+        viewModelScope.launch { backupRestoreStatusStore.dismissRestore(jobId) }
+    }
+
+    fun syncSelectedRestoreProviders() {
+        val state = _uiState.value
+        val references = state.selectedRestoreProviderIndices.mapNotNull(state.pendingRestoreProviders::getOrNull)
+        if (references.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncing = true, syncProgress = "Syncing restored providers…", syncCanCancel = false) }
+            val failures = mutableListOf<String>()
+            references.forEach { reference ->
+                val provider = _uiState.value.providers.singleOrNull { candidate ->
+                    candidate.serverUrl.trim().trimEnd('/').equals(reference.serverUrl.trim().trimEnd('/'), true) &&
+                        candidate.username.trim() == reference.username.trim() &&
+                        (reference.providerType == null || candidate.type == reference.providerType) &&
+                        candidate.stalkerMacAddress.trim().equals(reference.stalkerMacAddress.orEmpty().trim(), true)
+                }
+                if (provider == null) {
+                    failures += reference.serverUrl
+                } else if (syncManager.sync(provider.id, force = true) is Result.Error) {
+                    failures += provider.name
+                }
+            }
+            backupActions.dismissRestoreSyncChooser()
+            _uiState.update {
+                it.copy(
+                    isSyncing = false,
+                    syncProgress = null,
+                    userMessage = if (failures.isEmpty()) {
+                        "Selected restored providers synced successfully"
+                    } else {
+                        "Some restored providers could not sync: ${failures.joinToString()}"
+                    }
+                )
+            }
+        }
+    }
+
     fun beginDriveSignIn(launcher: ActivityResultLauncher<Intent>) {
         driveBackupActions.beginSignIn(viewModelScope, launcher)
     }
@@ -1042,6 +1274,26 @@ class SettingsViewModel @Inject constructor(
 
     fun pullFromDrive() {
         driveBackupActions.pullBackup(viewModelScope)
+    }
+
+    fun selectDriveBackup(snapshotId: String) {
+        driveBackupActions.selectBackup(viewModelScope, snapshotId)
+    }
+
+    fun dismissDriveBackupOptions() {
+        driveBackupActions.dismissBackupOptions()
+    }
+
+    fun manageDriveBackups() {
+        driveBackupActions.manageBackups(viewModelScope)
+    }
+
+    fun dismissDriveBackupManagement() {
+        driveBackupActions.dismissBackupManagement()
+    }
+
+    fun deleteDriveBackup(snapshotId: String) {
+        driveBackupActions.deleteBackup(viewModelScope, snapshotId)
     }
 
     fun stopRecording(recordingId: String) {
@@ -1098,8 +1350,29 @@ class SettingsViewModel @Inject constructor(
         epgActions.loadEpgAssignments(viewModelScope, providerId)
     }
 
-    fun addEpgSource(name: String, url: String, onSuccess: () -> Unit = {}, onError: () -> Unit = {}) {
-        epgActions.addEpgSource(viewModelScope, name, url, onSuccess, onError)
+    fun addEpgSource(
+        name: String,
+        url: String,
+        timezoneId: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: () -> Unit = {}
+    ) {
+        epgActions.addEpgSource(viewModelScope, name, url, timezoneId, onSuccess, onError)
+    }
+
+    fun updateEpgSourceTimezone(
+        source: com.streamvault.domain.model.EpgSource,
+        timezoneId: String?,
+        onSuccess: () -> Unit = {},
+        onError: () -> Unit = {}
+    ) {
+        epgActions.updateEpgSourceTimezone(
+            viewModelScope,
+            source,
+            timezoneId,
+            onSuccess,
+            onError
+        )
     }
 
     fun setPendingDeleteEpgSource(id: Long?) {

@@ -45,20 +45,30 @@ object OfficialBuildVerifier {
 
     private fun loadSigningCertSha256(context: Context): String? {
         val packageManager = context.packageManager
-        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            packageManager.getPackageInfo(
+        val packageInfo = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> packageManager.getPackageInfo(
                 context.packageName,
                 PackageManager.PackageInfoFlags.of(PackageManager.GET_SIGNING_CERTIFICATES.toLong())
             )
-        } else {
-            @Suppress("DEPRECATION")
-            packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            }
+            else -> {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
+            }
         }
 
-        val signingCertificateBytes = packageInfo.signingInfo
-            ?.apkContentsSigners
-            ?.firstOrNull()
-            ?.toByteArray()
+        val signingCertificateBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.signingInfo
+                ?.apkContentsSigners
+                ?.firstOrNull()
+                ?.toByteArray()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.signatures?.firstOrNull()?.toByteArray()
+        }
             ?: return null
 
         val certificate = CertificateFactory.getInstance("X.509")

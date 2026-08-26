@@ -1,5 +1,7 @@
 package com.streamvault.app.ui.components.shell
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.annotation.StringRes
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
@@ -38,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +65,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.Border
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
@@ -70,6 +74,8 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.streamvault.app.R
+import com.streamvault.app.MainActivity
+import com.streamvault.app.navigation.toAppRoute
 import com.streamvault.app.navigation.Routes
 import com.streamvault.app.ui.design.AppColors
 import com.streamvault.app.ui.design.AppMotion
@@ -79,6 +85,8 @@ import com.streamvault.app.ui.interaction.rememberTvInteractionSounds
 import com.streamvault.app.ui.interaction.TvIconButton
 import com.streamvault.app.ui.design.LocalAppShapes
 import com.streamvault.app.ui.design.LocalAppSpacing
+import com.streamvault.domain.model.AppTopLevelDestination
+import com.streamvault.domain.model.CatalogLayout
 
 enum class AppNavigationChrome {
     Rail,
@@ -251,7 +259,7 @@ private fun TopNavigationBar(
     actions: (@Composable RowScope.() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val items = remember { buildDestinationItems() }
+    val items = rememberDestinationItems()
     val scrollState = rememberScrollState()
 
     val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
@@ -695,7 +703,7 @@ private fun DestinationRail(
     modifier: Modifier = Modifier
 ) {
     val spacing = LocalAppSpacing.current
-    val items = remember { buildDestinationItems() }
+    val items = rememberDestinationItems()
     val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
 
     Box(
@@ -833,17 +841,67 @@ private fun findActiveDestinationItem(
         .maxByOrNull { it.route.length }
         ?: items.firstOrNull { it.route == currentRoute }
 
-private fun buildDestinationItems(): List<DestinationItem> = listOf(
-    DestinationItem(Routes.HOME, R.string.nav_home, Icons.Default.Home),
-    DestinationItem(Routes.LIVE_TV, R.string.nav_live_tv, Icons.Default.PlayArrow),
-    DestinationItem(Routes.MOVIES, R.string.nav_movies, Icons.Default.Star),
-    DestinationItem(Routes.SERIES, R.string.nav_series, Icons.Default.Menu),
-    DestinationItem(Routes.DOWNLOADS, R.string.nav_downloads, Icons.Default.Download),
-    DestinationItem(Routes.EPG, R.string.nav_epg, Icons.Default.Info),
-    DestinationItem(Routes.SEARCH, R.string.search_title, Icons.Default.Search),
-    DestinationItem(Routes.PLUGINS, R.string.nav_plugins, PluginBlocksIcon),
-    DestinationItem(Routes.SETTINGS, R.string.nav_settings, Icons.Default.Settings)
-)
+private fun buildDestinationItems(): List<DestinationItem> =
+    AppTopLevelDestination.defaultOrder.map { it.toDestinationItem() }
+
+private fun buildDestinationItems(
+    configured: List<AppTopLevelDestination>,
+    layout: CatalogLayout
+): List<DestinationItem> {
+    if (layout == CatalogLayout.SPLIT) return configured.map { it.toDestinationItem() }
+    var insertedVod = false
+    return buildList {
+        configured.forEach { destination ->
+            when (destination) {
+                AppTopLevelDestination.MOVIES,
+                AppTopLevelDestination.SERIES -> if (!insertedVod) {
+                    add(DestinationItem(Routes.VOD, R.string.nav_vod, Icons.Default.Star))
+                    insertedVod = true
+                }
+                else -> add(destination.toDestinationItem())
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberDestinationItems(): List<DestinationItem> {
+    val context = LocalContext.current
+    val mainActivity = remember(context) { context.findMainActivity() }
+    val configuredDestinations = mainActivity?.preferencesRepository?.appTopLevelDestinations
+        ?.collectAsStateWithLifecycle(initialValue = AppTopLevelDestination.defaultOrder)
+        ?.value
+        ?: AppTopLevelDestination.defaultOrder
+    val catalogLayout = mainActivity?.providerRepository?.getActiveProvider()
+        ?.collectAsStateWithLifecycle(initialValue = null)
+        ?.value
+        ?.catalogLayout
+        ?: CatalogLayout.SPLIT
+    return remember(configuredDestinations, catalogLayout) {
+        buildDestinationItems(configuredDestinations, catalogLayout)
+    }
+}
+
+private fun AppTopLevelDestination.toDestinationItem(): DestinationItem = when (this) {
+    AppTopLevelDestination.HOME -> DestinationItem(Routes.HOME, R.string.nav_home, Icons.Default.Home)
+    AppTopLevelDestination.LIVE_TV -> DestinationItem(Routes.LIVE_TV, R.string.nav_live_tv, Icons.Default.PlayArrow)
+    AppTopLevelDestination.MOVIES -> DestinationItem(Routes.MOVIES, R.string.nav_movies, Icons.Default.Star)
+    AppTopLevelDestination.SERIES -> DestinationItem(Routes.SERIES, R.string.nav_series, Icons.Default.Menu)
+    AppTopLevelDestination.DOWNLOADS -> DestinationItem(Routes.DOWNLOADS, R.string.nav_downloads, Icons.Default.Download)
+    AppTopLevelDestination.GUIDE -> DestinationItem(Routes.EPG, R.string.nav_epg, Icons.Default.Info)
+    AppTopLevelDestination.SEARCH -> DestinationItem(Routes.SEARCH, R.string.search_title, Icons.Default.Search)
+    AppTopLevelDestination.PLUGINS -> DestinationItem(Routes.PLUGINS, R.string.nav_plugins, PluginBlocksIcon)
+    AppTopLevelDestination.SETTINGS -> DestinationItem(Routes.SETTINGS, R.string.nav_settings, Icons.Default.Settings)
+}
+
+private fun Context.findMainActivity(): MainActivity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is MainActivity) return current
+        current = current.baseContext
+    }
+    return null
+}
 
 private val PluginBlocksIcon: ImageVector
     get() {

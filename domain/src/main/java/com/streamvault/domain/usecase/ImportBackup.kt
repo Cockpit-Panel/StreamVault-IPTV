@@ -4,6 +4,7 @@ import com.streamvault.domain.manager.BackupImportPlan
 import com.streamvault.domain.manager.BackupImportResult
 import com.streamvault.domain.manager.BackupManager
 import com.streamvault.domain.manager.BackupPreview
+import com.streamvault.domain.manager.BackupRestoreOutcome
 import com.streamvault.domain.model.Result
 import javax.inject.Inject
 
@@ -30,13 +31,27 @@ sealed class ImportBackupResult {
     data class Success(val result: BackupImportResult) : ImportBackupResult() {
         val importedSummary: String
             get() {
-                val baseSummary = result.importedSections.joinToString().ifBlank { "Nothing imported" }
+                val baseSummary = when (result.outcome) {
+                    BackupRestoreOutcome.COMPLETE ->
+                        result.importedSections.joinToString().ifBlank { "Nothing imported" }
+                    BackupRestoreOutcome.WAITING_FOR_SYNC ->
+                        "Imported; ${result.pendingCount + result.unresolvedCount} item(s) are waiting for provider sync"
+                    BackupRestoreOutcome.PARTIAL ->
+                        "Partially imported: ${result.importedSections.joinToString().ifBlank { "nothing" }}"
+                    BackupRestoreOutcome.FAILED_BEFORE_COMMIT -> "Nothing was committed"
+                }
+                val failureSummary = result.failedSections
+                    .takeIf { it.isNotEmpty() }
+                    ?.joinToString(prefix = "Failed: ")
+                val unresolvedSummary = result.unresolvedReferences
+                    .takeIf { it.isNotEmpty() }
+                    ?.joinToString(prefix = "Unresolved: ")
                 val recordingSummary = result.recordingScheduleImport
                     ?.takeIf { it.failedCount > 0 || it.skippedCount > 0 }
                     ?.let { summary ->
                         "Recording schedules: ${summary.importedCount} imported, ${summary.skippedCount} skipped, ${summary.failedCount} failed"
                     }
-                return listOf(baseSummary, recordingSummary)
+                return listOf(baseSummary, failureSummary, unresolvedSummary, recordingSummary)
                     .filterNotNull()
                     .joinToString(separator = ". ")
             }

@@ -45,6 +45,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.tv.material3.*
 import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.theme.*
+import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.DecoderMode
 import com.streamvault.domain.model.StreamInfo
 import com.streamvault.domain.model.VideoFormat
@@ -167,6 +168,7 @@ fun PlayerScreen(
     val showControls by viewModel.showControls.collectAsStateWithLifecycle()
     val videoFormat by viewModel.videoFormat.collectAsStateWithLifecycle()
     val playerError by viewModel.playerError.collectAsStateWithLifecycle()
+    val playbackResolutionUiState by viewModel.playbackResolutionUiState.collectAsStateWithLifecycle()
     val currentProgram by viewModel.currentProgram.collectAsStateWithLifecycle()
     val nextProgram by viewModel.nextProgram.collectAsStateWithLifecycle()
     val programHistory by viewModel.programHistory.collectAsStateWithLifecycle()
@@ -969,14 +971,39 @@ fun PlayerScreen(
             }
         }
 
-        // Error overlay
-        if (playbackState == PlaybackState.ERROR) {
+        when (val resolutionState = playbackResolutionUiState) {
+            PlaybackResolutionUiState.Resolving -> Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.82f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    CircularProgressIndicator(color = Primary)
+                    Text("Resolving playback…", color = Color.White)
+                }
+            }
+            is PlaybackResolutionUiState.Failure -> PlayerErrorOverlay(
+                playerError = PlayerError.SourceError(resolutionState.message),
+                contentType = contentType,
+                hasAlternateStream = false,
+                hasLastChannel = false,
+                onAction = handlePlayerNoticeAction,
+                onBack = onBack
+            )
+            PlaybackResolutionUiState.Idle -> Unit
+        }
+
+        // Engine error overlay
+        if (playbackResolutionUiState == PlaybackResolutionUiState.Idle && playbackState == PlaybackState.ERROR) {
             PlayerErrorOverlay(
                 playerError = playerError,
                 contentType = contentType,
                 hasAlternateStream = viewModel.hasAlternateStream(),
                 hasLastChannel = viewModel.hasLastChannel(),
-                onAction = handlePlayerNoticeAction
+                onAction = handlePlayerNoticeAction,
+                onBack = onBack
             )
         }
 
@@ -988,6 +1015,7 @@ fun PlayerScreen(
             isCatchUpPlayback = isCatchUpPlayback,
             isPlaying = isPlaying,
             currentProgram = currentProgram,
+            currentChannel = currentChannel,
             currentChannelName = currentChannel?.name,
             displayChannelNumber = displayChannelNumber,
             aspectRatioLabel = aspectRatio.modeName,
@@ -1407,6 +1435,7 @@ private fun PlayerControlsOverlayHost(
     isCatchUpPlayback: Boolean = false,
     isPlaying: Boolean,
     currentProgram: Program?,
+    currentChannel: Channel?,
     currentChannelName: String?,
     displayChannelNumber: Int,
     aspectRatioLabel: String,
@@ -1468,6 +1497,7 @@ private fun PlayerControlsOverlayHost(
         isCatchUpPlayback = isCatchUpPlayback,
         isPlaying = isPlaying,
         currentProgram = currentProgram,
+        currentChannel = currentChannel,
         currentChannelName = currentChannelName,
         displayChannelNumber = displayChannelNumber,
         currentPosition = currentPosition,

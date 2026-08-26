@@ -8,7 +8,12 @@ import com.streamvault.data.local.entity.ProviderEntity
 import com.streamvault.data.local.entity.ProgramBrowseEntity
 import com.streamvault.data.local.entity.ProgramEntity
 import com.streamvault.data.parser.XmltvParser
+import com.streamvault.data.provider.ProviderCapabilityResolver
 import com.streamvault.domain.model.Program
+import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.ProviderSnapshot
+import com.streamvault.domain.model.StalkerConfig
+import com.streamvault.domain.model.StalkerDeviceIdentity
 import com.streamvault.domain.model.ProviderType
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -54,6 +59,7 @@ class EpgRepositoryImplTest {
     private val providerDao: ProviderDao = mock()
     private val xmltvParser: XmltvParser = mock()
     private val epgSourceRepository: EpgSourceRepository = mock()
+    private val providerCapabilityResolver: ProviderCapabilityResolver = mock()
     private val preferencesRepository: PreferencesRepository = mock()
     private val transactionRunner = object : DatabaseTransactionRunner {
         override suspend fun <T> inTransaction(block: suspend () -> T): T = block()
@@ -621,13 +627,21 @@ class EpgRepositoryImplTest {
 
     @Test
     fun `refreshEpg passes provider timezone to parser for no offset timestamps`() = runTest {
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
-                id = 7L,
-                name = "Provider",
-                type = ProviderType.M3U,
-                serverUrl = "https://provider.example.com",
-                stalkerDeviceTimezone = "America/New_York"
+        whenever(providerCapabilityResolver.snapshot(7L)).thenReturn(
+            ProviderSnapshot(
+                provider = Provider(
+                    id = 7L,
+                    name = "Provider",
+                    type = ProviderType.STALKER_PORTAL
+                ),
+                configuration = StalkerConfig(
+                    portalUrl = "https://provider.example.com",
+                    device = StalkerDeviceIdentity(
+                        macAddress = "00:1A:79:00:00:07",
+                        timezone = "America/New_York"
+                    )
+                ),
+                configurationGeneration = 1L
             )
         )
         whenever(xmltvParser.parseStreaming(any(), anyOrNull(), any())).thenAnswer { invocation ->
@@ -654,7 +668,8 @@ class EpgRepositoryImplTest {
             okHttpClient = okHttpClientReturningXml(),
             transactionRunner = transactionRunner,
             epgSourceRepository = epgSourceRepository,
-            preferencesRepository = preferencesRepository
+            preferencesRepository = preferencesRepository,
+            providerCapabilityResolver = providerCapabilityResolver
         )
 
         val result = repository.refreshEpg(7L, "https://example.com/epg.xml")

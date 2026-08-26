@@ -1,6 +1,5 @@
 package com.streamvault.app.ui.screens.player
 
-import androidx.lifecycle.viewModelScope
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ContentType
 import kotlinx.coroutines.launch
@@ -16,8 +15,8 @@ fun PlayerViewModel.hasAlternateStream(): Boolean {
         currentVariantId = channel.selectedVariantId.takeIf { it > 0 } ?: channel.id,
         currentStreamUrl = currentStreamUrl,
         currentResolvedPlaybackUrl = currentResolvedPlaybackUrl,
-        triedAlternativeStreams = triedAlternativeStreams,
-        failedStreamsThisSession = failedStreamsThisSession,
+        triedAlternativeStreams = playerRecoveryCoordinator.streamAttemptSnapshot(),
+        failedStreamsThisSession = playerRecoveryCoordinator.failedStreamSnapshot(),
         preferXtreamTsFallback = false
     ) != null
 }
@@ -41,8 +40,8 @@ internal fun PlayerViewModel.tryAlternateStreamInternal(
         currentVariantId = channel.selectedVariantId.takeIf { it > 0 } ?: channel.id,
         currentStreamUrl = currentStreamUrl,
         currentResolvedPlaybackUrl = currentResolvedPlaybackUrl,
-        triedAlternativeStreams = triedAlternativeStreams,
-        failedStreamsThisSession = failedStreamsThisSession,
+        triedAlternativeStreams = playerRecoveryCoordinator.streamAttemptSnapshot(),
+        failedStreamsThisSession = playerRecoveryCoordinator.failedStreamSnapshot(),
         preferXtreamTsFallback = preferXtreamTsFallback,
         allowXtreamTsFallback = allowXtreamTsFallback
     ) ?: run {
@@ -66,7 +65,7 @@ internal fun PlayerViewModel.tryAlternateStreamInternal(
         val updatedChannel = channel.withSelectedVariant(nextVariant.rawChannelId)?.sanitizedForPlayer()
             ?: return false
         val requestVersion = beginPlaybackSession()
-        triedAlternativeStreams.add(nextVariant.streamUrl)
+        playerRecoveryCoordinator.markStreamAttempt(nextVariant.streamUrl)
         currentContentId = updatedChannel.id
         currentStreamUrl = updatedChannel.streamUrl
         currentTitle = nextVariant.originalName.ifBlank { updatedChannel.name }
@@ -88,8 +87,8 @@ internal fun PlayerViewModel.tryAlternateStreamInternal(
         refreshCurrentChannelRecording()
         updateChannelDiagnostics(updatedChannel)
         updateStreamClass("Variant")
-        viewModelScope.launch {
-            preferencesRepository.setPreferredLiveVariant(
+        playbackSessionScope(requestVersion)?.launch {
+            playerPreferencesCoordinator.setPreferredLiveVariant(
                 providerId = updatedChannel.providerId,
                 logicalGroupId = updatedChannel.logicalGroupId,
                 rawChannelId = nextVariant.rawChannelId
@@ -115,7 +114,7 @@ internal fun PlayerViewModel.tryAlternateStreamInternal(
 
     val requestVersion = beginPlaybackSession()
     val nextStream = candidate.url
-    triedAlternativeStreams.add(nextStream)
+    playerRecoveryCoordinator.markStreamAttempt(nextStream)
     currentStreamUrl = nextStream
     updateStreamClass(
         when (candidate.kind) {
@@ -124,7 +123,7 @@ internal fun PlayerViewModel.tryAlternateStreamInternal(
             LiveRecoveryCandidateKind.VARIANT -> "Variant"
         }
     )
-    viewModelScope.launch {
+    playbackSessionScope(requestVersion)?.launch {
         val streamInfo = resolvePlaybackStreamInfo(nextStream, channel.id, channel.providerId, ContentType.LIVE)
             ?: return@launch
         if (!isActivePlaybackSession(requestVersion, nextStream)) return@launch
@@ -140,18 +139,18 @@ private fun PlayerViewModel.nextCatchUpVariant(): String? {
     return selectNextAlternateUrl(
         candidateUrls = pendingCatchUpUrls,
         currentStreamUrl = currentStreamUrl,
-        triedAlternativeStreams = triedAlternativeStreams,
-        failedStreamsThisSession = failedStreamsThisSession
+        triedAlternativeStreams = playerRecoveryCoordinator.streamAttemptSnapshot(),
+        failedStreamsThisSession = playerRecoveryCoordinator.failedStreamSnapshot()
     )
 }
 
 internal fun PlayerViewModel.tryNextCatchUpVariantInternal(): Boolean {
     val nextStream = nextCatchUpVariant() ?: return false
     val requestVersion = beginPlaybackSession()
-    triedAlternativeStreams.add(nextStream)
+    playerRecoveryCoordinator.markStreamAttempt(nextStream)
     currentStreamUrl = nextStream
     updateStreamClass("Catch-up")
-    viewModelScope.launch {
+    playbackSessionScope(requestVersion)?.launch {
         val streamInfo = resolveCatchUpStreamInfo(
             candidateUrl = nextStream,
             title = currentTitle,

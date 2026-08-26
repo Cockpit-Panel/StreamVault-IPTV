@@ -7,9 +7,7 @@
   },
   "responses": [
     { "action": "handshake", "body": "{\"js\":{\"token\":\"token-legacy-a\"}}" },
-    { "action": "get_profile", "body": "" },
-    { "action": "get_profile", "body": "" },
-    { "action": "handshake", "body": "{\"js\":{\"token\":\"token-legacy-b\"}}" },
+    { "action": "get_profile", "code": 500, "body": "{}" },
     { "action": "get_profile", "body": "{\"js\":{\"id\":\"88\",\"name\":\"Legacy\",\"status\":\"1\",\"auth_access\":true}}" },
     { "action": "get_main_info", "body": "{\"js\":{\"id\":\"88\",\"name\":\"Legacy\",\"status\":\"1\",\"auth_access\":true}}" }
   ],
@@ -21,6 +19,6 @@
     "bootstrapRecipe": "LEGACY_MAG",
     "recipeEvidence": ["recipe:LEGACY_MAG", "preset:MAG250_LEGACY", "fallback_recipe", "rediscovery_attempted"],
     "bootstrapEvidence": ["handshake", "get_profile", "get_account_info"],
-    "requestOrder": ["handshake", "get_profile", "get_profile", "handshake", "get_profile", "get_main_info"]
+    "requestOrder": ["handshake", "get_profile", "get_profile", "get_main_info"]
   }
 }

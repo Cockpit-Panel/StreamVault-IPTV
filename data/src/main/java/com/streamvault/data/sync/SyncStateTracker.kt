@@ -9,6 +9,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import java.util.concurrent.atomic.AtomicLong
+
+/** Identifies one provider sync run for status publication. */
+internal data class SyncStateSession(val providerId: Long, val epoch: Long)
 
 internal class SyncStateTracker {
     private data class ProviderStateSnapshot(
@@ -17,6 +21,10 @@ internal class SyncStateTracker {
     )
 
     private val scope = CoroutineScope(Dispatchers.Default)
+    private val stateMachine = SyncStateMachine()
+    private val nextEpoch = AtomicLong(0L)
+    private val lock = Any()
+    private val activeSessions = mutableMapOf<Long, SyncStateSession>()
     private val providerSnapshots = MutableStateFlow<Map<Long, ProviderStateSnapshot>>(emptyMap())
 
     val statesByProvider: StateFlow<Map<Long, SyncState>> = providerSnapshots
@@ -29,18 +37,45 @@ internal class SyncStateTracker {
 
     fun current(providerId: Long): SyncState = providerSnapshots.value[providerId]?.state ?: SyncState.Idle
 
-    fun publish(providerId: Long, state: SyncState) {
-        providerSnapshots.update { snapshots ->
-            snapshots + (providerId to ProviderStateSnapshot(state))
+    fun begin(providerId: Long): SyncStateSession {
+        val session = SyncStateSession(providerId, nextEpoch.incrementAndGet())
+        synchronized(lock) {
+            activeSessions[providerId] = session
+        }
+        return session
+    }
+
+    /** Returns false when a stale run attempts to publish after replacement. */
+    fun publish(session: SyncStateSession, state: SyncState): Boolean {
+        synchronized(lock) {
+            if (activeSessions[session.providerId] != session) return false
+            providerSnapshots.update { snapshots ->
+                val current = snapshots[session.providerId]?.state ?: SyncState.Idle
+                snapshots + (
+                    session.providerId to ProviderStateSnapshot(
+                        stateMachine.transition(current, state)
+                    )
+                )
+            }
+            return true
+        }
+    }
+
+    fun finish(session: SyncStateSession) {
+        synchronized(lock) {
+            activeSessions.remove(session.providerId, session)
         }
     }
 
     fun reset(providerId: Long? = null) {
-        providerSnapshots.update { snapshots ->
+        synchronized(lock) {
             if (providerId == null) {
-                emptyMap()
+                activeSessions.clear()
             } else {
-                snapshots - providerId
+                activeSessions.remove(providerId)
+            }
+            providerSnapshots.update { snapshots ->
+                if (providerId == null) emptyMap() else snapshots - providerId
             }
         }
     }

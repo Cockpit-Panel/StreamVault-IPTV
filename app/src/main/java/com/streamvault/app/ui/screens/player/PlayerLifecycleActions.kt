@@ -5,18 +5,61 @@ import com.streamvault.domain.model.ContentType
 import com.streamvault.player.PlaybackState
 import com.streamvault.player.PlayerEngine
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 private const val LIFECYCLE_TOKEN_RENEWAL_LEAD_MS = 60_000L
 private const val LIFECYCLE_TOKEN_RENEWAL_CHECK_INTERVAL_MS = 10_000L
 
+/** Captures the old content before prepare mutates the shared playback context. */
+internal fun PlayerViewModel.queueContentSwitchProgressFlush(): Job? {
+    if (currentContentType == ContentType.LIVE) return null
+    val history = buildPlaybackHistorySnapshot(
+        positionMs = playerEngine.currentPosition.value,
+        durationMs = playerEngine.duration.value
+    )
+    return viewModelScope.launch {
+        if (history != null) {
+            val result = playbackHistoryCoordinator.updateResumePosition(history)
+            logRepositoryFailure(
+                operation = "Flush playback progress for content switch",
+                result = result
+            )
+            if (result.isSuccess) {
+                playbackHistoryCoordinator.updateWatchNextProgress(history)
+            }
+        }
+        logRepositoryFailure(
+            operation = "Flush pending playback progress for content switch",
+            result = playbackHistoryCoordinator.flushPendingProgress()
+        )
+    }
+}
+
+/**
+ * Queues a lifecycle-boundary flush and returns the job so a transition owner can await it.
+ * The job remains in viewModelScope, so a caller that only needs to request the flush may safely
+ * ignore the return value.
+ */
+internal fun PlayerViewModel.queueForcedProgressFlush(): Job? {
+    if (currentContentType == ContentType.LIVE) return null
+    return viewModelScope.launch {
+        persistPlaybackProgress()
+        logRepositoryFailure(
+            operation = "Flush pending playback progress at lifecycle boundary",
+            result = playbackHistoryCoordinator.flushPendingProgress()
+        )
+    }
+}
+
 internal fun PlayerViewModel.startProgressTracking() {
     progressTrackingJob?.cancel()
     if (currentContentType == ContentType.LIVE) return
 
-    progressTrackingJob = viewModelScope.launch {
+    val requestVersion = prepareRequestVersion
+    progressTrackingJob = playbackSessionScope(requestVersion)?.launch {
         while (true) {
-            delay(5000)
+            delay(30_000)
             if (!isAppInForeground || !playerEngine.isPlaying.value) continue
             persistPlaybackProgress()
         }
@@ -29,12 +72,14 @@ internal suspend fun PlayerViewModel.persistPlaybackProgress() {
 
     if (pos > 0 && dur > 0) {
         val history = buildPlaybackHistorySnapshot(pos, dur) ?: return
+        val result = playbackHistoryCoordinator.updateResumePosition(history)
         logRepositoryFailure(
             operation = "Persist playback resume position",
-            result = playbackHistoryRepository.updateResumePosition(history)
+            result = result
         )
-        watchNextManager.refreshWatchNext()
-        launcherRecommendationsManager.refreshRecommendations()
+        if (result.isSuccess) {
+            playbackHistoryCoordinator.updateWatchNextProgress(history)
+        }
     }
 }
 
@@ -43,7 +88,7 @@ internal fun PlayerViewModel.startTokenRenewalMonitoring(expirationTime: Long?) 
     tokenRenewalJob = null
     val expiry = expirationTime?.takeIf { it > 0L } ?: return
     val requestVersion = prepareRequestVersion
-    tokenRenewalJob = viewModelScope.launch {
+    tokenRenewalJob = playbackSessionScope(requestVersion)?.launch {
         while (true) {
             delay(LIFECYCLE_TOKEN_RENEWAL_CHECK_INTERVAL_MS)
             if (!playerEngine.isPlaying.value) continue
@@ -66,19 +111,14 @@ internal fun PlayerViewModel.startTokenRenewalMonitoring(expirationTime: Long?) 
     }
 }
 
-fun PlayerViewModel.onAppBackgrounded() {
-    if (!isAppInForeground) return
+fun PlayerViewModel.onAppBackgrounded(): Job? {
+    if (!isAppInForeground) return null
     isAppInForeground = false
     shouldResumeAfterForeground = playerEngine.isPlaying.value
     if (shouldResumeAfterForeground) {
         playerEngine.pause()
     }
-    if (currentContentType != ContentType.LIVE) {
-        viewModelScope.launch {
-            persistPlaybackProgress()
-            playbackHistoryRepository.flushPendingProgress()
-        }
-    }
+    return queueForcedProgressFlush()
 }
 
 fun PlayerViewModel.onAppForegrounded() {
@@ -90,16 +130,12 @@ fun PlayerViewModel.onAppForegrounded() {
     shouldResumeAfterForeground = false
 }
 
-fun PlayerViewModel.onPlayerScreenDisposed() {
-    if (currentContentType != ContentType.LIVE) {
-        viewModelScope.launch {
-            persistPlaybackProgress()
-            playbackHistoryRepository.flushPendingProgress()
-        }
-    }
+fun PlayerViewModel.onPlayerScreenDisposed(): Job? {
+    val progressFlush = queueForcedProgressFlush()
     playerEngine.stopLiveTimeshift()
     stopLiveTranslationSession()
     clearPlaybackTimers()
+    return progressFlush
 }
 
 internal fun PlayerViewModel.clearPlaybackTimers() {
@@ -114,13 +150,12 @@ internal fun PlayerViewModel.clearPlaybackTimers() {
     _sleepTimerUiState.value = SleepTimerUiState()
 }
 
-fun PlayerViewModel.handOffPlaybackToMultiView() {
-    if (currentContentType != ContentType.LIVE) {
-        viewModelScope.launch { persistPlaybackProgress() }
-    }
+fun PlayerViewModel.handOffPlaybackToMultiView(): Job? {
+    val progressFlush = queueForcedProgressFlush()
     playerEngine.stopLiveTimeshift()
     stopLiveTranslationSession()
-    livePreviewHandoffManager.clear(playerEngine)
+    playerPreviewCoordinator.clear(playerEngine)
+    return progressFlush
 }
 
 internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine) {
@@ -131,7 +166,7 @@ internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine)
     numericInputCommitJob?.cancel()
     numericInputFeedbackJob?.cancel()
     playerNoticeHideJob?.cancel()
-    epgJob?.cancel()
+    epgCoordinator.cancel()
     playlistJob?.cancel()
     controlsHideJob?.cancel()
     zapOverlayJob?.cancel()
@@ -144,7 +179,7 @@ internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine)
     thumbnailPreloadJob?.cancel()
     inFlightThumbnailPreloadKey = null
     lastCompletedThumbnailPreloadKey = null
-    seekThumbnailProvider.clearCache()
+    playerThumbnailCoordinator.clearCache()
 
     val activeEngine = playerEngine
     val channel = currentChannel.value
@@ -157,7 +192,7 @@ internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine)
         && activeEngine.playbackState.value != PlaybackState.ERROR
 
     if (canReverseHandoff) {
-        livePreviewHandoffManager.beginReverseHandoff(
+        playerPreviewCoordinator.beginReverseHandoff(
             channel = channel!!,
             streamInfo = streamInfo!!,
             engine = activeEngine,
@@ -165,7 +200,7 @@ internal fun PlayerViewModel.cleanupAfterCleared(mainPlayerEngine: PlayerEngine)
         )
         mainPlayerEngine.resetForReuse()
     } else {
-        livePreviewHandoffManager.clear(activeEngine)
+        playerPreviewCoordinator.clear(activeEngine)
         if (activeEngine === mainPlayerEngine) {
             mainPlayerEngine.resetForReuse()
         } else {

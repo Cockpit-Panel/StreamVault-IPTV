@@ -4,9 +4,16 @@ import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.util.ChannelNormalizer
 import com.streamvault.domain.util.StreamEntryUrlPolicy
+import java.io.BufferedInputStream
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 
 /**
  * Robust M3U parser that handles real-world malformed playlists.
@@ -23,9 +30,11 @@ import java.io.InputStreamReader
 class M3uParser {
 
     data class M3uHeader(
-        val tvgUrl: String? = null,
+        val tvgUrls: List<String> = emptyList(),
         val userAgent: String? = null
-    )
+    ) {
+        val tvgUrl: String? get() = tvgUrls.firstOrNull()
+    }
 
     data class M3uEntry(
         val name: String,
@@ -53,8 +62,8 @@ class M3uParser {
         val entries: List<M3uEntry>
     )
 
-    fun parse(inputStream: InputStream): ParseResult {
-        val reader = BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8))
+    fun parse(inputStream: InputStream, declaredCharset: Charset? = null): ParseResult {
+        val source = playlistLines(inputStream, declaredCharset)
         val entries = mutableListOf<M3uEntry>()
         var header = M3uHeader()
         var pendingExtinf: ParsedExtinf? = null
@@ -62,8 +71,8 @@ class M3uParser {
         // lineSequence() streams the InputStream one line at a time — only a single
         // String is allocated per iteration; prior lines are immediately eligible for GC.
         // This keeps memory flat regardless of playlist size (e.g. 500 MB feeds).
-        reader.use {
-            reader.lineSequence()
+        source.use {
+            source.lines
                 .map { sanitizeLine(it) }
                 .filter { it.isNotEmpty() }
                 .forEach { line ->
@@ -94,9 +103,11 @@ class M3uParser {
     suspend fun parseStreaming(
         inputStream: InputStream,
         onHeader: suspend (M3uHeader) -> Unit = {},
-        onEntry: suspend (M3uEntry) -> Unit
+        onEntry: suspend (M3uEntry) -> Unit,
+        onInvalidEntry: suspend () -> Unit = {},
+        declaredCharset: Charset? = null
     ) {
-        val reader = BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8))
+        val source = playlistLines(inputStream, declaredCharset)
         var header = M3uHeader()
         var pendingExtinf: ParsedExtinf? = null
 
@@ -105,30 +116,42 @@ class M3uParser {
         // compiler cannot allow coroutine suspension inside it. A for-loop over the same
         // sequence is fully coroutine-compatible and preserves the one-line-at-a-time
         // memory profile.
-        reader.use {
-            for (rawLine in reader.lineSequence()) {
+        source.use {
+            for (rawLine in source.lines) {
                 val line = sanitizeLine(rawLine)
                 if (line.isEmpty()) continue
 
                 when {
                     line.startsWith("#EXTM3U", ignoreCase = true) -> {
+                        if (pendingExtinf != null) {
+                            onInvalidEntry()
+                            pendingExtinf = null
+                        }
                         header = parseHeader(line)
                         onHeader(header)
                     }
                     line.startsWith("#EXTINF", ignoreCase = true) -> {
+                        if (pendingExtinf != null) {
+                            onInvalidEntry()
+                        }
                         pendingExtinf = parseExtinf(line)
                     }
                     line.startsWith("#") -> {
                         pendingExtinf = pendingExtinf?.let { applyPendingDirective(it, line) }
                     }
                     pendingExtinf != null -> {
-                        parseEntry(pendingExtinf!!, line, header.userAgent)?.let { onEntry(it) }
+                        parseEntry(pendingExtinf!!, line, header.userAgent)
+                            ?.let { onEntry(it) }
+                            ?: onInvalidEntry()
                         pendingExtinf = null
                     }
                     else -> {
                         // Non-comment, non-URL line with no pending EXTINF — skip
                     }
                 }
+            }
+            if (pendingExtinf != null) {
+                onInvalidEntry()
             }
         }
     }
@@ -212,21 +235,105 @@ class M3uParser {
     private fun parseHeader(line: String): M3uHeader {
         val attributes = parseAttributes(line, line.indexOf(' '))
         return M3uHeader(
-            tvgUrl = extractHeaderEpgUrl(attributes),
+            tvgUrls = extractHeaderEpgUrls(attributes),
             userAgent = attributes["user-agent"]
         )
     }
 
-    private fun extractHeaderEpgUrl(attributes: Map<String, String>): String? {
+    private fun extractHeaderEpgUrls(attributes: Map<String, String>): List<String> {
         val rawValue = headerEpgAttributes
             .firstNotNullOfOrNull { key -> attributes[key]?.takeIf { it.isNotBlank() } }
-            ?: return null
+            ?: return emptyList()
 
         return rawValue
             .split(',')
             .asSequence()
             .map { it.trim() }
-            .firstOrNull { it.isNotEmpty() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .take(MAX_HEADER_EPG_URLS)
+            .toList()
+    }
+
+    /**
+     * Charset precedence is BOM, validated HTTP charset, then strict UTF-8 per line with a
+     * Windows-1252 fallback. Windows-1252 preserves ISO-8859-1 text in the printable 0xA0-0xFF
+     * range while also handling the legacy punctuation commonly found in provider playlists.
+     */
+    private fun playlistLines(inputStream: InputStream, declaredCharset: Charset?): PlaylistLineSource {
+        val buffered = inputStream as? BufferedInputStream ?: BufferedInputStream(inputStream, 64 * 1024)
+        buffered.mark(3)
+        val first = buffered.read()
+        val second = buffered.read()
+        val third = buffered.read()
+        buffered.reset()
+        val (bomLength, bomCharset) = when {
+            first == 0xEF && second == 0xBB && third == 0xBF -> 3 to Charsets.UTF_8
+            first == 0xFF && second == 0xFE -> 2 to Charsets.UTF_16LE
+            first == 0xFE && second == 0xFF -> 2 to Charsets.UTF_16BE
+            else -> 0 to null
+        }
+        repeat(bomLength) { buffered.read() }
+        val charset = bomCharset ?: validatedPlaylistCharset(declaredCharset)
+        return if (charset != null) {
+            val reader = BufferedReader(InputStreamReader(buffered, charset))
+            PlaylistLineSource(reader, reader.lineSequence())
+        } else {
+            PlaylistLineSource(buffered, legacyFallbackLines(buffered))
+        }
+    }
+
+    private fun validatedPlaylistCharset(charset: Charset?): Charset? {
+        val normalized = charset?.name()?.uppercase() ?: return null
+        return charset.takeIf {
+            normalized in setOf(
+                "UTF-8",
+                "UTF-16LE",
+                "UTF-16BE",
+                "WINDOWS-1252",
+                "ISO-8859-1",
+                "US-ASCII"
+            )
+        }
+    }
+
+    private fun legacyFallbackLines(input: InputStream): Sequence<String> = sequence {
+        val line = ByteArrayOutputStream(256)
+        val utf8Decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+
+        fun decodeLine(): String {
+            val bytes = line.toByteArray().let { raw ->
+                if (raw.lastOrNull() == '\r'.code.toByte()) raw.copyOf(raw.size - 1) else raw
+            }
+            return try {
+                utf8Decoder.reset().decode(ByteBuffer.wrap(bytes)).toString()
+            } catch (_: CharacterCodingException) {
+                String(bytes, WINDOWS_1252)
+            }
+        }
+
+        while (true) {
+            when (val next = input.read()) {
+                -1 -> {
+                    if (line.size() > 0) yield(decodeLine())
+                    break
+                }
+                '\n'.code -> {
+                    yield(decodeLine())
+                    line.reset()
+                }
+                else -> line.write(next)
+            }
+        }
+    }
+
+    private class PlaylistLineSource(
+        private val closeable: Closeable,
+        val lines: Sequence<String>
+    ) : Closeable {
+        override fun close() = closeable.close()
     }
 
     private fun parseStandaloneGroupTitle(line: String): String? {
@@ -428,20 +535,13 @@ class M3uParser {
             "tvg-url",
             "url-xml"
         )
+        private const val MAX_HEADER_EPG_URLS = 8
+        private val WINDOWS_1252: Charset = Charset.forName("windows-1252")
 
-        /** Exposed for callers outside M3uParser (e.g. SyncManager) to avoid duplicate logic. */
-        fun isVodEntry(entry: M3uEntry): Boolean {
-            val url = entry.url.lowercase()
-            val group = entry.groupTitle.lowercase()
+        private val vodClassifier = M3uVodClassifier()
 
-            return url.endsWith(".mp4") ||
-                    url.endsWith(".mkv") ||
-                    url.endsWith(".avi") ||
-                    url.contains("/movie/") ||
-                    group.contains("movie") ||
-                    group.contains("vod") ||
-                    group.contains("film")
-        }
+        /** Exposed for importers and tests; classification rules live in one deterministic source. */
+        fun isVodEntry(entry: M3uEntry): Boolean = vodClassifier.classify(entry).isVod
 
         val knownAttributes = setOf(
             "tvg-id",

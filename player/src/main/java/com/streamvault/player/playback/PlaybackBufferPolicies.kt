@@ -1,5 +1,10 @@
 package com.streamvault.player.playback
 
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.StreamInfo
+import com.streamvault.domain.model.VideoFormat
+import java.util.Locale
+
 internal data class PlaybackBufferPolicy(
     val label: String,
     val minBufferMs: Int,
@@ -7,12 +12,16 @@ internal data class PlaybackBufferPolicy(
     val playbackBufferMs: Int,
     val rebufferMs: Int,
     val targetBufferBytes: Int,
-    val prioritizeTimeOverSizeThresholds: Boolean
+    val prioritizeTimeOverSizeThresholds: Boolean,
+    val qualityReason: String = "baseline",
+    val lowMemoryCapped: Boolean = false
 )
 
 internal object PlaybackBufferPolicies {
     private const val DEFAULT_TARGET_BUFFER_BYTES = -1
     private const val MPEG_TS_LIVE_TARGET_BUFFER_BYTES = 16 * 1024 * 1024
+    private const val MEDIUM_LIVE_TARGET_BUFFER_BYTES = 32 * 1024 * 1024
+    private const val LARGE_LIVE_TARGET_BUFFER_BYTES = 64 * 1024 * 1024
     private const val MPEG_TS_LIVE_MIN_BUFFER_MS = 5_000
     private const val MPEG_TS_LIVE_MAX_BUFFER_MS = 10_000
 
@@ -35,6 +44,17 @@ internal object PlaybackBufferPolicies {
     private const val REBUFFER_MS = 5_000
     private const val VOD_PLAYBACK_BUFFER_MS = 8_000
     private const val VOD_REBUFFER_MS = 18_000
+    private const val MEDIUM_LIVE_MIN_BUFFER_MS = 15_000
+    private const val MEDIUM_LIVE_MAX_BUFFER_MS = 45_000
+    private const val MEDIUM_LIVE_PLAYBACK_BUFFER_MS = 3_000
+    private const val MEDIUM_LIVE_REBUFFER_MS = 10_000
+    private const val LARGE_LIVE_MIN_BUFFER_MS = 30_000
+    private const val LARGE_LIVE_MAX_BUFFER_MS = 90_000
+    private const val LARGE_LIVE_PLAYBACK_BUFFER_MS = 5_000
+    private const val LARGE_LIVE_REBUFFER_MS = 15_000
+    private const val UHD_MIN_WIDTH = 3_840
+    private const val UHD_MIN_HEIGHT = 2_160
+    private const val HIGH_BITRATE_THRESHOLD_BPS = 20_000_000
 
     fun forPlayback(
         isLive: Boolean,
@@ -65,6 +85,55 @@ internal object PlaybackBufferPolicies {
     )
 
     fun forPlayback(
+        resolvedStreamType: ResolvedStreamType,
+        compatibilityMode: Boolean,
+        lowMemoryDevice: Boolean
+    ): PlaybackBufferPolicy = forPlayback(
+        resolvedStreamType = resolvedStreamType,
+        compatibilityMode = compatibilityMode,
+        lowMemoryDevice = lowMemoryDevice,
+        bufferMode = PlaybackBufferMode.AUTO,
+        streamInfo = null,
+        observedVideoFormat = null
+    )
+
+    fun forPlayback(
+        resolvedStreamType: ResolvedStreamType,
+        compatibilityMode: Boolean,
+        lowMemoryDevice: Boolean,
+        bufferMode: PlaybackBufferMode,
+        streamInfo: StreamInfo? = null,
+        observedVideoFormat: VideoFormat? = null,
+        qualityReasonOverride: String? = null
+    ): PlaybackBufferPolicy = when {
+        bufferMode == PlaybackBufferMode.MEDIUM && resolvedStreamType.isLive ->
+            mediumLivePolicy(label = "medium-live", qualityReason = "user-medium")
+        bufferMode == PlaybackBufferMode.LARGE && resolvedStreamType.isLive ->
+            largeLivePolicy(label = "large-live", qualityReason = "user-large")
+        bufferMode == PlaybackBufferMode.AUTO && resolvedStreamType == ResolvedStreamType.HLS -> {
+            val qualityReason = qualityReasonOverride ?: highQualityLiveHlsReason(streamInfo, observedVideoFormat)
+            when {
+                qualityReason == null -> baselineLivePolicy(
+                    resolvedStreamType = resolvedStreamType,
+                    compatibilityMode = compatibilityMode,
+                    lowMemoryDevice = lowMemoryDevice
+                )
+                lowMemoryDevice -> mediumLivePolicy(
+                    label = "auto-uhd-live-hls-capped",
+                    qualityReason = qualityReason,
+                    lowMemoryCapped = true
+                )
+                else -> largeLivePolicy(label = "auto-uhd-live-hls", qualityReason = qualityReason)
+            }
+        }
+        else -> baselineLivePolicy(
+            resolvedStreamType = resolvedStreamType,
+            compatibilityMode = compatibilityMode,
+            lowMemoryDevice = lowMemoryDevice
+        )
+    }
+
+    private fun baselineLivePolicy(
         resolvedStreamType: ResolvedStreamType,
         compatibilityMode: Boolean,
         lowMemoryDevice: Boolean
@@ -149,6 +218,58 @@ internal object PlaybackBufferPolicies {
                 targetBufferBytes = DEFAULT_TARGET_BUFFER_BYTES,
                 prioritizeTimeOverSizeThresholds = true
             )
+    }
+
+    private fun mediumLivePolicy(
+        label: String,
+        qualityReason: String,
+        lowMemoryCapped: Boolean = false
+    ): PlaybackBufferPolicy = PlaybackBufferPolicy(
+        label = label,
+        minBufferMs = MEDIUM_LIVE_MIN_BUFFER_MS,
+        maxBufferMs = MEDIUM_LIVE_MAX_BUFFER_MS,
+        playbackBufferMs = MEDIUM_LIVE_PLAYBACK_BUFFER_MS,
+        rebufferMs = MEDIUM_LIVE_REBUFFER_MS,
+        targetBufferBytes = MEDIUM_LIVE_TARGET_BUFFER_BYTES,
+        prioritizeTimeOverSizeThresholds = true,
+        qualityReason = qualityReason,
+        lowMemoryCapped = lowMemoryCapped
+    )
+
+    private fun largeLivePolicy(label: String, qualityReason: String): PlaybackBufferPolicy = PlaybackBufferPolicy(
+        label = label,
+        minBufferMs = LARGE_LIVE_MIN_BUFFER_MS,
+        maxBufferMs = LARGE_LIVE_MAX_BUFFER_MS,
+        playbackBufferMs = LARGE_LIVE_PLAYBACK_BUFFER_MS,
+        rebufferMs = LARGE_LIVE_REBUFFER_MS,
+        targetBufferBytes = LARGE_LIVE_TARGET_BUFFER_BYTES,
+        prioritizeTimeOverSizeThresholds = true,
+        qualityReason = qualityReason
+    )
+
+    fun highQualityLiveHlsReason(streamInfo: StreamInfo?, observedVideoFormat: VideoFormat?): String? {
+        observedVideoFormat?.let { format ->
+            when {
+                format.width >= UHD_MIN_WIDTH -> return "observed-width-${format.width}"
+                format.height >= UHD_MIN_HEIGHT -> return "observed-height-${format.height}"
+                format.bitrate >= HIGH_BITRATE_THRESHOLD_BPS -> return "observed-bitrate-${format.bitrate}"
+                format.isHdr -> return "observed-hdr"
+            }
+        }
+        val searchable = listOfNotNull(
+            streamInfo?.title,
+            streamInfo?.url,
+            streamInfo?.containerExtension
+        ).joinToString(" ").lowercase(Locale.ROOT)
+        if (searchable.isBlank()) return null
+        return when {
+            "2160p" in searchable -> "metadata-2160p"
+            "2160" in searchable -> "metadata-2160"
+            "uhd" in searchable -> "metadata-uhd"
+            "4k" in searchable -> "metadata-4k"
+            "hdr" in searchable -> "metadata-hdr"
+            else -> null
+        }
     }
 
     private val ResolvedStreamType.isLive: Boolean

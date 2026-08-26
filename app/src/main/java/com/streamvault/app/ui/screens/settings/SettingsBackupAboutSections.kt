@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.LaunchedEffect
@@ -14,13 +15,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.streamvault.app.BuildConfig
 import com.streamvault.app.R
+import com.streamvault.app.update.AppUpdateActionState
 import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.theme.OnSurface
 import com.streamvault.app.ui.theme.OnSurfaceDim
@@ -29,7 +30,10 @@ import com.streamvault.app.ui.theme.Secondary
 import com.streamvault.domain.manager.DriveAuthState
 
 internal fun LazyListScope.settingsBackupSection(
+    uiState: SettingsUiState,
+    viewModel: SettingsViewModel,
     onCreateBackup: () -> Unit,
+    onManageLocalBackups: () -> Unit,
     onShareBackup: () -> Unit,
     onRestoreBackup: () -> Unit,
     onCreateBackupUsb: (() -> Unit)? = null,
@@ -40,6 +44,10 @@ internal fun LazyListScope.settingsBackupSection(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
+            SettingsSectionHeader(
+                title = stringResource(R.string.settings_backup_restore),
+                subtitle = stringResource(R.string.settings_backup_subtitle)
+            )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -67,6 +75,79 @@ internal fun LazyListScope.settingsBackupSection(
                 subtitle = stringResource(R.string.settings_restore_subtitle),
                 accent = Secondary,
                 onClick = onRestoreBackup,
+                modifier = Modifier.fillMaxWidth()
+            )
+            uiState.backupRestoreJobs
+                .filter { job -> job.status != "COMPLETE" || job.providers.any { provider -> provider.items.any { it.status != "APPLIED" && it.status != "DISMISSED" } } }
+                .forEach { job ->
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Restore ${job.jobId.take(8)} · ${job.status}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = OnSurface
+                        )
+                        job.providers.forEach { provider ->
+                            val waiting = provider.pendingCount + provider.unresolvedCount + provider.failedCount
+                            Text(
+                                text = "${provider.providerIdentityKey.substringBefore('|')} — " +
+                                    "${provider.appliedCount} applied, $waiting waiting (${provider.failedCount} failed)",
+                                color = OnSurfaceDim
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                provider.localProviderId?.let { providerId ->
+                                    BackupActionCard(
+                                        icon = "↻",
+                                        title = "Retry",
+                                        subtitle = "Try available catalog data",
+                                        accent = Primary,
+                                        onClick = { viewModel.retryRestoreProvider(providerId) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                BackupActionCard(
+                                    icon = "×",
+                                    title = "Dismiss provider",
+                                    subtitle = "Discard unresolved instructions",
+                                    accent = Secondary,
+                                    onClick = { viewModel.dismissRestoreProvider(job.jobId, provider.providerIdentityKey) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            provider.items
+                                .filter { it.status == "UNRESOLVED" || it.status == "FAILED_RETRYABLE" }
+                                .forEach { item ->
+                                    BackupActionCard(
+                                        icon = "!",
+                                        title = "${item.section}${item.contentType?.let { " · $it" }.orEmpty()}",
+                                        subtitle = item.lastError ?: item.status,
+                                        accent = Secondary,
+                                        onClick = { viewModel.dismissRestoreItem(item.id) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                        }
+                        BackupActionCard(
+                            icon = "×",
+                            title = "Dismiss entire restore",
+                            subtitle = "Discard all remaining instructions",
+                            accent = Secondary,
+                            onClick = { viewModel.dismissRestoreJob(job.jobId) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            BackupActionCard(
+                icon = "≡",
+                title = stringResource(R.string.settings_manage_local_backups),
+                subtitle = stringResource(R.string.settings_manage_local_backups_subtitle),
+                accent = OnSurface,
+                onClick = onManageLocalBackups,
                 modifier = Modifier.fillMaxWidth()
             )
             if (onCreateBackupUsb != null && onRestoreBackupUsb != null) {
@@ -101,7 +182,8 @@ internal fun LazyListScope.settingsDriveBackupSection(
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onPush: () -> Unit,
-    onPull: () -> Unit
+    onPull: () -> Unit,
+    onManageBackups: () -> Unit,
 ) {
     item(key = "settings_drive_section") {
         Column(
@@ -154,10 +236,34 @@ internal fun LazyListScope.settingsDriveBackupSection(
                             modifier = Modifier.weight(1f)
                         )
                     }
+                    BackupActionCard(
+                        icon = "≡",
+                        title = stringResource(R.string.settings_manage_drive_backups),
+                        subtitle = stringResource(R.string.settings_manage_drive_backups_subtitle),
+                        accent = OnSurface,
+                        onClick = onManageBackups,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
     }
+}
+
+@androidx.compose.runtime.Composable
+internal fun formatSnapshotDetails(snapshot: com.streamvault.domain.manager.DriveBackupSnapshot): String {
+    val date = snapshot.modifiedAtMs?.let {
+        java.text.DateFormat.getDateTimeInstance(
+            java.text.DateFormat.SHORT,
+            java.text.DateFormat.SHORT,
+        ).format(java.util.Date(it))
+    } ?: stringResource(R.string.settings_drive_unknown_backup_date)
+    val size = if (snapshot.sizeBytes > 0L) {
+        "${snapshot.sizeBytes / 1024L} KB"
+    } else {
+        stringResource(R.string.settings_drive_backup_size_unknown)
+    }
+    return "$date · $size"
 }
 
 @androidx.compose.runtime.Composable
@@ -238,14 +344,35 @@ private fun BackupActionCard(
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         modifier = modifier
     ) {
-        Column(
-            modifier = Modifier.padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(text = icon, style = MaterialTheme.typography.titleLarge, color = accent, fontWeight = FontWeight.Bold)
-            Text(text = title, style = MaterialTheme.typography.titleSmall, color = accent, textAlign = TextAlign.Center)
-            Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = OnSurfaceDim, textAlign = TextAlign.Center)
+            Text(
+                text = icon,
+                modifier = Modifier.width(34.dp),
+                style = MaterialTheme.typography.headlineSmall,
+                color = accent,
+                fontWeight = FontWeight.Bold,
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = OnSurface,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceDim,
+                )
+            }
         }
     }
 }
@@ -326,10 +453,12 @@ internal fun LazyListScope.settingsAboutSection(
                 label = stringResource(R.string.settings_update_download),
                 value = formatUpdateDownloadLabel(uiState.appUpdate, context),
                 onClick = {
-                    if (uiState.appUpdate.downloadStatus == com.streamvault.app.update.AppUpdateDownloadStatus.Downloaded) {
-                        onInstallDownloadedUpdate()
-                    } else if (uiState.appUpdate.downloadStatus != com.streamvault.app.update.AppUpdateDownloadStatus.Downloading) {
-                        onDownloadLatestUpdate()
+                    when (uiState.appUpdate.latestActionState()) {
+                        AppUpdateActionState.InstallLatest,
+                        AppUpdateActionState.InstallPermissionRequired -> onInstallDownloadedUpdate()
+                        AppUpdateActionState.DownloadLatest -> onDownloadLatestUpdate()
+                        AppUpdateActionState.Downloading,
+                        AppUpdateActionState.None -> Unit
                     }
                 }
             )

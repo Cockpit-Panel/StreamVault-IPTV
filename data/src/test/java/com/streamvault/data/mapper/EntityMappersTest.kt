@@ -11,7 +11,7 @@ import com.streamvault.domain.model.ChannelQualityOption
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.PlaybackWatchedStatus
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
 import org.junit.Test
@@ -27,8 +27,8 @@ class EntityMappersTest {
     // ── Provider ──────────────────────────────────────────────────
 
     @Test
-    fun `provider_roundTrip_preservesAllFields`() {
-        val original = Provider(
+    fun `provider entity roundTrip preserves stable identity fields only`() {
+        val legacy = Provider(
             id = 42L,
             name = "My Xtream Provider",
             type = ProviderType.XTREAM_CODES,
@@ -47,24 +47,21 @@ class EntityMappersTest {
             createdAt = 1_600_000_000_000L
         )
 
-        val roundTripped = original.toEntity().toDomain()
+        val stableEntity = legacy.toEntity()
+        val compatibilityView = stableEntity.toDomain()
 
-        assertThat(roundTripped.id).isEqualTo(original.id)
-        assertThat(roundTripped.name).isEqualTo(original.name)
-        assertThat(roundTripped.type).isEqualTo(original.type)
-        assertThat(roundTripped.serverUrl).isEqualTo(original.serverUrl)
-        assertThat(roundTripped.username).isEqualTo(original.username)
-        assertThat(roundTripped.password).isEqualTo(original.password)
-        assertThat(roundTripped.m3uUrl).isEqualTo(original.m3uUrl)
-        assertThat(roundTripped.epgUrl).isEqualTo(original.epgUrl)
-        assertThat(roundTripped.isActive).isEqualTo(original.isActive)
-        assertThat(roundTripped.maxConnections).isEqualTo(original.maxConnections)
-        assertThat(roundTripped.expirationDate).isEqualTo(original.expirationDate)
-        assertThat(roundTripped.apiVersion).isEqualTo(original.apiVersion)
-        assertThat(roundTripped.allowedOutputFormats).containsExactlyElementsIn(original.allowedOutputFormats).inOrder()
-        assertThat(roundTripped.status).isEqualTo(original.status)
-        assertThat(roundTripped.lastSyncedAt).isEqualTo(original.lastSyncedAt)
-        assertThat(roundTripped.createdAt).isEqualTo(original.createdAt)
+        assertThat(compatibilityView.id).isEqualTo(legacy.id)
+        assertThat(compatibilityView.name).isEqualTo(legacy.name)
+        assertThat(compatibilityView.type).isEqualTo(legacy.type)
+        assertThat(compatibilityView.isActive).isEqualTo(legacy.isActive)
+        assertThat(compatibilityView.status).isEqualTo(legacy.status)
+        assertThat(compatibilityView.lastSyncedAt).isEqualTo(legacy.lastSyncedAt)
+        assertThat(compatibilityView.createdAt).isEqualTo(legacy.createdAt)
+        assertThat(compatibilityView.serverUrl).isEmpty()
+        assertThat(compatibilityView.username).isEmpty()
+        assertThat(compatibilityView.password).isEmpty()
+        assertThat(compatibilityView.maxConnections).isEqualTo(1)
+        assertThat(compatibilityView.toEntity()).isEqualTo(stableEntity)
     }
 
     @Test

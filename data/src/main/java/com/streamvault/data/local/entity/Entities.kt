@@ -7,11 +7,15 @@ import androidx.room.Fts4
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.streamvault.domain.model.ContentType
+import com.streamvault.domain.model.CatalogLayout
 import com.streamvault.domain.model.ProviderEpgSyncMode
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.SeriesCatalogOrigin
 import com.streamvault.domain.model.StalkerAuthMode
 import com.streamvault.domain.model.StalkerBootstrapRecipe
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.StalkerCookieMode
 import com.streamvault.domain.model.StalkerEndpointPreference
 import com.streamvault.domain.model.StalkerMagPreset
@@ -19,59 +23,179 @@ import com.streamvault.domain.model.StalkerPlaybackBackendHint
 import com.streamvault.domain.model.StalkerPortalFingerprint
 import com.streamvault.domain.model.StalkerPortalProfile
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProfileVerification
+import com.streamvault.domain.model.StalkerProtocolFamily
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerTransportMode
+import com.streamvault.domain.model.XmltvTimezonePolicy
+
+@Entity(
+    tableName = "m3u_classification_overrides",
+    primaryKeys = ["provider_id", "source_key"],
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index(value = ["provider_id"])]
+)
+data class M3uClassificationOverrideEntity(
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    @ColumnInfo(name = "source_key") val sourceKey: String,
+    @ColumnInfo(name = "stream_id") val streamId: Long,
+    @ColumnInfo(name = "target_type") val targetType: String,
+    @ColumnInfo(name = "group_key") val groupKey: String = "",
+    @ColumnInfo(name = "series_key") val seriesKey: String? = null,
+    @ColumnInfo(name = "series_name") val seriesName: String? = null,
+    @ColumnInfo(name = "season_number") val seasonNumber: Int? = null,
+    @ColumnInfo(name = "episode_number") val episodeNumber: Int? = null,
+    @ColumnInfo(name = "episode_title") val episodeTitle: String? = null,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "m3u_category_classification_rules",
+    primaryKeys = ["provider_id", "group_key"],
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index(value = ["provider_id"])]
+)
+data class M3uCategoryClassificationRuleEntity(
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    @ColumnInfo(name = "group_key") val groupKey: String,
+    @ColumnInfo(name = "target_type") val targetType: String,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
+)
 
 @Entity(
     tableName = "providers",
-    indices = [Index(value = ["server_url", "username", "stalker_mac_address"], unique = true)]
+    indices = [Index(value = ["type"]), Index(value = ["is_active"])]
 )
 data class ProviderEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
     val name: String,
     val type: ProviderType,
-    @ColumnInfo(name = "server_url") val serverUrl: String,
-    val username: String = "",
-    val password: String = "",
-    @ColumnInfo(name = "m3u_url") val m3uUrl: String = "",
-    @ColumnInfo(name = "epg_url") val epgUrl: String = "",
-    @ColumnInfo(name = "http_user_agent") val httpUserAgent: String = "",
-    @ColumnInfo(name = "http_headers") val httpHeaders: String = "",
-    @ColumnInfo(name = "stalker_mac_address") val stalkerMacAddress: String = "",
-    @ColumnInfo(name = "stalker_device_profile") val stalkerDeviceProfile: String = "",
-    @ColumnInfo(name = "stalker_device_timezone") val stalkerDeviceTimezone: String = "",
-    @ColumnInfo(name = "stalker_device_locale") val stalkerDeviceLocale: String = "",
-    @ColumnInfo(name = "stalker_serial_number") val stalkerSerialNumber: String = "",
-    @ColumnInfo(name = "stalker_device_id") val stalkerDeviceId: String = "",
-    @ColumnInfo(name = "stalker_device_id2") val stalkerDeviceId2: String = "",
-    @ColumnInfo(name = "stalker_signature") val stalkerSignature: String = "",
-    @ColumnInfo(name = "stalker_auth_mode") val stalkerAuthMode: StalkerAuthMode = StalkerAuthMode.AUTO,
-    @ColumnInfo(name = "stalker_portal_profile") val stalkerPortalProfile: StalkerPortalProfile = StalkerPortalProfile.MAG_BASIC,
-    @ColumnInfo(name = "stalker_portal_fingerprint") val stalkerPortalFingerprint: StalkerPortalFingerprint = StalkerPortalFingerprint.BASIC_MAC,
-    @ColumnInfo(name = "stalker_mag_preset") val stalkerMagPreset: StalkerMagPreset = StalkerMagPreset.GENERIC_SAFE,
-    @ColumnInfo(name = "stalker_last_bootstrap_recipe") val stalkerLastBootstrapRecipe: StalkerBootstrapRecipe = StalkerBootstrapRecipe.GENERIC_SAFE,
-    @ColumnInfo(name = "stalker_endpoint_preference") val stalkerEndpointPreference: StalkerEndpointPreference = StalkerEndpointPreference.AUTO,
-    @ColumnInfo(name = "stalker_cookie_mode") val stalkerCookieMode: StalkerCookieMode = StalkerCookieMode.NONE,
-    @ColumnInfo(name = "stalker_playback_backend_hint") val stalkerPlaybackBackendHint: StalkerPlaybackBackendHint = StalkerPlaybackBackendHint.AUTO,
-    @ColumnInfo(name = "stalker_last_playback_mode") val stalkerLastPlaybackMode: String? = null,
-    @ColumnInfo(name = "stalker_credentials_required") val stalkerCredentialsRequired: Boolean = false,
-    @ColumnInfo(name = "stalker_mac_required") val stalkerMacRequired: Boolean = true,
-    @ColumnInfo(name = "stalker_uses_temp_links") val stalkerUsesTemporaryLinks: Boolean = false,
-    @ColumnInfo(name = "stalker_module_restricted") val stalkerModuleRestricted: Boolean = false,
-    @ColumnInfo(name = "stalker_strict_fingerprint_required") val stalkerStrictFingerprintRequired: Boolean = false,
-    @ColumnInfo(name = "stalker_recipe_fallback_used") val stalkerRecipeFallbackUsed: Boolean = false,
-    @ColumnInfo(name = "stalker_recipe_rediscovery_attempts") val stalkerRecipeRediscoveryAttempts: Int = 0,
     @ColumnInfo(name = "is_active") val isActive: Boolean = true,
+    val status: ProviderStatus = ProviderStatus.UNKNOWN,
+    @ColumnInfo(name = "last_synced_at") val lastSyncedAt: Long = 0,
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+)
+
+/** Authoritative typed configuration payload introduced in schema 73. */
+@Entity(
+    tableName = "provider_configs",
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [
+        Index(value = ["provider_id"], unique = true),
+        Index(value = ["identity_key"], unique = true),
+        Index(value = ["type"])
+    ]
+)
+data class ProviderConfigEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    val type: ProviderType,
+    @ColumnInfo(name = "schema_version") val schemaVersion: Int,
+    @ColumnInfo(name = "configuration_generation") val configurationGeneration: Long,
+    @ColumnInfo(name = "identity_key") val identityKey: String,
+    /** JSON with credential values encrypted before serialization. */
+    @ColumnInfo(name = "encrypted_config_json") val encryptedConfigJson: String,
+    @ColumnInfo(name = "guide_source_policy") val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    @ColumnInfo(name = "channel_logo_source_policy") val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
+)
+
+/** Account and catalog observations, intentionally separate from user configuration. */
+@Entity(
+    tableName = "provider_account_runtime",
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index(value = ["provider_id"], unique = true)]
+)
+data class ProviderAccountRuntimeEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "provider_id") val providerId: Long,
     @ColumnInfo(name = "max_connections") val maxConnections: Int = 1,
     @ColumnInfo(name = "expiration_date") val expirationDate: Long? = null,
     @ColumnInfo(name = "api_version") val apiVersion: String? = null,
     @ColumnInfo(name = "allowed_output_formats_json") val allowedOutputFormatsJson: String = "[]",
-    @ColumnInfo(name = "epg_sync_mode") val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.UPFRONT,
-    @ColumnInfo(name = "xtream_fast_sync_enabled") val xtreamFastSyncEnabled: Boolean = false,
-    @ColumnInfo(name = "xtream_live_sync_mode") val xtreamLiveSyncMode: ProviderXtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
-    @ColumnInfo(name = "m3u_vod_classification_enabled") val m3uVodClassificationEnabled: Boolean = false,
-    val status: ProviderStatus = ProviderStatus.UNKNOWN,
-    @ColumnInfo(name = "last_synced_at") val lastSyncedAt: Long = 0,
-    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+    @ColumnInfo(name = "catalog_layout") val catalogLayout: CatalogLayout = CatalogLayout.SPLIT,
+    @ColumnInfo(name = "catalog_layout_detection_version") val catalogLayoutDetectionVersion: Int = 0,
+    @ColumnInfo(name = "observed_at") val observedAt: Long = 0L
+)
+
+/** Lifecycle of a provider configuration which has not yet replaced the committed row. */
+enum class ProviderConfigRevisionState {
+    PENDING,
+    SYNCING,
+    FAILED,
+    COMMITTED,
+    SUPERSEDED
+}
+
+/**
+ * A candidate provider configuration that has not yet replaced the committed provider row.
+ *
+ * The configuration payload always contains an already-encrypted password. Keeping it outside
+ * of [ProviderEntity] lets an active provider continue to resolve and play its committed catalog
+ * while a replacement configuration is authenticated and synchronized.
+ */
+@Entity(
+    tableName = "provider_config_revisions",
+    primaryKeys = ["provider_id", "revision"],
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index(value = ["provider_id", "state"])]
+)
+data class ProviderConfigRevisionEntity(
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    val revision: Long,
+    @ColumnInfo(name = "config_json") val configJson: String,
+    val state: ProviderConfigRevisionState,
+    @ColumnInfo(name = "attempt_count") val attemptCount: Int = 0,
+    @ColumnInfo(name = "last_error") val lastError: String? = null,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
+)
+
+/**
+ * Checkpoints a cross-store backup restore. Room is transactional, while DataStore and alarm
+ * scheduling are not; keeping each completed boundary durable lets a retry resume truthfully.
+ */
+@Entity(tableName = "backup_restore_checkpoints")
+data class BackupRestoreCheckpointEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "restore_key") val restoreKey: String,
+    @ColumnInfo(name = "room_complete") val roomComplete: Boolean = false,
+    @ColumnInfo(name = "preferences_complete") val preferencesComplete: Boolean = false,
+    @ColumnInfo(name = "presets_complete") val presetsComplete: Boolean = false,
+    @ColumnInfo(name = "schedules_complete") val schedulesComplete: Boolean = false,
+    val state: String,
+    @ColumnInfo(name = "preference_snapshot_json") val preferenceSnapshotJson: String? = null,
+    @ColumnInfo(name = "last_error") val lastError: String? = null,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
 )
 
 @Entity(
@@ -129,6 +253,9 @@ data class ChannelBrowseEntity(
     @ColumnInfo(name = "catch_up_days") val catchUpDays: Int = 0,
     val catchUpSource: String? = null,
     @ColumnInfo(name = "provider_id") val providerId: Long = 0,
+    @ColumnInfo(name = "guide_source_policy") val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    @ColumnInfo(name = "channel_logo_source_policy") val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
+    @ColumnInfo(name = "epg_icon_url") val epgIconUrl: String? = null,
     @ColumnInfo(name = "is_adult") val isAdult: Boolean = false,
     @ColumnInfo(name = "is_user_protected") val isUserProtected: Boolean = false,
     @ColumnInfo(name = "logical_group_id") val logicalGroupId: String = "",
@@ -322,7 +449,9 @@ data class SeriesEntity(
     @ColumnInfo(name = "sync_fingerprint") val syncFingerprint: String = "",
     @ColumnInfo(name = "cache_state") val cacheState: String = "DETAIL_HYDRATED",
     @ColumnInfo(name = "detail_hydrated_at") val detailHydratedAt: Long = 0L,
-    @ColumnInfo(name = "remote_stale_at") val remoteStaleAt: Long = 0L
+    @ColumnInfo(name = "remote_stale_at") val remoteStaleAt: Long = 0L,
+    @ColumnInfo(name = "catalog_origin") val catalogOrigin: SeriesCatalogOrigin = SeriesCatalogOrigin.NATIVE,
+    @ColumnInfo(name = "episode_playback_template_url") val episodePlaybackTemplateUrl: String? = null
 )
 
 data class SeriesBrowseEntity(
@@ -336,10 +465,13 @@ data class SeriesBrowseEntity(
     val genre: String? = null,
     @ColumnInfo(name = "release_date") val releaseDate: String? = null,
     val rating: Float = 0f,
+    @ColumnInfo(name = "tmdb_id") val tmdbId: Long? = null,
     @ColumnInfo(name = "last_modified") val lastModified: Long = 0L,
     @ColumnInfo(name = "provider_id") val providerId: Long = 0,
     @ColumnInfo(name = "is_adult") val isAdult: Boolean = false,
-    @ColumnInfo(name = "is_user_protected") val isUserProtected: Boolean = false
+    @ColumnInfo(name = "is_user_protected") val isUserProtected: Boolean = false,
+    @ColumnInfo(name = "catalog_origin") val catalogOrigin: SeriesCatalogOrigin = SeriesCatalogOrigin.NATIVE,
+    @ColumnInfo(name = "episode_playback_template_url") val episodePlaybackTemplateUrl: String? = null
 )
 
 @Fts4(contentEntity = ChannelEntity::class)
@@ -449,6 +581,7 @@ data class CategoryEntity(
     @ColumnInfo(name = "parent_id") val parentId: Long? = null,
     val type: ContentType = ContentType.LIVE,
     @ColumnInfo(name = "provider_id") val providerId: Long = 0,
+    @ColumnInfo(name = "provider_order", defaultValue = "0") val providerOrder: Int = 0,
     @ColumnInfo(name = "is_adult") val isAdult: Boolean = false,
     @ColumnInfo(name = "is_user_protected") val isUserProtected: Boolean = false,
     @ColumnInfo(name = "sync_fingerprint") val syncFingerprint: String = ""
@@ -591,6 +724,7 @@ data class CategoryImportStageEntity(
     val name: String,
     @ColumnInfo(name = "parent_id") val parentId: Long? = null,
     val type: ContentType = ContentType.LIVE,
+    @ColumnInfo(name = "provider_order", defaultValue = "0") val providerOrder: Int = 0,
     @ColumnInfo(name = "is_adult") val isAdult: Boolean = false,
     @ColumnInfo(name = "sync_fingerprint") val syncFingerprint: String = ""
 )
@@ -860,6 +994,8 @@ data class MovieCategoryHydrationEntity(
     @ColumnInfo(name = "last_attempted_page") val lastAttemptedPage: Int = 0,
     @ColumnInfo(name = "last_successful_page") val lastSuccessfulPage: Int = 0,
     @ColumnInfo(name = "total_pages") val totalPages: Int = 0,
+    @ColumnInfo(name = "advertised_total_items") val advertisedTotalItems: Int? = null,
+    @ColumnInfo(name = "advertised_total_pages") val advertisedTotalPages: Int? = null,
     @ColumnInfo(name = "is_complete") val isComplete: Boolean = false,
     @ColumnInfo(name = "page_size") val pageSize: Int = 0,
     @ColumnInfo(name = "retry_after_ms") val retryAfterMs: Long = 0L,
@@ -890,12 +1026,73 @@ data class SeriesCategoryHydrationEntity(
     @ColumnInfo(name = "last_attempted_page") val lastAttemptedPage: Int = 0,
     @ColumnInfo(name = "last_successful_page") val lastSuccessfulPage: Int = 0,
     @ColumnInfo(name = "total_pages") val totalPages: Int = 0,
+    @ColumnInfo(name = "advertised_total_items") val advertisedTotalItems: Int? = null,
+    @ColumnInfo(name = "advertised_total_pages") val advertisedTotalPages: Int? = null,
     @ColumnInfo(name = "is_complete") val isComplete: Boolean = false,
     @ColumnInfo(name = "page_size") val pageSize: Int = 0,
     @ColumnInfo(name = "retry_after_ms") val retryAfterMs: Long = 0L,
     @ColumnInfo(name = "failure_count") val failureCount: Int = 0,
     @ColumnInfo(name = "retry_budget_remaining") val retryBudgetRemaining: Int = 3,
     @ColumnInfo(name = "last_page_fingerprint") val lastPageFingerprint: String? = null
+)
+
+@Entity(
+    tableName = "vod_category_hydration",
+    primaryKeys = ["provider_id", "category_id"],
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index(value = ["provider_id"])]
+)
+data class VodCategoryHydrationEntity(
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    @ColumnInfo(name = "category_id") val categoryId: Long,
+    @ColumnInfo(name = "last_loaded_page") val lastLoadedPage: Int = 0,
+    @ColumnInfo(name = "last_attempted_page") val lastAttemptedPage: Int = 0,
+    @ColumnInfo(name = "last_successful_page") val lastSuccessfulPage: Int = 0,
+    @ColumnInfo(name = "total_pages") val totalPages: Int = 0,
+    @ColumnInfo(name = "advertised_total_items") val advertisedTotalItems: Int? = null,
+    @ColumnInfo(name = "advertised_total_pages") val advertisedTotalPages: Int? = null,
+    @ColumnInfo(name = "page_size") val pageSize: Int = 0,
+    @ColumnInfo(name = "item_count") val itemCount: Int = 0,
+    @ColumnInfo(name = "is_complete") val isComplete: Boolean = false,
+    @ColumnInfo(name = "has_movies") val hasMovies: Boolean = false,
+    @ColumnInfo(name = "has_series") val hasSeries: Boolean = false,
+    @ColumnInfo(name = "last_hydrated_at") val lastHydratedAt: Long = 0L,
+    @ColumnInfo(name = "last_status") val lastStatus: String = "IDLE",
+    @ColumnInfo(name = "last_error") val lastError: String? = null,
+    @ColumnInfo(name = "retry_after_ms") val retryAfterMs: Long = 0L,
+    @ColumnInfo(name = "failure_count") val failureCount: Int = 0,
+    @ColumnInfo(name = "retry_budget_remaining") val retryBudgetRemaining: Int = 3,
+    @ColumnInfo(name = "last_page_fingerprint") val lastPageFingerprint: String? = null
+)
+
+@Entity(
+    tableName = "vod_catalog_entries",
+    primaryKeys = ["provider_id", "category_id", "raw_item_id"],
+    foreignKeys = [ForeignKey(
+        entity = ProviderEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["provider_id"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [
+        Index(value = ["provider_id"]),
+        Index(value = ["provider_id", "category_id", "raw_page", "raw_index"]),
+        Index(value = ["provider_id", "item_type", "target_id"])
+    ]
+)
+data class VodCatalogEntryEntity(
+    @ColumnInfo(name = "provider_id") val providerId: Long,
+    @ColumnInfo(name = "category_id") val categoryId: Long,
+    @ColumnInfo(name = "raw_item_id") val rawItemId: String,
+    @ColumnInfo(name = "item_type") val itemType: ContentType,
+    @ColumnInfo(name = "target_id") val targetId: Long,
+    @ColumnInfo(name = "raw_page") val rawPage: Int,
+    @ColumnInfo(name = "raw_index") val rawIndex: Int
 )
 
 // ── External EPG Source ────────────────────────────────────────────
@@ -917,7 +1114,10 @@ data class EpgSourceEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis(),
     val etag: String? = null,
-    @ColumnInfo(name = "last_modified_header") val lastModifiedHeader: String? = null
+    @ColumnInfo(name = "last_modified_header") val lastModifiedHeader: String? = null,
+    @ColumnInfo(name = "timezone_policy")
+    val timezonePolicy: XmltvTimezonePolicy = XmltvTimezonePolicy.REQUIRE_OFFSET,
+    @ColumnInfo(name = "timezone_id") val timezoneId: String? = null
 )
 
 // ── Provider ↔ EPG Source Assignment ───────────────────────────────

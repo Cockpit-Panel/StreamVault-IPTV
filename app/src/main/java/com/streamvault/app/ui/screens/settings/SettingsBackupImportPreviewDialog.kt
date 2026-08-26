@@ -1,21 +1,34 @@
 package com.streamvault.app.ui.screens.settings
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.streamvault.app.R
+import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.components.dialogs.PremiumDialog
 import com.streamvault.app.ui.components.dialogs.PremiumDialogFooterButton
 import com.streamvault.app.ui.interaction.TvClickableSurface
@@ -45,11 +58,18 @@ internal fun BackupImportPreviewDialog(
 ) {
     val anyEnabled = plan.importPreferences || plan.importProviders || plan.importSavedLibrary ||
         plan.importPlaybackHistory || plan.importMultiViewPresets || plan.importRecordingSchedules
+    val isTelevisionDevice = rememberIsTelevisionDevice()
+    val firstBodyFocusRequester = remember { FocusRequester() }
+
     PremiumDialog(
         title = stringResource(R.string.settings_backup_preview_title),
         subtitle = stringResource(R.string.settings_backup_preview_subtitle, preview.version),
         onDismissRequest = if (isImporting) ({}) else onDismiss,
         widthFraction = 0.58f,
+        heightFraction = 0.78f,
+        bodyHeightFraction = 0.58f,
+        bodyScrollHint = stringResource(R.string.settings_backup_preview_scroll_hint),
+        initialBodyFocusRequester = if (isTelevisionDevice) firstBodyFocusRequester else null,
         content = {
             BackupPreviewRow(stringResource(R.string.settings_backup_section_preferences), preview.preferenceCount, 0)
             BackupPreviewRow(stringResource(R.string.settings_backup_section_providers), preview.providerCount, preview.providerConflicts)
@@ -66,6 +86,7 @@ internal fun BackupImportPreviewDialog(
                 BackupStrategyChip(
                     title = stringResource(R.string.settings_backup_keep_existing),
                     selected = plan.conflictStrategy == BackupConflictStrategy.KEEP_EXISTING,
+                    modifier = Modifier.focusRequester(firstBodyFocusRequester),
                     onClick = { onStrategySelected(BackupConflictStrategy.KEEP_EXISTING) }
                 )
                 BackupStrategyChip(
@@ -90,11 +111,13 @@ internal fun BackupImportPreviewDialog(
             PremiumDialogFooterButton(
                 label = stringResource(R.string.settings_cancel),
                 onClick = onDismiss,
+                modifier = Modifier.focusProperties { up = firstBodyFocusRequester },
                 enabled = !isImporting
             )
             PremiumDialogFooterButton(
                 label = stringResource(R.string.settings_backup_import_confirm),
                 onClick = onConfirm,
+                modifier = Modifier.focusProperties { up = firstBodyFocusRequester },
                 emphasized = true,
                 enabled = anyEnabled && !isImporting
             )
@@ -137,10 +160,12 @@ private fun BackupPreviewRow(
 private fun BackupStrategyChip(
     title: String,
     selected: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     TvClickableSurface(
         onClick = onClick,
+        modifier = modifier,
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(24.dp)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = if (selected) Primary.copy(alpha = 0.2f) else SurfaceElevated,
@@ -162,12 +187,26 @@ private fun BackupToggleRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
+    var isFocused by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge, color = OnBackground)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier
+                .onFocusChanged { isFocused = it.isFocused }
+                .then(
+                    if (isFocused) {
+                        Modifier.border(BorderStroke(2.dp, Color.White), CircleShape)
+                    } else {
+                        Modifier
+                    }
+                ),
+        )
     }
 }

@@ -85,8 +85,7 @@ class BrowseQueryPlanTest {
             ProviderEntity(
                 id = 1L,
                 name = "Provider",
-                type = ProviderType.XTREAM_CODES,
-                serverUrl = "https://provider.example.com"
+                type = ProviderType.XTREAM_CODES
             )
         )
         db.movieDao().insertAll(

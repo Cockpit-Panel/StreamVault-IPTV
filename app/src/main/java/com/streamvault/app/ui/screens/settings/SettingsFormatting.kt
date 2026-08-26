@@ -14,6 +14,8 @@ import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.GroupedChannelLabelMode
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.VodDuplicateHandlingMode
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.model.PlayerSurfaceMode
 import com.streamvault.domain.model.RemoteColorButton
 import com.streamvault.domain.model.RemoteShortcutAction
@@ -228,7 +230,8 @@ internal fun formatCategorySortModeLabel(mode: CategorySortMode, context: androi
 internal fun categoryTypeLabel(type: ContentType, context: android.content.Context): String {
     return when (type) {
         ContentType.LIVE -> context.getString(R.string.settings_category_sort_live)
-        ContentType.MOVIE -> context.getString(R.string.settings_category_sort_movies)
+        ContentType.MOVIE,
+        ContentType.VOD -> context.getString(R.string.nav_vod)
         ContentType.SERIES -> context.getString(R.string.settings_category_sort_series)
         ContentType.SERIES_EPISODE -> context.getString(R.string.settings_category_sort_series)
     }
@@ -237,7 +240,8 @@ internal fun categoryTypeLabel(type: ContentType, context: android.content.Conte
 internal fun categoryTypeDescription(type: ContentType, context: android.content.Context): String {
     return when (type) {
         ContentType.LIVE -> context.getString(R.string.settings_category_type_live_description)
-        ContentType.MOVIE -> context.getString(R.string.settings_category_type_movies_description)
+        ContentType.MOVIE,
+        ContentType.VOD -> context.getString(R.string.settings_category_type_movies_description)
         ContentType.SERIES -> context.getString(R.string.settings_category_type_series_description)
         ContentType.SERIES_EPISODE -> context.getString(R.string.settings_category_type_series_description)
     }
@@ -275,6 +279,36 @@ internal fun VodViewMode.labelResId(): Int = when (this) {
 internal fun VodViewMode.descriptionResId(): Int = when (this) {
     VodViewMode.MODERN -> R.string.settings_vod_view_mode_modern_desc
     VodViewMode.CLASSIC -> R.string.settings_vod_view_mode_classic_desc
+}
+
+internal fun VodDuplicateHandlingMode.labelResId(): Int = when (this) {
+    VodDuplicateHandlingMode.SHOW_ALL -> R.string.settings_vod_duplicate_handling_show_all
+    VodDuplicateHandlingMode.GROUPED -> R.string.settings_vod_duplicate_handling_grouped
+    VodDuplicateHandlingMode.SMART -> R.string.settings_vod_duplicate_handling_smart
+}
+
+internal fun VodDuplicateHandlingMode.descriptionResId(): Int = when (this) {
+    VodDuplicateHandlingMode.SHOW_ALL -> R.string.settings_vod_duplicate_handling_show_all_desc
+    VodDuplicateHandlingMode.GROUPED -> R.string.settings_vod_duplicate_handling_grouped_desc
+    VodDuplicateHandlingMode.SMART -> R.string.settings_vod_duplicate_handling_smart_desc
+}
+
+internal fun VodVariantPreferenceMode.labelResId(): Int = when (this) {
+    VodVariantPreferenceMode.BALANCED -> R.string.settings_vod_variant_preference_balanced
+    VodVariantPreferenceMode.FORCE_LATEST -> R.string.settings_vod_variant_preference_force_latest
+    VodVariantPreferenceMode.BEST_QUALITY -> R.string.settings_vod_variant_preference_best_quality
+    VodVariantPreferenceMode.LATEST_BEST_QUALITY -> R.string.settings_vod_variant_preference_latest_best_quality
+    VodVariantPreferenceMode.MOST_RELIABLE -> R.string.settings_vod_variant_preference_most_reliable
+    VodVariantPreferenceMode.MANUAL_LAST_CHOICE -> R.string.settings_vod_variant_preference_manual_last_choice
+}
+
+internal fun VodVariantPreferenceMode.descriptionResId(): Int = when (this) {
+    VodVariantPreferenceMode.BALANCED -> R.string.settings_vod_variant_preference_balanced_desc
+    VodVariantPreferenceMode.FORCE_LATEST -> R.string.settings_vod_variant_preference_force_latest_desc
+    VodVariantPreferenceMode.BEST_QUALITY -> R.string.settings_vod_variant_preference_best_quality_desc
+    VodVariantPreferenceMode.LATEST_BEST_QUALITY -> R.string.settings_vod_variant_preference_latest_best_quality_desc
+    VodVariantPreferenceMode.MOST_RELIABLE -> R.string.settings_vod_variant_preference_most_reliable_desc
+    VodVariantPreferenceMode.MANUAL_LAST_CHOICE -> R.string.settings_vod_variant_preference_manual_last_choice_desc
 }
 
 internal fun ChannelNumberingMode.labelResId(): Int = when (this) {

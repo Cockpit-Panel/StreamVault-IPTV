@@ -3,99 +3,117 @@ package com.streamvault.data.sync
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.domain.sync.Section
 import com.streamvault.domain.sync.SyncProgress
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.runTest
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import org.junit.Test
 
-/**
- * Tests unitaires de [SyncProgressBus].
- *
- * Couvre les 4 cas du test plan §7 du SCOPE M1 :
- * 1. `emit` met à jour la valeur courante du flow.
- * 2. `reset` remet le flow à `null`.
- * 3. Deux collectors observent la même séquence d'émissions.
- * 4. Un collector qui souscrit tardivement reçoit la dernière valeur (contrat StateFlow).
- */
-@OptIn(ExperimentalCoroutinesApi::class)
 class SyncProgressBusTest {
+    private fun progress(section: Section = Section.LIVE) = SyncProgress(section, 3, 10, "Sport", 42)
 
     @Test
-    fun emit_updatesFlowValue() = runTest {
+    fun finishingOneProvider_doesNotClearAnotherProvidersProgress() {
         val bus = SyncProgressBus()
-        val progress = SyncProgress(
-            section = Section.LIVE,
-            current = 3,
-            total = 10,
-            currentLabel = "Sport",
-            itemsIndexed = 42
-        )
+        val providerA = bus.begin(1L)
+        val providerB = bus.begin(2L)
+        bus.emit(providerA, progress())
+        val providerBProgress = progress(Section.VOD)
+        bus.emit(providerB, providerBProgress)
 
-        bus.emit(progress)
+        bus.finish(providerA)
 
-        assertThat(bus.flow.value).isEqualTo(progress)
+        assertThat(bus.progressByProvider.value).containsKey(2L)
+        assertThat(bus.progressByProvider.value[2L]?.progress).isEqualTo(providerBProgress)
+        assertThat(bus.aggregate.value?.activeProviderCount).isEqualTo(1)
     }
 
     @Test
-    fun reset_setsFlowToNull() = runTest {
+    fun staleSession_cannotClearOrPublishOverReplacementSession() {
         val bus = SyncProgressBus()
-        bus.emit(
-            SyncProgress(
-                section = Section.VOD,
-                current = 1,
-                total = 5,
-                currentLabel = "Movies",
-                itemsIndexed = 100
-            )
-        )
-        assertThat(bus.flow.value).isNotNull()
+        val stale = bus.begin(1L)
+        bus.emit(stale, progress())
+        val replacement = bus.begin(1L)
+        val replacementProgress = progress(Section.SERIES)
+        bus.emit(replacement, replacementProgress)
 
-        bus.reset()
+        bus.emit(stale, progress(Section.VOD))
+        bus.finish(stale)
 
-        assertThat(bus.flow.value).isNull()
+        assertThat(bus.progressByProvider.value[1L]?.session).isEqualTo(replacement)
+        assertThat(bus.progressByProvider.value[1L]?.progress).isEqualTo(replacementProgress)
+        assertThat(replacement.epoch).isGreaterThan(stale.epoch)
     }
 
     @Test
-    fun twoCollectors_receiveSameSequence() = runTest(UnconfinedTestDispatcher()) {
+    fun aggregate_isDerivedFromAllActiveProviders() {
         val bus = SyncProgressBus()
-        val first = mutableListOf<SyncProgress?>()
-        val second = mutableListOf<SyncProgress?>()
+        val providerA = bus.begin(1L)
+        val providerB = bus.begin(2L)
+        bus.emit(providerA, progress())
+        bus.emit(providerB, progress(Section.VOD))
 
-        val firstJob = launch { bus.flow.toList(first) }
-        val secondJob = launch { bus.flow.toList(second) }
-
-        val progressLive = SyncProgress(Section.LIVE, 1, 4, "Live", 10)
-        val progressVod = SyncProgress(Section.VOD, 2, 4, "VOD", 20)
-        bus.emit(progressLive)
-        bus.emit(progressVod)
-        bus.reset()
-
-        firstJob.cancel()
-        secondJob.cancel()
-
-        assertThat(first).containsExactly(null, progressLive, progressVod, null).inOrder()
-        assertThat(second).containsExactly(null, progressLive, progressVod, null).inOrder()
+        assertThat(bus.aggregate.value?.activeProviderCount).isEqualTo(2)
+        assertThat(bus.aggregate.value?.representative?.session).isEqualTo(providerB)
     }
 
     @Test
-    fun lateCollector_receivesReplayValue() = runTest(UnconfinedTestDispatcher()) {
+    fun cancellingOneProvider_finishesOnlyItsOwnSession() {
         val bus = SyncProgressBus()
-        val progress = SyncProgress(
-            section = Section.SERIES,
-            current = 7,
-            total = 12,
-            currentLabel = "Drama",
-            itemsIndexed = 350
-        )
+        val cancelledProvider = bus.begin(1L)
+        val activeProvider = bus.begin(2L)
+        val activeProgress = progress(Section.SERIES)
+        bus.emit(cancelledProvider, progress())
+        bus.emit(activeProvider, activeProgress)
 
-        bus.emit(progress)
+        try {
+            throw CancellationException("manual sync cancelled")
+        } catch (_: CancellationException) {
+            // Mirrors a sync entry point's cancellation path.
+        } finally {
+            bus.finish(cancelledProvider)
+        }
 
-        val received = mutableListOf<SyncProgress?>()
-        val job = launch { bus.flow.toList(received) }
-        job.cancel()
+        assertThat(bus.progressByProvider.value.keys).containsExactly(2L)
+        assertThat(bus.progressByProvider.value[2L]?.progress).isEqualTo(activeProgress)
+        assertThat(bus.aggregate.value?.representative?.session).isEqualTo(activeProvider)
+    }
 
-        assertThat(received).containsExactly(progress)
+    @Test
+    fun concurrentManualAndBackgroundSessions_remainProviderScoped() {
+        val bus = SyncProgressBus()
+        val executor = Executors.newFixedThreadPool(2)
+        val manualPublished = CountDownLatch(1)
+        val backgroundPublished = CountDownLatch(1)
+        val manualFinished = CountDownLatch(1)
+
+        try {
+            val manual = executor.submit {
+                val session = bus.begin(1L)
+                bus.emit(session, progress(Section.LIVE))
+                manualPublished.countDown()
+                check(backgroundPublished.await(5, TimeUnit.SECONDS))
+                bus.finish(session)
+                manualFinished.countDown()
+            }
+            val background = executor.submit(Callable {
+                check(manualPublished.await(5, TimeUnit.SECONDS))
+                val session = bus.begin(2L)
+                bus.emit(session, progress(Section.VOD))
+                backgroundPublished.countDown()
+                check(manualFinished.await(5, TimeUnit.SECONDS))
+                session
+            })
+
+            manual.get(5, TimeUnit.SECONDS)
+            val backgroundSession = background.get(5, TimeUnit.SECONDS)
+
+            assertThat(bus.progressByProvider.value.keys).containsExactly(2L)
+            assertThat(bus.progressByProvider.value[2L]?.session).isEqualTo(backgroundSession)
+            assertThat(bus.aggregate.value?.activeProviderCount).isEqualTo(1)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 }

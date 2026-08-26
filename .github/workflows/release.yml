@@ -70,8 +70,18 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Run unit tests and coverage
-        run: ./gradlew --console=plain testDebugUnitTest koverXmlReportCi koverHtmlReportCi
+      - name: Test CI helper scripts
+        shell: bash
+        run: |
+          for test_script in tools/tests/*-test.sh; do
+            bash "$test_script"
+          done
+
+      - name: Run unit tests, lint, and coverage
+        run: ./gradlew --console=plain testDebugUnitTest :app:lintDebug :data:lintDebug :player:lintDebug verifyLintBaseline koverXmlReportCi koverHtmlReportCi
+
+      - name: Compile instrumentation release gates
+        run: ./gradlew --console=plain :app:assembleDebugAndroidTest :data:assembleDebugAndroidTest
 
       - name: Build release APK
         run: ./gradlew --console=plain :app:assembleRelease
@@ -119,7 +129,7 @@ jobs:
 
   publish-release:
     if: github.event_name == 'workflow_dispatch'
-    needs: build
+    needs: [build, platform-smoke]
     runs-on: ubuntu-latest
 
     steps:
@@ -182,3 +192,9 @@ jobs:
             dist/StreamVault.apk
           make_latest: true
           generate_release_notes: false
+
+  platform-smoke:
+    needs: build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/platform-smoke.yml

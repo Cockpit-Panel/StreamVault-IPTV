@@ -61,7 +61,7 @@ class PlaybackCodecSelectorTest {
     }
 
     @Test
-    fun `auto keeps decoder reuse workaround when compatibility requests it`() {
+    fun `auto ignores decoder reuse workaround when compatibility profile requests it`() {
         val plan = buildPlaybackRendererPlan(
             requestedMode = DecoderMode.AUTO,
             activeDecoderMode = DecoderMode.AUTO,
@@ -70,16 +70,16 @@ class PlaybackCodecSelectorTest {
             useVideoRendererWorkaround = true
         )
 
-        assertThat(plan.renderPath).isEqualTo("decoder-reuse-workaround+platform-first-extension-audio-fallback")
-        assertThat(plan.useStockRenderersFactory).isFalse()
+        assertThat(plan.renderPath).isEqualTo("platform-first-extension-audio-fallback")
+        assertThat(plan.useStockRenderersFactory).isTrue()
         assertThat(plan.useAudioVideoSyncSink).isFalse()
-        assertThat(plan.useVideoRendererWorkaround).isTrue()
+        assertThat(plan.useVideoRendererWorkaround).isFalse()
         assertThat(plan.useManagedCodecSelector).isFalse()
         assertThat(plan.extensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.PLATFORM_FIRST)
     }
 
     @Test
-    fun `auto with av sync on can combine audio video offset sink and decoder reuse workaround`() {
+    fun `auto with av sync on ignores decoder reuse workaround`() {
         val plan = buildPlaybackRendererPlan(
             requestedMode = DecoderMode.AUTO,
             activeDecoderMode = DecoderMode.AUTO,
@@ -89,13 +89,32 @@ class PlaybackCodecSelectorTest {
         )
 
         assertThat(plan.renderPath).isEqualTo(
-            "av-sync-sink+decoder-reuse-workaround+platform-first-extension-audio-fallback"
+            "av-sync-sink+platform-first-extension-audio-fallback"
         )
         assertThat(plan.useStockRenderersFactory).isFalse()
         assertThat(plan.useAudioVideoSyncSink).isTrue()
-        assertThat(plan.useVideoRendererWorkaround).isTrue()
+        assertThat(plan.useVideoRendererWorkaround).isFalse()
         assertThat(plan.useManagedCodecSelector).isFalse()
         assertThat(plan.extensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.PLATFORM_FIRST)
+    }
+
+    @Test
+    fun `explicit video mode keeps decoder reuse workaround when compatibility profile requests it`() {
+        val plan = buildPlaybackRendererPlan(
+            requestedAudioMode = DecoderMode.AUTO,
+            activeAudioDecoderMode = DecoderMode.AUTO,
+            audioDecoderPolicy = ActiveDecoderPolicy.AUTO,
+            requestedVideoMode = DecoderMode.HARDWARE,
+            activeVideoDecoderMode = DecoderMode.HARDWARE,
+            videoDecoderPolicy = ActiveDecoderPolicy.HARDWARE_PREFERRED,
+            useAudioVideoSyncSink = false,
+            useVideoRendererWorkaround = true
+        )
+
+        assertThat(plan.useVideoRendererWorkaround).isTrue()
+        assertThat(plan.renderPath).isEqualTo(
+            "decoder-reuse-workaround+video-managed-codec-selector+platform-first-extension-audio-fallback"
+        )
     }
 
     @Test
@@ -156,6 +175,48 @@ class PlaybackCodecSelectorTest {
         assertThat(plan.useManagedCodecSelector).isTrue()
         assertThat(plan.useVideoRendererWorkaround).isTrue()
         assertThat(plan.renderPath).isEqualTo("decoder-reuse-workaround+managed-codec-selector")
+    }
+
+    @Test
+    fun `audio software with video hardware uses independent renderer preferences`() {
+        val plan = buildPlaybackRendererPlan(
+            requestedAudioMode = DecoderMode.SOFTWARE,
+            activeAudioDecoderMode = DecoderMode.SOFTWARE,
+            audioDecoderPolicy = ActiveDecoderPolicy.SOFTWARE_PREFERRED,
+            requestedVideoMode = DecoderMode.HARDWARE,
+            activeVideoDecoderMode = DecoderMode.HARDWARE,
+            videoDecoderPolicy = ActiveDecoderPolicy.HARDWARE_PREFERRED,
+            useAudioVideoSyncSink = false,
+            useVideoRendererWorkaround = false
+        )
+
+        assertThat(plan.useAudioManagedCodecSelector).isTrue()
+        assertThat(plan.useVideoManagedCodecSelector).isTrue()
+        assertThat(plan.audioExtensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.EXTENSIONS_FIRST)
+        assertThat(plan.videoExtensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.PLATFORM_FIRST)
+        assertThat(plan.renderPath).isEqualTo("managed-codec-selector")
+    }
+
+    @Test
+    fun `video software with audio auto keeps platform first audio fallback`() {
+        val plan = buildPlaybackRendererPlan(
+            requestedAudioMode = DecoderMode.AUTO,
+            activeAudioDecoderMode = DecoderMode.AUTO,
+            audioDecoderPolicy = ActiveDecoderPolicy.AUTO,
+            requestedVideoMode = DecoderMode.SOFTWARE,
+            activeVideoDecoderMode = DecoderMode.SOFTWARE,
+            videoDecoderPolicy = ActiveDecoderPolicy.SOFTWARE_PREFERRED,
+            useAudioVideoSyncSink = false,
+            useVideoRendererWorkaround = false
+        )
+
+        assertThat(plan.useAudioManagedCodecSelector).isFalse()
+        assertThat(plan.useVideoManagedCodecSelector).isTrue()
+        assertThat(plan.audioExtensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.PLATFORM_FIRST)
+        assertThat(plan.videoExtensionRendererMode).isEqualTo(PlaybackExtensionRendererMode.EXTENSIONS_FIRST)
+        assertThat(plan.renderPath).isEqualTo(
+            "video-managed-codec-selector+platform-first-extension-audio-fallback"
+        )
     }
 
     private fun compatibilityRecord(

@@ -9,7 +9,7 @@ import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Favorite
 import com.streamvault.domain.model.PlaybackHistory
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.VirtualCategoryIds
 import com.streamvault.domain.model.VirtualGroup
@@ -634,6 +634,7 @@ class FavoritesViewModel @Inject constructor(
                             )
                         }
 
+                        ContentType.VOD,
                         ContentType.SERIES_EPISODE -> null
                     }
                 }
@@ -691,7 +692,8 @@ class FavoritesViewModel @Inject constructor(
                             history = entry,
                             title = entry.title,
                             subtitle = when (entry.contentType) {
-                                ContentType.MOVIE -> appContext.getString(R.string.favorites_content_type_movie)
+                                ContentType.MOVIE,
+                                ContentType.VOD -> appContext.getString(R.string.nav_vod)
                                 ContentType.SERIES -> appContext.getString(R.string.favorites_content_type_series)
                                 ContentType.SERIES_EPISODE -> buildString {
                                     val s = entry.seasonNumber
@@ -743,6 +745,7 @@ class FavoritesViewModel @Inject constructor(
         get() = when (this) {
             ContentType.LIVE -> "Live"
             ContentType.MOVIE -> "Movie"
+            ContentType.VOD -> "VOD"
             ContentType.SERIES -> "Series"
             ContentType.SERIES_EPISODE -> "Episode"
         }

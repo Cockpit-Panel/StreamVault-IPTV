@@ -1,7 +1,7 @@
 package com.streamvault.domain.usecase
 
 import com.streamvault.domain.manager.ProviderSyncStateReader
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderEpgSyncMode
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.Result

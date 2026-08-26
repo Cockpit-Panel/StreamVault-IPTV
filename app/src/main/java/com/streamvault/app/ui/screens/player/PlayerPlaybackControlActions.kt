@@ -50,7 +50,7 @@ fun PlayerViewModel.toggleMute() {
     val muted = playerEngine.isMuted.value
     mutePersistJob?.cancel()
     mutePersistJob = viewModelScope.launch {
-        preferencesRepository.setPlayerMuted(muted)
+        playerPreferencesCoordinator.setPlayerMuted(muted)
     }
 }
 
@@ -72,7 +72,7 @@ fun PlayerViewModel.toggleAspectRatio() {
 
     if (currentContentId != -1L) {
         viewModelScope.launch {
-            preferencesRepository.setAspectRatioForChannel(currentContentId, nextRatio.name)
+            playerPreferencesCoordinator.setAspectRatioForChannel(currentContentId, nextRatio.name)
         }
     }
 }

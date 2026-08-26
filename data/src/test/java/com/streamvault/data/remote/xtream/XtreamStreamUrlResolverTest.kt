@@ -4,7 +4,21 @@ import com.google.common.truth.Truth.assertThat
 import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.entity.ProviderEntity
 import com.streamvault.data.preferences.PreferencesRepository
+import com.streamvault.data.mapper.toDomain
+import com.streamvault.data.mapper.toEntity
+import com.streamvault.data.provider.DefaultProviderCapabilityRegistry
+import com.streamvault.data.provider.JellyfinCapabilityFactory
+import com.streamvault.data.provider.M3uCapabilityFactory
+import com.streamvault.data.provider.ProviderCapabilityResolver
+import com.streamvault.data.provider.StalkerCapabilityFactory
+import com.streamvault.data.provider.StalkerPlaybackCapabilityCache
+import com.streamvault.data.provider.TypedProviderClientFactory
+import com.streamvault.data.provider.XtreamCapabilityFactory
+import com.streamvault.data.provider.toProviderSnapshot
+import com.streamvault.data.remote.jellyfin.JellyfinProvider
 import com.streamvault.data.remote.stalker.StalkerApiService
+import com.streamvault.data.remote.stalker.StalkerPortalStateStore
+import com.streamvault.data.remote.stalker.StalkerRemoteIdentityResolver
 import com.streamvault.data.remote.stalker.StalkerCommandVariant
 import com.streamvault.data.remote.stalker.StalkerCategoryRecord
 import com.streamvault.data.remote.stalker.StalkerDeviceProfile
@@ -21,11 +35,17 @@ import com.streamvault.data.remote.stalker.StalkerSeriesDetails
 import com.streamvault.data.remote.stalker.StalkerSession
 import com.streamvault.data.remote.stalker.StalkerStreamKind
 import com.streamvault.data.remote.stalker.StalkerUrlFactory
+import com.streamvault.data.remote.xtream.PlaybackObservationSink
 import com.streamvault.domain.model.ContentType
 import com.streamvault.data.security.CredentialCrypto
 import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.LegacyProvider as Provider
+import com.streamvault.domain.model.StalkerPortalLearning
+import com.streamvault.domain.provider.PlaybackObservation
+import com.streamvault.domain.provider.StalkerPlaybackObservation
+import com.streamvault.domain.repository.ProviderSnapshotRepository
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
@@ -55,7 +75,7 @@ class XtreamStreamUrlResolverTest {
         preferencesRepository = preferencesRepository(liveStreamFormatMode)
     )
 
-    private fun xtreamProvider(): ProviderEntity = ProviderEntity(
+    private fun xtreamProvider(): Provider = Provider(
         id = 9,
         name = "Xtream",
         type = ProviderType.XTREAM_CODES,
@@ -180,7 +200,7 @@ class XtreamStreamUrlResolverTest {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 9,
                     name = "Xtream",
                     type = ProviderType.XTREAM_CODES,
@@ -213,7 +233,7 @@ class XtreamStreamUrlResolverTest {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 9,
                     name = "Xtream",
                     type = ProviderType.XTREAM_CODES,
@@ -250,7 +270,7 @@ class XtreamStreamUrlResolverTest {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 9,
                     name = "Xtream",
                     type = ProviderType.XTREAM_CODES,
@@ -283,7 +303,7 @@ class XtreamStreamUrlResolverTest {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 9,
                     name = "Xtream",
                     type = ProviderType.XTREAM_CODES,
@@ -315,7 +335,7 @@ class XtreamStreamUrlResolverTest {
         runBlocking {
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 21,
                     name = "Playlist",
                     type = ProviderType.M3U,
@@ -376,7 +396,7 @@ class XtreamStreamUrlResolverTest {
         val fakeStalkerApiService = FakeStalkerApiService()
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -405,13 +425,13 @@ class XtreamStreamUrlResolverTest {
         assertThat(firstResolved?.url).isEqualTo("http://edge.example.com/live/77.m3u8")
         assertThat(firstResolved?.expirationTime).isNull()
         assertThat(firstResolved?.headers?.get("Referer")).isEqualTo("https://portal.example.com/c/")
-        assertThat(firstResolved?.headers?.get("Cookie")).contains("mac=00:1A:79:12:34:56")
+        assertThat(firstResolved?.headers?.get("Cookie")).contains("mac=00%3A1A%3A79%3A12%3A34%3A56")
         assertThat(firstResolved?.headers?.get("Cookie")).contains("stb_lang=en")
         assertThat(firstResolved?.headers?.get("Cookie")).contains("timezone=UTC")
-        assertThat(firstResolved?.headers?.get("Cookie")).contains("sn=0001A79123456")
-        assertThat(firstResolved?.headers?.get("Cookie")).contains("device_id=")
-        assertThat(firstResolved?.headers?.get("Cookie")).contains("device_id2=")
-        assertThat(firstResolved?.headers?.get("Cookie")).contains("signature=")
+        assertThat(firstResolved?.headers?.get("Cookie")).doesNotContain("sn=")
+        assertThat(firstResolved?.headers?.get("Cookie")).doesNotContain("device_id=")
+        assertThat(firstResolved?.headers?.get("Cookie")).doesNotContain("device_id2=")
+        assertThat(firstResolved?.headers?.get("Cookie")).doesNotContain("signature=")
         assertThat(firstResolved?.headers?.get("Authorization")).isEqualTo("Bearer token")
         assertThat(firstResolved?.headers?.get("X-User-Agent")).isEqualTo("Model: MAG250; Link: Ethernet")
         assertThat(firstResolved?.userAgent).contains("MAG250 stbapp")
@@ -422,12 +442,51 @@ class XtreamStreamUrlResolverTest {
     }
 
     @Test
+    fun resolveWithMetadata_applies_stalker_custom_headers_through_cached_provider() {
+        runBlocking {
+        val fakeStalkerApiService = FakeStalkerApiService()
+        val resolver = XtreamStreamUrlResolver(
+            providerDao = FakeProviderDao(
+                Provider(
+                    id = 14,
+                    name = "Stalker",
+                    type = ProviderType.STALKER_PORTAL,
+                    serverUrl = "https://portal.example.com",
+                    httpHeaders = "X-Test: enabled | Referer: https://custom.example.com/ref",
+                    stalkerMacAddress = "00:1A:79:12:34:56",
+                    stalkerDeviceProfile = "MAG250",
+                    stalkerDeviceTimezone = "UTC",
+                    stalkerDeviceLocale = "en"
+                )
+            ),
+            credentialCrypto = credentialCrypto,
+            stalkerApiService = fakeStalkerApiService,
+            preferencesRepository = preferencesRepository()
+        )
+        val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
+            providerId = 14,
+            kind = StalkerStreamKind.LIVE,
+            itemId = 77,
+            cmd = "ffrt http://edge.example.com/live/77.m3u8",
+            containerExtension = "m3u8"
+        )
+
+        val resolved = resolver.resolveWithMetadata(internalUrl)
+
+        assertThat(resolved?.headers).containsEntry("X-Test", "enabled")
+        assertThat(resolved?.headers).containsEntry("Referer", "https://custom.example.com/ref")
+        assertThat(fakeStalkerApiService.lastAuthenticateProfile?.httpHeaders)
+            .contains("X-Test: enabled")
+        }
+    }
+
+    @Test
     fun resolveWithMetadata_uses_direct_stalker_absolute_cmd_without_create_link() {
         runBlocking {
         val fakeStalkerApiService = FakeStalkerApiService()
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -470,7 +529,7 @@ class XtreamStreamUrlResolverTest {
         }
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -514,7 +573,7 @@ class XtreamStreamUrlResolverTest {
         }
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -553,7 +612,7 @@ class XtreamStreamUrlResolverTest {
         val fakeStalkerApiService = FakeStalkerApiService()
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -608,7 +667,7 @@ class XtreamStreamUrlResolverTest {
         val fakeStalkerApiService = FakeStalkerApiService()
         val resolver = XtreamStreamUrlResolver(
             providerDao = FakeProviderDao(
-                ProviderEntity(
+                Provider(
                     id = 14,
                     name = "Stalker",
                     type = ProviderType.STALKER_PORTAL,
@@ -643,16 +702,69 @@ class XtreamStreamUrlResolverTest {
         }
     }
 
+    @Test
+    fun resolveAndCommitMetadata_commits_learned_playback_observations() {
+        runBlocking {
+            val sink = RecordingPlaybackObservationSink()
+            val resolver = XtreamStreamUrlResolver(
+                providerDao = FakeProviderDao(
+                    Provider(
+                        id = 14,
+                        name = "Stalker",
+                        type = ProviderType.STALKER_PORTAL,
+                        serverUrl = "https://portal.example.com",
+                        stalkerMacAddress = "00:1A:79:12:34:56",
+                        stalkerDeviceProfile = "MAG250",
+                        stalkerDeviceTimezone = "UTC",
+                        stalkerDeviceLocale = "en"
+                    )
+                ),
+                credentialCrypto = credentialCrypto,
+                stalkerApiService = FakeStalkerApiService(),
+                preferencesRepository = preferencesRepository(),
+                observationSink = sink
+            )
+            val internalUrl = StalkerUrlFactory.buildInternalStreamUrl(
+                providerId = 14,
+                kind = StalkerStreamKind.LIVE,
+                itemId = 77,
+                cmd = "http://edge.example.com/live/77.m3u8",
+                containerExtension = "m3u8"
+            )
+
+            resolver.resolveAndCommitMetadata(internalUrl)
+
+            assertThat(sink.observations).hasSize(1)
+            assertThat(sink.observations.single()).isInstanceOf(StalkerPlaybackObservation::class.java)
+        }
+    }
+
+    @Test
+    fun resolveAndCommitMetadata_requires_an_observation_sink() {
+        runBlocking {
+            val resolver = xtreamResolver()
+
+            val error = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+                runBlocking { resolver.resolveAndCommitMetadata("https://edge.example.com/live.m3u8") }
+            }
+
+            assertThat(error).hasMessageThat().contains("observation coordinator")
+        }
+    }
+
     private class FakeProviderDao(
-        private val provider: ProviderEntity?
-    ) : ProviderDao() {
+        override val fixtureProvider: Provider?
+    ) : ProviderDao(), ProviderFixtureSource {
+        private val provider = fixtureProvider?.toEntity()
         override fun getAll() = flowOf(listOfNotNull(provider))
         override suspend fun getAllSync(): List<ProviderEntity> = listOfNotNull(provider)
         override fun getActive() = flowOf(provider)
-        override suspend fun getByUrlAndUser(serverUrl: String, username: String, stalkerMacAddress: String): ProviderEntity? = null
         override suspend fun getById(id: Long): ProviderEntity? = provider?.takeIf { it.id == id }
+        override fun getByIdSync(id: Long): ProviderEntity? = provider?.takeIf { it.id == id }
         override suspend fun getByIds(ids: List<Long>): List<ProviderEntity> =
             listOfNotNull(provider).filter { it.id in ids }
+        override fun getByTypeSync(type: ProviderType): List<ProviderEntity> =
+            listOfNotNull(provider).filter { it.type == type }
         override suspend fun insertDirect(provider: ProviderEntity): Long = provider.id
         override suspend fun updateDirect(provider: ProviderEntity) = Unit
         override suspend fun insert(provider: ProviderEntity): Long = provider.id
@@ -661,17 +773,18 @@ class XtreamStreamUrlResolverTest {
         override suspend fun deactivateAll() = Unit
         override suspend fun activate(id: Long) = Unit
         override suspend fun updateSyncTime(id: Long, timestamp: Long) = Unit
-        override suspend fun updateEpgUrl(id: Long, epgUrl: String) = Unit
     }
 
     private class FakeStalkerApiService : StalkerApiService {
         var authenticateCalls: Int = 0
         var createLinkCalls: Int = 0
         var lastCreateLinkSeriesNumber: Int? = null
+        var lastAuthenticateProfile: StalkerDeviceProfile? = null
         var createLinkResponse: String = "http://edge.example.com/live/77.m3u8?exp=1774017000"
 
         override suspend fun authenticate(profile: StalkerDeviceProfile): Result<Pair<StalkerSession, StalkerProviderProfile>> {
             authenticateCalls += 1
+            lastAuthenticateProfile = profile
             return Result.success(
                 StalkerSession(
                     loadUrl = "https://portal.example.com/server/load.php",
@@ -797,4 +910,65 @@ class XtreamStreamUrlResolverTest {
             return Result.success(createLinkResponse)
         }
     }
+}
+
+@Suppress("FunctionName")
+private fun XtreamStreamUrlResolver(
+    providerDao: ProviderDao,
+    credentialCrypto: CredentialCrypto,
+    stalkerApiService: StalkerApiService,
+    preferencesRepository: PreferencesRepository,
+    observationSink: PlaybackObservationSink? = null
+): XtreamStreamUrlResolver {
+    val provider = requireNotNull((providerDao as? ProviderFixtureSource)?.fixtureProvider)
+    val snapshots = object : ProviderSnapshotRepository {
+        override suspend fun getSnapshot(providerId: Long) =
+            provider.takeIf { it.id == providerId }?.toProviderSnapshot()
+
+        override suspend fun compareAndSetStalkerLearning(
+            providerId: Long,
+            learning: StalkerPortalLearning
+        ): Boolean = false
+
+        override suspend fun updateCatalogLayout(
+            providerId: Long,
+            layout: com.streamvault.domain.model.CatalogLayout,
+            detectionVersion: Int
+        ) = Unit
+    }
+    val clients = TypedProviderClientFactory(
+        xtreamApiService = mock(),
+        stalkerApiService = stalkerApiService,
+        jellyfinProvider = mock<JellyfinProvider>(),
+        preferencesRepository = preferencesRepository,
+        stalkerRemoteIdentityResolver = mock<StalkerRemoteIdentityResolver>(),
+        stalkerPortalStateStore = mock<StalkerPortalStateStore>()
+    )
+    val stalkerPlaybackCache = StalkerPlaybackCapabilityCache(clients)
+    val registry = DefaultProviderCapabilityRegistry(
+        listOf(
+            XtreamCapabilityFactory(clients),
+            StalkerCapabilityFactory(clients, stalkerPlaybackCache),
+            M3uCapabilityFactory(
+                categoryDao = mock(),
+                channelDao = mock(),
+                movieDao = mock(),
+                programDao = mock()
+            ),
+            JellyfinCapabilityFactory(clients)
+        )
+    )
+    return XtreamStreamUrlResolver(ProviderCapabilityResolver(snapshots, registry), observationSink)
+}
+
+private class RecordingPlaybackObservationSink : PlaybackObservationSink {
+    val observations = mutableListOf<PlaybackObservation>()
+
+    override suspend fun persist(observations: List<PlaybackObservation>) {
+        this.observations += observations
+    }
+}
+
+private interface ProviderFixtureSource {
+    val fixtureProvider: Provider?
 }

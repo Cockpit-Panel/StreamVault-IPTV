@@ -56,6 +56,8 @@ import com.streamvault.app.plugins.InstalledStreamVaultPlugin
 import com.streamvault.app.plugins.PluginConfigurationAction
 import com.streamvault.app.plugins.PluginConfigurationField
 import com.streamvault.app.plugins.PluginConfigurationSection
+import com.streamvault.app.plugins.owner
+import com.streamvault.app.plugins.toBundleSafeKey
 import com.streamvault.app.ui.components.dialogs.PremiumDialog
 import com.streamvault.app.ui.components.dialogs.PremiumDialogFooterButton
 import com.streamvault.app.ui.components.shell.AppNavigationChrome
@@ -149,6 +151,14 @@ fun PluginsScreen(
                     )
                 }
 
+                if (uiState.providerSources.isNotEmpty()) {
+                    Text(
+                        text = "${uiState.providerSources.size} plugin provider source(s) available",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AppColors.TextSecondary
+                    )
+                }
+
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -162,10 +172,10 @@ fun PluginsScreen(
                             )
                         }
                     }
-                    items(uiState.plugins, key = { it.manifest.id }) { plugin ->
+                    items(uiState.plugins, key = { it.owner.toBundleSafeKey() }) { plugin ->
                         PluginCard(
                             plugin = plugin,
-                            busy = uiState.activePluginId == plugin.manifest.id,
+                            busy = uiState.activePluginOwner == plugin.owner,
                             onEnabledChange = { enabled -> viewModel.setPluginEnabled(plugin, enabled) },
                             onOpenConfiguration = { viewModel.openPluginConfiguration(plugin) }
                         )

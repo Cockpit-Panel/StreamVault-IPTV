@@ -100,19 +100,22 @@ class GetContinueWatching @Inject constructor(
         ContentType.SERIES,
         ContentType.SERIES_EPISODE -> "series:${entry.seriesId?.takeIf { it > 0L } ?: entry.contentId}"
         ContentType.LIVE -> "live:${entry.contentId}"
+        ContentType.VOD -> "vod:${entry.contentId}"
     }
 
     private fun PlaybackHistory.isResumeEligible(): Boolean = when (contentType) {
         ContentType.MOVIE,
         ContentType.SERIES_EPISODE -> resumePositionMs > 0L
         ContentType.SERIES -> true
-        ContentType.LIVE -> false
+        ContentType.LIVE,
+        ContentType.VOD -> false
     }
 
     private fun PlaybackHistory.isCompleted(): Boolean = when (contentType) {
         ContentType.MOVIE,
         ContentType.SERIES_EPISODE -> isPlaybackComplete(resumePositionMs, totalDurationMs)
         ContentType.SERIES,
-        ContentType.LIVE -> false
+        ContentType.LIVE,
+        ContentType.VOD -> false
     }
 }

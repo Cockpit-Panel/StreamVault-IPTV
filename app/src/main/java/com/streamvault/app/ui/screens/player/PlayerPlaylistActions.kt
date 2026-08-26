@@ -2,7 +2,6 @@
 
 package com.streamvault.app.ui.screens.player
 
-import androidx.lifecycle.viewModelScope
 import com.streamvault.app.ui.model.orderedByRequestedRawIds
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.Channel
@@ -24,9 +23,9 @@ internal fun PlayerViewModel.observeCombinedLivePlaylist(
     categoryId: Long
 ): Flow<List<Channel>> = when {
     categoryId == ChannelRepository.ALL_CHANNELS_ID -> {
-        combinedM3uRepository.getCombinedCategories(profileId).flatMapLatest { combinedCategories ->
+        playerPlaylistCoordinator.getCombinedCategories(profileId).flatMapLatest { combinedCategories ->
             combinedCategoriesById = combinedCategories.associateBy { it.category.id }
-            val flows = combinedCategories.map { combinedM3uRepository.getCombinedChannels(profileId, it) }
+            val flows = combinedCategories.map { playerPlaylistCoordinator.getCombinedChannels(profileId, it) }
             if (flows.isEmpty()) {
                 flowOf(emptyList())
             } else {
@@ -51,7 +50,7 @@ internal fun PlayerViewModel.observeCombinedLivePlaylist(
     }
 
     categoryId < 0L -> {
-        favoriteRepository.getFavoritesByGroup(-categoryId)
+        playerPlaylistCoordinator.getFavoritesByGroup(-categoryId)
             .map { favorites ->
                 favorites
                     .sortedBy { it.position }
@@ -66,13 +65,13 @@ internal fun PlayerViewModel.observeCombinedLivePlaylist(
     }
 
     else -> {
-        combinedM3uRepository.getCombinedCategories(profileId).flatMapLatest { combinedCategories ->
+        playerPlaylistCoordinator.getCombinedCategories(profileId).flatMapLatest { combinedCategories ->
             combinedCategoriesById = combinedCategories.associateBy { it.category.id }
             val combinedCategory = combinedCategoriesById[categoryId]
             if (combinedCategory == null) {
                 flowOf(emptyList())
             } else {
-                combinedM3uRepository.getCombinedChannels(profileId, combinedCategory)
+                playerPlaylistCoordinator.getCombinedChannels(profileId, combinedCategory)
                     .map(::applyCombinedSourceProviderFilter)
             }
         }
@@ -86,12 +85,12 @@ internal fun PlayerViewModel.observeRecentChannels() {
         return
     }
 
-    recentChannelsJob = viewModelScope.launch {
+    recentChannelsJob = playbackSessionScope()?.launch {
         val recentFlow = currentCombinedProfileId?.let { profileId ->
             combinedProviderIdsFlow(profileId)
                 .flatMapLatest { providerIds -> observeRecentLiveIds(effectiveCombinedProviderIds(providerIds), 12) }
                 .flatMapLatest { ids -> loadLiveChannelsByOrderedIds(ids, currentCombinedSourceFilterProviderId) }
-        } ?: playbackHistoryRepository.getRecentlyWatchedByProvider(currentProviderId, limit = 12)
+        } ?: playbackHistoryCoordinator.recentlyWatchedByProvider(currentProviderId, limit = 12)
             .map { history ->
                 history.asSequence()
                     .filter { it.contentType == ContentType.LIVE }
@@ -102,7 +101,7 @@ internal fun PlayerViewModel.observeRecentChannels() {
             }
             .flatMapLatest { ids -> loadLiveChannelsByOrderedIds(ids) }
 
-        combine(recentFlow, preferencesRepository.liveChannelNumberingMode) { channels, numberingMode ->
+        combine(recentFlow, playerPreferencesCoordinator.liveChannelNumberingMode) { channels, numberingMode ->
             numberingMode to channels
         }.collect { (numberingMode, channels) ->
             channelNumberingMode = numberingMode
@@ -127,22 +126,22 @@ internal fun PlayerViewModel.observeLastVisitedCategory() {
         return
     }
 
-    lastVisitedCategoryJob = viewModelScope.launch {
+    lastVisitedCategoryJob = playbackSessionScope()?.launch {
         val categoriesFlow = currentCombinedProfileId?.let { profileId ->
             combinedProviderIdsFlow(profileId).flatMapLatest { providerIds ->
                 combine(
-                    combinedM3uRepository.getCombinedCategories(profileId),
-                    getCustomCategories(providerIds, ContentType.LIVE)
+                    playerPlaylistCoordinator.getCombinedCategories(profileId),
+                    playerPlaylistCoordinator.getCustomCategories(providerIds)
                 ) { combinedCategories, customCategories ->
                     combinedCategoriesById = combinedCategories.associateBy { it.category.id }
                     buildCombinedLiveCategories(combinedCategories, customCategories) to null
                 }
             }
         } ?: combine(
-            channelRepository.getCategories(currentProviderId),
-            getCustomCategories(currentProviderId, ContentType.LIVE),
-            preferencesRepository.getLastLiveCategoryId(currentProviderId),
-            preferencesRepository.getHiddenCategoryIds(currentProviderId, ContentType.LIVE)
+            playerPlaylistCoordinator.getCategories(currentProviderId),
+            playerPlaylistCoordinator.getCustomCategories(listOf(currentProviderId)),
+            playerPreferencesCoordinator.getLastLiveCategoryId(currentProviderId),
+            playerPreferencesCoordinator.getHiddenCategoryIds(currentProviderId, ContentType.LIVE)
         ) { providerCategories, customCategories, lastVisitedCategoryId, hiddenCategoryIds ->
             val visibleProviderCategories = providerCategories.filter { category ->
                 category.id == ChannelRepository.ALL_CHANNELS_ID || category.id !in hiddenCategoryIds
@@ -197,12 +196,12 @@ internal fun PlayerViewModel.loadPlaylist(
     initialChannelId: Long
 ) {
     playlistJob?.cancel()
-    playlistJob = viewModelScope.launch {
+    playlistJob = playbackSessionScope()?.launch {
         val flows = currentCombinedProfileId?.let { profileId ->
             observeCombinedLivePlaylist(profileId, categoryId)
         } ?: if (isVirtual) {
             if (categoryId == VirtualCategoryIds.RECENT) {
-                playbackHistoryRepository.getRecentlyWatchedByProvider(providerId, limit = 24)
+                playbackHistoryCoordinator.recentlyWatchedByProvider(providerId, limit = 24)
                     .map { history ->
                         history.asSequence()
                             .filter { it.contentType == ContentType.LIVE }
@@ -213,35 +212,35 @@ internal fun PlayerViewModel.loadPlaylist(
                     }
                     .flatMapLatest { ids ->
                         if (ids.isEmpty()) flowOf(emptyList())
-                        else channelRepository.getChannelsByIds(ids).map { unsorted ->
+                        else playerPlaylistCoordinator.getChannelsByIds(ids).map { unsorted ->
                             unsorted.orderedByRequestedRawIds(ids)
                         }
                     }
             } else if (categoryId == VirtualCategoryIds.FAVORITES) {
-                favoriteRepository.getFavorites(currentProviderId, ContentType.LIVE)
+                playerPlaylistCoordinator.getFavorites(currentProviderId)
                     .map { favorites -> favorites.sortedBy { it.position }.map { it.contentId } }
                     .flatMapLatest { ids ->
                         if (ids.isEmpty()) flowOf(emptyList())
-                        else channelRepository.getChannelsByIds(ids).map { unsorted ->
+                        else playerPlaylistCoordinator.getChannelsByIds(ids).map { unsorted ->
                             unsorted.orderedByRequestedRawIds(ids)
                         }
                     }
             } else {
                 val groupId = if (categoryId < 0) -categoryId else categoryId
-                favoriteRepository.getFavoritesByGroup(groupId)
+                playerPlaylistCoordinator.getFavoritesByGroup(groupId)
                     .map { favorites -> favorites.sortedBy { it.position }.map { it.contentId } }
                     .flatMapLatest { ids ->
                         if (ids.isEmpty()) flowOf(emptyList())
-                        else channelRepository.getChannelsByIds(ids).map { unsorted ->
+                        else playerPlaylistCoordinator.getChannelsByIds(ids).map { unsorted ->
                             unsorted.orderedByRequestedRawIds(ids)
                         }
                     }
             }
         } else {
-            channelRepository.getChannelsByNumber(providerId, categoryId)
+            playerPlaylistCoordinator.getChannelsByNumber(providerId, categoryId)
         }
 
-        combine(flows, preferencesRepository.liveChannelNumberingMode) { channels, numberingMode ->
+        combine(flows, playerPreferencesCoordinator.liveChannelNumberingMode) { channels, numberingMode ->
             val displayedChannels = when (numberingMode) {
                 ChannelNumberingMode.GROUP -> channels.mapIndexed { index, channel ->
                     channel.copy(number = index + 1)
@@ -289,7 +288,7 @@ private fun PlayerViewModel.loadLiveChannelsByOrderedIds(
 ): Flow<List<Channel>> = if (ids.isEmpty()) {
     flowOf(emptyList())
 } else {
-    channelRepository.getChannelsByIds(ids).map { unsorted ->
+    playerPlaylistCoordinator.getChannelsByIds(ids).map { unsorted ->
         val filtered = providerId?.let { requiredProviderId ->
             unsorted.filter { it.providerId == requiredProviderId }
         } ?: unsorted
@@ -298,7 +297,7 @@ private fun PlayerViewModel.loadLiveChannelsByOrderedIds(
 }
 
 private fun PlayerViewModel.combinedProviderIdsFlow(profileId: Long): Flow<List<Long>> = flow {
-    emit(combinedM3uRepository.getProfile(profileId)?.members.orEmpty())
+    emit(playerPlaylistCoordinator.getProfile(profileId)?.members.orEmpty())
 }.map { members ->
     currentCombinedProfileMembers = members
     members.filter { it.enabled }.map { it.providerId }
@@ -311,13 +310,13 @@ private fun PlayerViewModel.effectiveCombinedProviderIds(providerIds: List<Long>
 
 private fun PlayerViewModel.observeLiveFavorites(providerIds: List<Long>): Flow<List<Favorite>> = when (providerIds.size) {
     0 -> flowOf(emptyList())
-    1 -> favoriteRepository.getFavorites(providerIds.first(), ContentType.LIVE)
-    else -> favoriteRepository.getFavorites(providerIds, ContentType.LIVE)
+    1 -> playerPlaylistCoordinator.getFavorites(providerIds.first())
+    else -> playerPlaylistCoordinator.getFavorites(providerIds)
 }
 
 private fun PlayerViewModel.observeRecentLiveIds(providerIds: List<Long>, limit: Int): Flow<List<Long>> = when (providerIds.size) {
     0 -> flowOf(emptyList())
-    1 -> playbackHistoryRepository.getRecentlyWatchedByProvider(providerIds.first(), limit)
+    1 -> playbackHistoryCoordinator.recentlyWatchedByProvider(providerIds.first(), limit)
         .map { history ->
             history.asSequence()
                 .filter { it.contentType == ContentType.LIVE }
@@ -329,7 +328,7 @@ private fun PlayerViewModel.observeRecentLiveIds(providerIds: List<Long>, limit:
         }
 
     else -> combine(providerIds.map { providerId ->
-        playbackHistoryRepository.getRecentlyWatchedByProvider(providerId, limit)
+        playbackHistoryCoordinator.recentlyWatchedByProvider(providerId, limit)
     }) { histories ->
         histories.toList()
             .flatMap { it }

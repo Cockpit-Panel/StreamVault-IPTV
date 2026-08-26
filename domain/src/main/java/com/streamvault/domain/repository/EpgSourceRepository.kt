@@ -7,6 +7,7 @@ import com.streamvault.domain.model.EpgSource
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.model.ProviderEpgSourceAssignment
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.XmltvTimezonePolicy
 import kotlinx.coroutines.flow.Flow
 
 interface EpgSourceRepository {
@@ -17,7 +18,12 @@ interface EpgSourceRepository {
 
     suspend fun getSourceById(id: Long): EpgSource?
 
-    suspend fun addSource(name: String, url: String): Result<EpgSource>
+    suspend fun addSource(
+        name: String,
+        url: String,
+        timezonePolicy: XmltvTimezonePolicy = XmltvTimezonePolicy.REQUIRE_OFFSET,
+        timezoneId: String? = null
+    ): Result<EpgSource>
 
     suspend fun updateSource(source: EpgSource): Result<Unit>
 

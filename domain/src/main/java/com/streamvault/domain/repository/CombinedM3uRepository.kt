@@ -6,7 +6,7 @@ import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.CombinedCategory
 import com.streamvault.domain.model.CombinedM3uProfile
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.Result
 import kotlinx.coroutines.flow.Flow
 

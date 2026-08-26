@@ -57,8 +57,10 @@ object ProviderInputSanitizer {
     }
 
     suspend fun resolveUrlProtocol(url: String): String {
-        val protocolMatch = URL_PROTOCOL_REGEX.find(url)
-        if (protocolMatch != null) return url
+        // If the input already carries any scheme (http, https, file, content, …)
+        // respect it — only schemeless input needs protocol probing. In particular
+        // this keeps file:// and content:// playlist/EPG URLs intact.
+        if (URL_SCHEME_REGEX.containsMatchIn(url)) return url
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val httpsUrl = "https://$url"
             try {
@@ -71,12 +73,21 @@ object ProviderInputSanitizer {
                 connection.connect()
                 val responseCode = connection.responseCode
                 connection.disconnect()
-                if (responseCode in 200..499) httpsUrl else "http://$url"
+                if (httpsProbeAccepts(responseCode)) httpsUrl else "http://$url"
             } catch (_: Exception) {
                 "http://$url"
             }
         }
     }
+
+    /**
+     * Decides whether an HTTPS probe response proves the endpoint genuinely
+     * serves content over HTTPS. Only 2xx qualifies: a 3xx redirect usually
+     * points elsewhere (frequently back to plain HTTP), and 4xx/5xx at the
+     * probe target are treated as "not usable over HTTPS", so we fall back to
+     * HTTP — the common case for self-hosted / third-party IPTV endpoints.
+     */
+    internal fun httpsProbeAccepts(responseCode: Int): Boolean = responseCode in 200..299
 
     fun normalizeUsername(input: String): String = sanitizeSingleLine(input, MAX_USERNAME_LENGTH).trim()
 
@@ -171,4 +182,5 @@ object ProviderInputSanitizer {
     private val HEADER_SEPARATOR_REGEX = Regex("\\s*\\|\\s*")
     private val MAC_ADDRESS_REGEX = Regex("^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
     private val URL_PROTOCOL_REGEX = Regex("^https?://", RegexOption.IGNORE_CASE)
+    private val URL_SCHEME_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://")
 }

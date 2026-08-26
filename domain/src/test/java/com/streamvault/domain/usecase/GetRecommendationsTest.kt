@@ -3,6 +3,7 @@ package com.streamvault.domain.usecase
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.LibraryBrowseQuery
+import com.streamvault.domain.model.MovieDetailPresentationHint
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.PagedResult
 import com.streamvault.domain.model.Result
@@ -116,8 +117,11 @@ class GetRecommendationsTest {
         override fun browseMovies(query: LibraryBrowseQuery): Flow<PagedResult<Movie>> = unsupported()
         override fun searchMovies(providerId: Long, query: String): Flow<List<Movie>> = unsupported()
         override suspend fun getMovie(movieId: Long): Movie? = error("Not used in test")
-        override suspend fun getMovieVariants(movieId: Long): List<Movie> = emptyList()
-        override suspend fun getMovieDetails(providerId: Long, movieId: Long): Result<Movie> = error("Not used in test")
+        override suspend fun getMovieDetails(
+            providerId: Long,
+            movieId: Long,
+            knownPresentation: MovieDetailPresentationHint?
+        ): Result<Movie> = error("Not used in test")
         override suspend fun getStreamInfo(movie: Movie): Result<StreamInfo> = error("Not used in test")
         override suspend fun refreshMovies(providerId: Long): Result<Unit> = error("Not used in test")
 

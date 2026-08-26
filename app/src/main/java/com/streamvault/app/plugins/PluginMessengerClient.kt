@@ -17,9 +17,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Singleton
 class PluginMessengerClient @Inject constructor(
@@ -61,6 +61,9 @@ class PluginMessengerClient @Inject constructor(
                 if (!serviceDeferred.isCompleted) {
                     serviceDeferred.completeExceptionally(IllegalStateException("Plugin service disconnected"))
                 }
+                if (!responseDeferred.isCompleted) {
+                    responseDeferred.completeExceptionally(IllegalStateException("Plugin service disconnected"))
+                }
             }
         }
 
@@ -75,7 +78,8 @@ class PluginMessengerClient @Inject constructor(
                 }
             }
 
-            val service = withTimeout(timeoutMillis) { serviceDeferred.await() }
+            val service = withTimeoutOrNull(timeoutMillis) { serviceDeferred.await() }
+                ?: throw IllegalStateException("Plugin request timed out")
             val request = Message.obtain(null, what).apply {
                 replyTo = replyMessenger
                 this.data = Bundle(data).apply {
@@ -88,12 +92,11 @@ class PluginMessengerClient @Inject constructor(
             } catch (error: RemoteException) {
                 throw IllegalStateException("Plugin service did not accept the request", error)
             }
-            return withTimeout(timeoutMillis) { responseDeferred.await() }
-        } catch (error: TimeoutCancellationException) {
-            throw IllegalStateException("Plugin request timed out", error)
+            return withTimeoutOrNull(timeoutMillis) { responseDeferred.await() }
+                ?: throw IllegalStateException("Plugin request timed out")
         } finally {
             if (bound) {
-                withContext(Dispatchers.Main.immediate) {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
                     runCatching { appContext.unbindService(connection) }
                 }
             }

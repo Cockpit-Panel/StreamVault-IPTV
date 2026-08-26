@@ -14,15 +14,18 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +37,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.launch
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
@@ -41,6 +45,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.streamvault.app.device.rememberIsTelevisionDevice
+import com.streamvault.app.ui.design.requestFocusSafely
 import com.streamvault.app.ui.interaction.mouseClickable
 import com.streamvault.app.ui.design.AppColors
 import com.streamvault.app.ui.design.FocusSpec
@@ -71,6 +76,8 @@ fun PremiumDialog(
     widthFraction: Float = 0.42f,
     heightFraction: Float? = 0.88f,
     bodyHeightFraction: Float = 0.5f,
+    bodyScrollHint: String? = null,
+    initialBodyFocusRequester: androidx.compose.ui.focus.FocusRequester? = null,
     content: @Composable ColumnScope.() -> Unit,
     footer: @Composable RowScope.() -> Unit = {}
 ) {
@@ -133,14 +140,12 @@ fun PremiumDialog(
                                 }
                             }
 
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f, fill = false)
-                                    .heightIn(max = maxDialogBodyHeight)
-                                    .verticalScroll(rememberScrollState())
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
-                            }
+                            PremiumDialogScrollableBody(
+                                maxHeight = maxDialogBodyHeight,
+                                scrollHint = bodyScrollHint,
+                                initialFocusRequester = initialBodyFocusRequester,
+                                content = content,
+                            )
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -202,14 +207,12 @@ fun PremiumDialog(
                                 }
                             }
 
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f, fill = false)
-                                    .heightIn(max = maxDialogBodyHeight)
-                                    .verticalScroll(rememberScrollState())
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
-                            }
+                            PremiumDialogScrollableBody(
+                                maxHeight = maxDialogBodyHeight,
+                                scrollHint = bodyScrollHint,
+                                initialFocusRequester = initialBodyFocusRequester,
+                                content = content,
+                            )
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -220,6 +223,79 @@ fun PremiumDialog(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.PremiumDialogScrollableBody(
+    maxHeight: androidx.compose.ui.unit.Dp,
+    scrollHint: String?,
+    initialFocusRequester: androidx.compose.ui.focus.FocusRequester?,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
+    val canScrollUp by remember { derivedStateOf { scrollState.value > 0 } }
+    val canScrollDown by remember { derivedStateOf { scrollState.value < scrollState.maxValue } }
+    LaunchedEffect(initialFocusRequester) {
+        initialFocusRequester?.requestFocusSafely(
+            tag = "PremiumDialogScrollableBody",
+            target = "Initial body focus"
+        )
+    }
+    Box(
+        modifier = Modifier
+            .weight(1f, fill = false)
+            .heightIn(max = maxHeight)
+            .fillMaxWidth()
+            .focusGroup()
+            .onPreviewKeyEvent { event ->
+                if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                    return@onPreviewKeyEvent false
+                }
+                val delta = when (event.nativeKeyEvent.keyCode) {
+                    AndroidKeyEvent.KEYCODE_DPAD_UP -> -240
+                    AndroidKeyEvent.KEYCODE_DPAD_DOWN -> 240
+                    else -> 0
+                }
+                if (delta == 0 || scrollState.maxValue == 0) {
+                    return@onPreviewKeyEvent false
+                }
+                val target = (scrollState.value + delta).coerceIn(0, scrollState.maxValue)
+                if (target != scrollState.value) {
+                    coroutineScope.launch {
+                        scrollState.animateScrollTo(target)
+                    }
+                }
+                // Keep the event available to focus navigation. This scrolls
+                // the body while the focused control advances normally.
+                false
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(scrollState)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+        }
+
+        if (!scrollHint.isNullOrBlank() && (canScrollUp || canScrollDown)) {
+            val arrow = when {
+                canScrollUp && canScrollDown -> "↕"
+                canScrollDown -> "↓"
+                else -> "↑"
+            }
+            Text(
+                text = "$arrow  $scrollHint",
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .background(AppColors.Surface.copy(alpha = 0.94f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = AppColors.TextSecondary,
+            )
         }
     }
 }
@@ -275,6 +351,7 @@ fun PremiumDialogActionButton(
 fun PremiumDialogFooterButton(
     label: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     enabled: Boolean = true,
     destructive: Boolean = false,
     emphasized: Boolean = false
@@ -290,7 +367,7 @@ fun PremiumDialogFooterButton(
     Button(
         onClick = { if (canInteract) onClick() },
         enabled = enabled,
-        modifier = Modifier.mouseClickable(enabled = enabled, onClick = { if (canInteract) onClick() }),
+        modifier = modifier.mouseClickable(enabled = enabled, onClick = { if (canInteract) onClick() }),
         colors = ButtonDefaults.colors(
             containerColor = containerColor,
             contentColor = contentColor,

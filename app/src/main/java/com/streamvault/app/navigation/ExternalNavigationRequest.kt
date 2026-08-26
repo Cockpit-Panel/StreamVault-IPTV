@@ -2,7 +2,6 @@ package com.streamvault.app.navigation
 
 import java.io.Serializable
 import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 
 sealed class ExternalDestination : Serializable {
     data object Home : ExternalDestination()
@@ -85,7 +84,10 @@ private fun String.queryParameters(): Map<String, String> {
             val key = entry.substringBefore('=', missingDelimiterValue = "").takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
             val rawValue = entry.substringAfter('=', missingDelimiterValue = "")
-            key to URLDecoder.decode(rawValue, StandardCharsets.UTF_8)
+            val value = runCatching { URLDecoder.decode(rawValue, Charsets.UTF_8.name()) }
+                .getOrNull()
+                ?: return@mapNotNull null
+            key to value
         }
         .toMap()
 }

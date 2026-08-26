@@ -5,6 +5,10 @@ data class PlaybackHistory(
     val contentId: Long,
     val contentType: ContentType,
     val providerId: Long,
+    /** Provider/catalog identity used by backup restore; not persisted in playback history. */
+    val remoteContentId: String? = null,
+    /** Stable provider/catalog identity of the parent series for episode history. */
+    val remoteSeriesId: String? = null,
     val title: String,
     val posterUrl: String? = null,
     val streamUrl: String,

@@ -4,7 +4,7 @@ import android.app.Application
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.app.R
 import com.streamvault.data.local.dao.ProgramDao
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.SyncMetadata
 import com.streamvault.domain.repository.MovieRepository

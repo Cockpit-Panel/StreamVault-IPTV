@@ -11,15 +11,20 @@ import com.streamvault.data.mapper.toDomain
 import com.streamvault.data.mapper.toEntity
 import com.streamvault.data.parser.XmltvParser
 import com.streamvault.data.remote.http.HttpRequestProfile
+import com.streamvault.data.remote.http.useCancellableResponse
 import com.streamvault.data.remote.http.safeRequestIdentitySummary
 import com.streamvault.data.remote.http.toGenericRequestProfile
 import com.streamvault.data.remote.http.withRequestProfile
 import com.streamvault.data.util.rankSearchResults
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.model.Result
+import com.streamvault.domain.model.StalkerConfig
+import com.streamvault.data.provider.ProviderCapabilityResolver
+import com.streamvault.data.provider.toLegacyProvider
 import com.streamvault.domain.repository.EpgRepository
 import com.streamvault.domain.repository.EpgSourceRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
@@ -33,8 +38,6 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
@@ -44,7 +47,7 @@ import java.io.InputStream
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import com.streamvault.data.remote.NetworkTimeoutConfig
-import java.util.concurrent.ConcurrentHashMap
+import com.streamvault.domain.util.KeyedMutexRegistry
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -58,6 +61,7 @@ class EpgRepositoryImpl @Inject constructor(
     private val transactionRunner: DatabaseTransactionRunner,
     private val epgSourceRepository: EpgSourceRepository,
     private val preferencesRepository: PreferencesRepository,
+    private val providerCapabilityResolver: ProviderCapabilityResolver? = null,
     private val externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 ) : EpgRepository {
 
@@ -71,7 +75,7 @@ class EpgRepositoryImpl @Inject constructor(
     private fun List<Program>.shiftAll(offsetMs: Long): List<Program> =
         if (offsetMs == 0L) this else map { it.shifted(offsetMs) }
 
-    private val providerRefreshMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val providerRefreshMutexes = KeyedMutexRegistry<Long>()
 
     private val epgHttpClient: OkHttpClient by lazy {
         okHttpClient.newBuilder()
@@ -261,10 +265,11 @@ class EpgRepositoryImpl @Inject constructor(
 
     override suspend fun refreshEpg(providerId: Long, epgUrl: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            providerRefreshMutex(providerId).withLock {
+            providerRefreshMutexes.withLock(providerId) {
                 val stagingProviderId = -providerId
-                val providerTimezoneId = providerDao.getById(providerId)
-                    ?.stalkerDeviceTimezone
+                val providerTimezoneId = (providerCapabilityResolver?.snapshot(providerId)?.configuration as? StalkerConfig)
+                    ?.device
+                    ?.timezone
                     ?.trim()
                     ?.takeIf(String::isNotEmpty)
                 val batch = ArrayList<ProgramEntity>(EPG_PROGRAM_BATCH_SIZE)
@@ -278,14 +283,16 @@ class EpgRepositoryImpl @Inject constructor(
                     yield()
                 }
                 try {
-                    val providerRequestProfile = providerDao.getById(providerId)
+                    val providerRequestProfile = providerCapabilityResolver
+                        ?.snapshot(providerId)
+                        ?.toLegacyProvider()
                         ?.toGenericRequestProfile(ownerTag = "provider:$providerId/epg")
                         ?: HttpRequestProfile(ownerTag = "provider:$providerId/epg")
                     val request = Request.Builder()
                         .url(epgUrl)
                         .build()
                         .withRequestProfile(providerRequestProfile)
-                    epgHttpClient.newCall(request).execute().use { response ->
+                    epgHttpClient.newCall(request).useCancellableResponse { response ->
                         if (!response.isSuccessful) {
                             Log.w(
                                 "EpgRepository",
@@ -340,6 +347,7 @@ class EpgRepositoryImpl @Inject constructor(
 
                     Result.success(Unit)
                 } catch (e: Exception) {
+                    if (e is CancellationException) throw e
                     programDao.deleteByProvider(stagingProviderId)
                     if (e is IOException && e.message?.contains("too large", ignoreCase = true) == true) {
                         Result.error("EPG response exceeded 200 MB limit", e)
@@ -355,7 +363,7 @@ class EpgRepositoryImpl @Inject constructor(
     }
 
     override fun onProviderDeleted(providerId: Long) {
-        providerRefreshMutexes.remove(providerId)
+        // Entries are reference-counted and removed after the final refresh exits.
     }
 
     override suspend fun getResolvedProgramsForChannels(
@@ -420,6 +428,4 @@ class EpgRepositoryImpl @Inject constructor(
         return channelIds.associateWith { id -> grouped[id]?.firstOrNull() }
     }
 
-    private fun providerRefreshMutex(providerId: Long): Mutex =
-        providerRefreshMutexes.computeIfAbsent(providerId) { Mutex() }
 }

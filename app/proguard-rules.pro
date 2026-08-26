@@ -51,6 +51,15 @@
 
 # ── Domain models (serialized by GSON / passed across modules) ──
 -keep class com.streamvault.domain.model.** { *; }
+-keep class com.streamvault.domain.manager.BackupData { *; }
+-keep class com.streamvault.domain.manager.ProviderBackupSnapshot { *; }
+-keep class com.streamvault.domain.manager.PortableProviderPreferencesBackup { *; }
+-keep class com.streamvault.domain.manager.BackupProviderReference { *; }
+-keep class com.streamvault.domain.manager.PortableCategoryReference { *; }
+-keep class com.streamvault.domain.manager.PortableVirtualGroupReference { *; }
+-keep class com.streamvault.domain.manager.PortableChannelReference { *; }
+-keep class com.streamvault.domain.manager.ProtectedCategoryBackup { *; }
+-keep class com.streamvault.domain.manager.ScheduledRecordingBackup { *; }
 -keep class com.streamvault.data.local.entity.** { *; }
 -keep class com.streamvault.data.remote.xtream.model.** { *; }
 

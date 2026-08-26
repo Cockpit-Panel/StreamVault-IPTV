@@ -1,5 +1,6 @@
 package com.streamvault.app.ui.screens.player
 
+import com.streamvault.app.ui.model.archivePlaybackCapability
 import com.streamvault.domain.model.Channel
 import java.util.Locale
 
@@ -22,11 +23,12 @@ internal fun resolveCatchUpFailureMessage(
     if (!archiveRequested || channel == null) {
         return "Catch-up playback needs a valid live channel context."
     }
+    val archiveCapability = channel.archivePlaybackCapability()
     return when {
-        !channel.catchUpSupported && !programHasArchive ->
+        !archiveCapability.advertisedByProvider && !programHasArchive ->
             "This channel does not advertise archive support on the current provider."
-        channel.streamId <= 0L && channel.catchUpSource.isNullOrBlank() ->
-            "The provider advertises catch-up, but did not expose replay metadata for this channel."
+        !archiveCapability.canBuildReplayCandidate ->
+            "The provider advertises catch-up, but did not expose enough replay metadata for this channel."
         else ->
             "Replay is unavailable for the selected program right now."
     }

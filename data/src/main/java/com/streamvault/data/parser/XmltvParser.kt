@@ -350,7 +350,8 @@ class XmltvParser {
         inputStream: InputStream,
         timezoneId: String? = null,
         onChannel: suspend (XmltvChannel) -> Unit,
-        onProgramme: suspend (XmltvProgramme) -> Unit
+        onProgramme: suspend (XmltvProgramme) -> Unit,
+        limits: XmltvIngestionLimits = XmltvIngestionLimits()
     ) {
         val parser = newPullParser(inputStream)
         val parsingZoneId = resolveParsingZoneId(timezoneId)
@@ -384,6 +385,12 @@ class XmltvParser {
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
+                        if (parser.depth > limits.maxXmlDepth) {
+                            throw XmltvLimitExceeded(XmltvLimitKind.XML_DEPTH, limits.maxXmlDepth.toLong())
+                        }
+                        for (index in 0 until parser.attributeCount) {
+                            requireXmltvField(parser.getAttributeValue(index), limits)
+                        }
                         when (parser.name) {
                             "channel" -> {
                                 inChannel = true
@@ -443,6 +450,7 @@ class XmltvParser {
                         }
                     }
                     XmlPullParser.TEXT -> {
+                        requireXmltvField(parser.text, limits)
                         if (inChannel) {
                             when (channelTag) {
                                 "display-name" -> {
@@ -459,7 +467,15 @@ class XmltvParser {
                                 "sub-title" -> currentSubtitle = parser.text?.trim()?.takeIf { it.isNotEmpty() }
                                 "desc" -> currentDescription = parser.text
                                 "episode-num" -> currentEpisodeNum = parser.text?.trim()?.takeIf { it.isNotEmpty() }
-                                "category" -> parser.text?.trim()?.takeIf { it.isNotEmpty() }?.let(currentCategories::add)
+                                "category" -> parser.text?.trim()?.takeIf { it.isNotEmpty() }?.let { category ->
+                                    if (currentCategories.size >= limits.maxCategoriesPerProgramme) {
+                                        throw XmltvLimitExceeded(
+                                            XmltvLimitKind.CATEGORIES_PER_PROGRAMME,
+                                            limits.maxCategoriesPerProgramme.toLong()
+                                        )
+                                    }
+                                    currentCategories.add(category)
+                                }
                                 "rating" -> currentRating = parser.text?.trim()?.takeIf { it.isNotEmpty() }
                             }
                             currentTag = null
@@ -468,6 +484,9 @@ class XmltvParser {
                     XmlPullParser.END_TAG -> {
                         if (parser.name == "channel" && inChannel) {
                             if (channelId != null && channelDisplayName != null) {
+                                if (channelCount >= limits.maxChannels) {
+                                    throw XmltvLimitExceeded(XmltvLimitKind.CHANNELS, limits.maxChannels.toLong())
+                                }
                                 onChannel(
                                     XmltvChannel(
                                         id = channelId,
@@ -484,6 +503,11 @@ class XmltvParser {
                         }
                         if (parser.name == "programme" && inProgramme) {
                             if (isValidProgramme(currentChannelId, currentTitle, currentStart, currentEnd)) {
+                                if (programmeCount >= limits.maxProgrammes) {
+                                    throw XmltvLimitExceeded(XmltvLimitKind.PROGRAMMES, limits.maxProgrammes.toLong())
+                                }
+                                val genre = currentCategories.distinct().joinToString(" / ").takeIf { it.isNotBlank() }
+                                requireXmltvField(genre, limits)
                                 onProgramme(
                                     XmltvProgramme(
                                         channelId = currentChannelId!!,
@@ -495,7 +519,7 @@ class XmltvParser {
                                         lang = currentLang,
                                         rating = currentRating,
                                         imageUrl = currentImageUrl,
-                                        genre = currentCategories.distinct().joinToString(" / ").takeIf { it.isNotBlank() },
+                                        genre = genre,
                                         category = currentCategories.firstOrNull(),
                                         episodeInfo = currentEpisodeNum
                                     )
@@ -515,6 +539,12 @@ class XmltvParser {
                 e
             )
             throw e
+        }
+    }
+
+    private fun requireXmltvField(value: String?, limits: XmltvIngestionLimits) {
+        if (value != null && value.length > limits.maxFieldChars) {
+            throw XmltvLimitExceeded(XmltvLimitKind.FIELD_LENGTH, limits.maxFieldChars.toLong())
         }
     }
 
@@ -556,20 +586,22 @@ class XmltvParser {
         }
     }
 
-    private fun parseDate(dateStr: String?, parsingZoneId: ZoneId): Long {
+    private fun parseDate(dateStr: String?, parsingZoneId: ZoneId?): Long {
         if (dateStr.isNullOrBlank()) return 0
 
         offsetDateFormats.firstNotNullOfOrNull { formatter ->
             parseOffsetDateTime(dateStr, formatter)
         }?.let { return it }
 
-        localDateTimeFormats.firstNotNullOfOrNull { formatter ->
-            parseLocalDateTime(dateStr, formatter, parsingZoneId)
-        }?.let { return it }
+        if (parsingZoneId != null) {
+            localDateTimeFormats.firstNotNullOfOrNull { formatter ->
+                parseLocalDateTime(dateStr, formatter, parsingZoneId)
+            }?.let { return it }
 
-        localDateFormats.firstNotNullOfOrNull { formatter ->
-            parseLocalDate(dateStr, formatter, parsingZoneId)
-        }?.let { return it }
+            localDateFormats.firstNotNullOfOrNull { formatter ->
+                parseLocalDate(dateStr, formatter, parsingZoneId)
+            }?.let { return it }
+        }
 
         // Last resort: extract the timestamp portion only if no timezone offset is detectable.
         //
@@ -589,7 +621,7 @@ class XmltvParser {
                 (dateStr.contains('Z') || dateStr.contains('z') ||
                  dateStr.contains('+') ||
                  dateStr.lastIndexOf('-') > 12)
-            if (!hasTimezoneMarker) {
+            if (!hasTimezoneMarker && parsingZoneId != null) {
                 val cleaned = dateStr.replace("""[^\d]""".toRegex(), "")
                 if (cleaned.length >= 14) {
                     return parseLocalDateTime(
@@ -603,7 +635,11 @@ class XmltvParser {
             // Give up
         }
 
-        logger.warning("Unparseable XMLTV date: $dateStr")
+        if (parsingZoneId == null) {
+            logger.warning("XMLTV date has no offset and the source requires explicit offsets: $dateStr")
+        } else {
+            logger.warning("Unparseable XMLTV date: $dateStr")
+        }
         return 0
     }
 
@@ -640,15 +676,14 @@ class XmltvParser {
                 .toEpochMilli()
         }.getOrNull()
 
-    private fun resolveParsingZoneId(timezoneId: String?): ZoneId {
+    private fun resolveParsingZoneId(timezoneId: String?): ZoneId? {
         val normalizedTimezoneId = timezoneId?.trim().orEmpty()
-        if (normalizedTimezoneId.isBlank()) return ZoneId.systemDefault()
+        if (normalizedTimezoneId.isBlank()) return null
 
-        return runCatching { ZoneId.of(normalizedTimezoneId) }
-            .getOrElse {
-                val fallbackZoneId = ZoneId.systemDefault()
-                logger.warning("Invalid XMLTV timezone '$timezoneId'; defaulting to ${fallbackZoneId.id}")
-                fallbackZoneId
-            }
+        return try {
+            ZoneId.of(normalizedTimezoneId)
+        } catch (error: Exception) {
+            throw IllegalArgumentException("Invalid XMLTV timezone '$timezoneId'", error)
+        }
     }
 }

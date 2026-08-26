@@ -2,6 +2,7 @@ package com.streamvault.domain.usecase
 
 import com.streamvault.domain.manager.ProviderSyncStateReader
 import com.streamvault.domain.model.Channel
+import com.streamvault.domain.model.CatalogCompleteness
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.Series
 import com.streamvault.domain.model.SyncState
@@ -30,7 +31,8 @@ data class SearchContentResult(
     val channels: List<Channel> = emptyList(),
     val movies: List<Movie> = emptyList(),
     val series: List<Series> = emptyList(),
-    val isPartialResult: Boolean = false
+    val isPartialResult: Boolean = false,
+    val catalogCompleteness: CatalogCompleteness = CatalogCompleteness.COMPLETE
 )
 
 class SearchContent @Inject constructor(
@@ -68,7 +70,13 @@ class SearchContent @Inject constructor(
                 channels = result.channels,
                 movies = result.movies,
                 series = result.series,
-                isPartialResult = searchDegraded || indexingActive || indexWorkActive
+                isPartialResult = searchDegraded || indexingActive || indexWorkActive ||
+                    result.catalogCompleteness != CatalogCompleteness.COMPLETE,
+                catalogCompleteness = when {
+                    searchDegraded -> CatalogCompleteness.PARTIAL
+                    indexingActive || indexWorkActive -> CatalogCompleteness.INDEXING
+                    else -> result.catalogCompleteness
+                }
             )
         }
     }

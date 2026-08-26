@@ -1,5 +1,7 @@
 package com.streamvault.app.ui.screens.player
 
+import com.streamvault.app.ui.model.isArchivePlayable
+import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Program
 
 internal data class PlayerProgramTimeline(
@@ -12,7 +14,7 @@ internal data class PlayerProgramTimeline(
 internal fun buildProgramTimeline(
     programs: List<Program>,
     now: Long,
-    catchUpSupported: Boolean,
+    channel: Channel?,
     maxHistoryItems: Int,
     maxUpcomingItems: Int
 ): PlayerProgramTimeline {
@@ -20,7 +22,7 @@ internal fun buildProgramTimeline(
     val currentProgram = sortedPrograms.firstOrNull { it.startTime <= now && it.endTime > now }
     val nextProgram = sortedPrograms.firstOrNull { it.startTime > now }
     val programHistory = sortedPrograms
-        .filter { it.endTime <= now && (it.hasArchive || catchUpSupported) }
+        .filter { program -> channel?.isArchivePlayable(program, now) == true }
         .sortedByDescending { it.startTime }
         .take(maxHistoryItems)
     val upcomingPrograms = sortedPrograms

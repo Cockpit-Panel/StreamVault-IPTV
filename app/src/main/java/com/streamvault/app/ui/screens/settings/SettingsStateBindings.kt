@@ -5,17 +5,24 @@ package com.streamvault.app.ui.screens.settings
 import com.streamvault.app.ui.model.LiveTvChannelMode
 import com.streamvault.app.ui.model.LiveTvQuickFilterVisibilityMode
 import com.streamvault.app.ui.model.VodViewMode
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.AppLandingDestination
+import com.streamvault.domain.model.AppTopLevelDestination
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.ChannelNumberingMode
 import com.streamvault.domain.model.DecoderMode
 import com.streamvault.domain.model.ExternalPlaybackMode
+import com.streamvault.domain.model.VodCategoryLoadMode
 import com.streamvault.domain.model.GroupedChannelLabelMode
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.TimeshiftBackendPreference
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 import com.streamvault.domain.model.VodHttpProtocolMode
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.model.VirtualCategoryIds
 import com.streamvault.domain.repository.ProviderRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -40,11 +47,15 @@ internal fun observeSettingsPreferenceSnapshot(
             hasParentalPin = hasParentalPin,
             appLanguage = "system",
             appLandingDestination = AppLandingDestination.HOME,
+            appTopLevelDestinations = AppTopLevelDestination.defaultOrder,
+            appHomeDashboardShelves = AppHomeDashboardShelf.defaultOrder,
             appTimeFormat = AppTimeFormat.SYSTEM,
             preferredAudioLanguage = "auto",
             playerMediaSessionEnabled = true,
             playerFastRetryOnTransientFailures = false,
-            playerDecoderMode = DecoderMode.AUTO,
+            playerAudioDecoderMode = DecoderMode.AUTO,
+            playerVideoDecoderMode = DecoderMode.AUTO,
+            playerPlaybackBufferMode = PlaybackBufferMode.AUTO,
             playerAudioOutputPreference = AudioOutputPreference.AUTO,
             playerCompatibilityMemoryEnabled = true,
             playerSurfaceMode = com.streamvault.domain.model.PlayerSurfaceMode.AUTO,
@@ -68,6 +79,7 @@ internal fun observeSettingsPreferenceSnapshot(
             ethernetMaxVideoHeight = null,
             playerTimeshiftEnabled = false,
             playerTimeshiftDepthMinutes = 30,
+            playerTimeshiftBackend = TimeshiftBackendPreference.AUTOMATIC,
             defaultStopPlaybackTimerMinutes = 0,
             defaultIdleStandbyTimerMinutes = 0,
             lastSpeedTestMegabits = null,
@@ -80,17 +92,22 @@ internal fun observeSettingsPreferenceSnapshot(
             xtreamBase64TextCompatibility = false,
             liveTvChannelMode = LiveTvChannelMode.PRO,
             showLiveSourceSwitcher = false,
+            showFavoritesCategory = true,
             showAllChannelsCategory = true,
             showRecentChannelsCategory = true,
             remoteShortcutPreferences = com.streamvault.domain.model.RemoteShortcutPreferences(),
             liveTvCategoryFilters = emptyList(),
             liveTvQuickFilterVisibilityMode = LiveTvQuickFilterVisibilityMode.ALWAYS_VISIBLE,
+            hideDecorativeLiveRows = true,
             liveChannelNumberingMode = ChannelNumberingMode.GROUP,
             liveChannelGroupingMode = LiveChannelGroupingMode.RAW_VARIANTS,
             groupedChannelLabelMode = GroupedChannelLabelMode.HYBRID,
             liveVariantPreferenceMode = LiveVariantPreferenceMode.BALANCED,
             vodViewMode = VodViewMode.MODERN,
+            vodCategoryLoadMode = VodCategoryLoadMode.PAGED,
             vodInfiniteScroll = true,
+            vodDuplicateHandlingMode = VodDuplicateHandlingMode.SHOW_ALL,
+            vodVariantPreferenceMode = VodVariantPreferenceMode.BALANCED,
             guideDefaultCategoryId = VirtualCategoryIds.FAVORITES,
             guideDefaultCategoryOptions = emptyList(),
             preventStandbyDuringPlayback = true,
@@ -103,6 +120,7 @@ internal fun observeSettingsPreferenceSnapshot(
             cachedAppUpdateVersionCode = null,
             cachedAppUpdateReleaseUrl = null,
             cachedAppUpdateDownloadUrl = null,
+            cachedAppUpdateDownloadSha256 = null,
             cachedAppUpdateReleaseNotes = "",
             cachedAppUpdatePublishedAt = null
         )
@@ -110,6 +128,10 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(appLanguage = language)
     }.combine(preferencesRepository.appLandingDestination) { snapshot, destination ->
         snapshot.copy(appLandingDestination = destination)
+    }.combine(preferencesRepository.appTopLevelDestinations) { snapshot, destinations ->
+        snapshot.copy(appTopLevelDestinations = destinations)
+    }.combine(preferencesRepository.appHomeDashboardShelves) { snapshot, shelves ->
+        snapshot.copy(appHomeDashboardShelves = shelves)
     }.combine(preferencesRepository.appTimeFormat) { snapshot, timeFormat ->
         snapshot.copy(appTimeFormat = timeFormat)
     }.combine(preferencesRepository.preferredAudioLanguage) { snapshot, preferredAudioLanguage ->
@@ -118,8 +140,12 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(playerMediaSessionEnabled = mediaSessionEnabled)
     }.combine(preferencesRepository.playerFastRetryOnTransientFailures) { snapshot, enabled ->
         snapshot.copy(playerFastRetryOnTransientFailures = enabled)
-    }.combine(preferencesRepository.playerDecoderMode) { snapshot, decoderMode ->
-        snapshot.copy(playerDecoderMode = decoderMode)
+    }.combine(preferencesRepository.playerAudioDecoderMode) { snapshot, decoderMode ->
+        snapshot.copy(playerAudioDecoderMode = decoderMode)
+    }.combine(preferencesRepository.playerVideoDecoderMode) { snapshot, decoderMode ->
+        snapshot.copy(playerVideoDecoderMode = decoderMode)
+    }.combine(preferencesRepository.playerPlaybackBufferMode) { snapshot, bufferMode ->
+        snapshot.copy(playerPlaybackBufferMode = bufferMode)
     }.combine(preferencesRepository.playerAudioOutputPreference) { snapshot, audioOutputPreference ->
         snapshot.copy(playerAudioOutputPreference = audioOutputPreference)
     }.combine(preferencesRepository.playerCompatibilityMemoryEnabled) { snapshot, enabled ->
@@ -166,6 +192,8 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(playerTimeshiftEnabled = enabled)
     }.combine(preferencesRepository.playerTimeshiftDepthMinutes) { snapshot, depthMinutes ->
         snapshot.copy(playerTimeshiftDepthMinutes = depthMinutes)
+    }.combine(preferencesRepository.playerTimeshiftBackend) { snapshot, backend ->
+        snapshot.copy(playerTimeshiftBackend = backend)
     }.combine(preferencesRepository.defaultStopPlaybackTimerMinutes) { snapshot, minutes ->
         snapshot.copy(defaultStopPlaybackTimerMinutes = minutes)
     }.combine(preferencesRepository.defaultIdleStandbyTimerMinutes) { snapshot, minutes ->
@@ -190,6 +218,8 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(liveTvChannelMode = LiveTvChannelMode.fromStorage(liveTvChannelMode))
     }.combine(preferencesRepository.showLiveSourceSwitcher) { snapshot, showLiveSourceSwitcher ->
         snapshot.copy(showLiveSourceSwitcher = showLiveSourceSwitcher)
+    }.combine(preferencesRepository.showFavoritesCategory) { snapshot, showFavoritesCategory ->
+        snapshot.copy(showFavoritesCategory = showFavoritesCategory)
     }.combine(preferencesRepository.showAllChannelsCategory) { snapshot, showAllChannelsCategory ->
         snapshot.copy(showAllChannelsCategory = showAllChannelsCategory)
     }.combine(preferencesRepository.showRecentChannelsCategory) { snapshot, showRecentChannelsCategory ->
@@ -202,6 +232,8 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(
             liveTvQuickFilterVisibilityMode = LiveTvQuickFilterVisibilityMode.fromStorage(visibilityMode)
         )
+    }.combine(preferencesRepository.hideDecorativeLiveRows) { snapshot, hideDecorativeLiveRows ->
+        snapshot.copy(hideDecorativeLiveRows = hideDecorativeLiveRows)
     }.combine(preferencesRepository.liveChannelNumberingMode) { snapshot, liveChannelNumberingMode ->
         snapshot.copy(liveChannelNumberingMode = liveChannelNumberingMode)
     }.combine(preferencesRepository.liveChannelGroupingMode) { snapshot, liveChannelGroupingMode ->
@@ -212,8 +244,14 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(liveVariantPreferenceMode = liveVariantPreferenceMode)
     }.combine(preferencesRepository.vodViewMode) { snapshot, vodViewMode ->
         snapshot.copy(vodViewMode = VodViewMode.fromStorage(vodViewMode))
+    }.combine(preferencesRepository.vodCategoryLoadMode) { snapshot, vodCategoryLoadMode ->
+        snapshot.copy(vodCategoryLoadMode = vodCategoryLoadMode)
     }.combine(preferencesRepository.vodInfiniteScroll) { snapshot, vodInfiniteScroll ->
         snapshot.copy(vodInfiniteScroll = vodInfiniteScroll)
+    }.combine(preferencesRepository.vodDuplicateHandlingMode) { snapshot, vodDuplicateHandlingMode ->
+        snapshot.copy(vodDuplicateHandlingMode = vodDuplicateHandlingMode)
+    }.combine(preferencesRepository.vodVariantPreferenceMode) { snapshot, vodVariantPreferenceMode ->
+        snapshot.copy(vodVariantPreferenceMode = vodVariantPreferenceMode)
     }.combine(preferencesRepository.guideDefaultCategoryId) { snapshot, guideDefaultCategoryId ->
         snapshot.copy(guideDefaultCategoryId = guideDefaultCategoryId ?: VirtualCategoryIds.FAVORITES)
     }.combine(preferencesRepository.preventStandbyDuringPlayback) { snapshot, preventStandby ->
@@ -236,6 +274,8 @@ internal fun observeSettingsPreferenceSnapshot(
         snapshot.copy(cachedAppUpdateReleaseUrl = releaseUrl)
     }.combine(preferencesRepository.cachedAppUpdateDownloadUrl) { snapshot, downloadUrl ->
         snapshot.copy(cachedAppUpdateDownloadUrl = downloadUrl)
+    }.combine(preferencesRepository.cachedAppUpdateDownloadSha256) { snapshot, downloadSha256 ->
+        snapshot.copy(cachedAppUpdateDownloadSha256 = downloadSha256)
     }.combine(preferencesRepository.cachedAppUpdateReleaseNotes) { snapshot, releaseNotes ->
         snapshot.copy(cachedAppUpdateReleaseNotes = releaseNotes)
     }.combine(preferencesRepository.cachedAppUpdatePublishedAt) { snapshot, publishedAt ->

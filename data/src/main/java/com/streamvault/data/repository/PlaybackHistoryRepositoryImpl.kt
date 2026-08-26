@@ -17,6 +17,8 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +28,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import android.util.Log
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.streamvault.data.preferences.PreferencesRepository
@@ -42,15 +48,24 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingResumeUpdates = ConcurrentHashMap<PlaybackKey, PlaybackHistory>()
     private val pendingResumeUpdatesState = MutableStateFlow<Map<PlaybackKey, PlaybackHistory>>(emptyMap())
+    private val pendingProgressMutex = Mutex()
     private val isIncognito: StateFlow<Boolean> =
         preferencesRepository.isIncognitoMode
             .stateIn(repositoryScope, SharingStarted.Eagerly, false)
 
     init {
         repositoryScope.launch {
-            while (true) {
+            while (currentCoroutineContext().isActive) {
                 delay(RESUME_POSITION_FLUSH_INTERVAL_MS)
-                flushPendingResumeUpdates()
+                try {
+                    flushPendingResumeUpdates()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    // Keep the periodic actor alive. The latest in-memory progress remains
+                    // pending and will be retried on the next interval or lifecycle flush.
+                    Log.w(TAG, "Periodic playback progress flush failed", error)
+                }
             }
         }
     }
@@ -112,7 +127,8 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
                         ?.toDomain()
                 } else null
             }
-            ContentType.LIVE -> null
+            ContentType.LIVE,
+            ContentType.VOD -> null
         }
     }
 
@@ -122,29 +138,33 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
                 return Result.success(Unit)
             }
 
-            val key = history.playbackKey()
-            val existing = pendingResumeUpdates[history.playbackKey()]
-                ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
-            val resolvedTotalDuration = history.totalDurationMs.takeIf { it > 0L } ?: existing?.totalDurationMs ?: 0L
-            val resolvedResumePosition = when {
-                resolvedTotalDuration > 0L -> resolvedTotalDuration
-                history.resumePositionMs > 0L -> history.resumePositionMs
-                else -> existing?.resumePositionMs ?: 0L
+            pendingProgressMutex.withLock {
+                val key = history.playbackKey()
+                val existing = pendingResumeUpdates[key]
+                    ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
+                val resolvedTotalDuration = history.totalDurationMs.takeIf { it > 0L } ?: existing?.totalDurationMs ?: 0L
+                val resolvedResumePosition = when {
+                    resolvedTotalDuration > 0L -> resolvedTotalDuration
+                    history.resumePositionMs > 0L -> history.resumePositionMs
+                    else -> existing?.resumePositionMs ?: 0L
+                }
+                val updatedHistory = history.copy(
+                    streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
+                    resumePositionMs = resolvedResumePosition,
+                    totalDurationMs = resolvedTotalDuration,
+                    watchCount = existing?.watchCount ?: history.watchCount,
+                    watchedStatus = PlaybackWatchedStatus.COMPLETED_MANUAL,
+                    lastWatchedAt = System.currentTimeMillis()
+                )
+                transactionRunner.inTransaction {
+                    dao.insertOrUpdate(updatedHistory.toEntity())
+                    syncDenormalizedProgress(updatedHistory.contentId, updatedHistory.contentType, updatedHistory.providerId)
+                }
+                clearPendingResumeUpdateLocked(key)
             }
-            val updatedHistory = history.copy(
-                streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
-                resumePositionMs = resolvedResumePosition,
-                totalDurationMs = resolvedTotalDuration,
-                watchCount = existing?.watchCount ?: history.watchCount,
-                watchedStatus = PlaybackWatchedStatus.COMPLETED_MANUAL,
-                lastWatchedAt = System.currentTimeMillis()
-            )
-            transactionRunner.inTransaction {
-                dao.insertOrUpdate(updatedHistory.toEntity())
-                syncDenormalizedProgress(updatedHistory.contentId, updatedHistory.contentType, updatedHistory.providerId)
-            }
-            clearPendingResumeUpdate(key)
             Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Result.error("Failed to mark content as watched", e)
         }
@@ -156,27 +176,31 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
                 return Result.success(Unit)
             }
 
-            val key = history.playbackKey()
-            val existing = pendingResumeUpdates[key]
-                ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
-            val updatedHistory = history.copy(
-                streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
-                resumePositionMs = history.resumePositionMs.takeIf { it > 0L } ?: existing?.resumePositionMs ?: 0L,
-                totalDurationMs = history.totalDurationMs.takeIf { it > 0L } ?: existing?.totalDurationMs ?: 0L,
-                watchCount = (existing?.watchCount ?: 0) + 1,
-                watchedStatus = resolveWatchedStatus(
+            pendingProgressMutex.withLock {
+                val key = history.playbackKey()
+                val existing = pendingResumeUpdates[key]
+                    ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
+                val updatedHistory = history.copy(
+                    streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
                     resumePositionMs = history.resumePositionMs.takeIf { it > 0L } ?: existing?.resumePositionMs ?: 0L,
                     totalDurationMs = history.totalDurationMs.takeIf { it > 0L } ?: existing?.totalDurationMs ?: 0L,
-                    fallback = history.watchedStatus
-                ),
-                lastWatchedAt = System.currentTimeMillis()
-            )
-            transactionRunner.inTransaction {
-                dao.insertOrUpdate(updatedHistory.toEntity())
-                syncDenormalizedProgress(updatedHistory.contentId, updatedHistory.contentType, updatedHistory.providerId)
+                    watchCount = (existing?.watchCount ?: 0) + 1,
+                    watchedStatus = resolveWatchedStatus(
+                        resumePositionMs = history.resumePositionMs.takeIf { it > 0L } ?: existing?.resumePositionMs ?: 0L,
+                        totalDurationMs = history.totalDurationMs.takeIf { it > 0L } ?: existing?.totalDurationMs ?: 0L,
+                        fallback = history.watchedStatus
+                    ),
+                    lastWatchedAt = System.currentTimeMillis()
+                )
+                transactionRunner.inTransaction {
+                    dao.insertOrUpdate(updatedHistory.toEntity())
+                    syncDenormalizedProgress(updatedHistory.contentId, updatedHistory.contentType, updatedHistory.providerId)
+                }
+                clearPendingResumeUpdateLocked(key)
             }
-            clearPendingResumeUpdate(key)
             Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Result.error("Failed to record playback history", e)
         }
@@ -188,70 +212,92 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
                 return Result.success(Unit)
             }
 
-            val key = history.playbackKey()
-            val existing = pendingResumeUpdates[key]
-                ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
+            pendingProgressMutex.withLock {
+                val key = history.playbackKey()
+                val existing = pendingResumeUpdates[key]
+                    ?: dao.get(history.contentId, history.contentType.name, history.providerId)?.toDomain()
 
-            val updatedHistory = history.copy(
-                streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
-                watchCount = existing?.watchCount ?: 1,
-                watchedStatus = resolveWatchedStatus(
-                    resumePositionMs = history.resumePositionMs,
-                    totalDurationMs = history.totalDurationMs,
-                    fallback = existing?.watchedStatus ?: history.watchedStatus
-                ),
-                lastWatchedAt = System.currentTimeMillis()
-            )
-            pendingResumeUpdates[history.playbackKey()] = updatedHistory
-            publishPendingResumeUpdates()
-            transactionRunner.inTransaction {
-                dao.insertOrUpdate(updatedHistory.toEntity())
-                syncDenormalizedProgress(updatedHistory.contentId, updatedHistory.contentType, updatedHistory.providerId)
+                val updatedHistory = history.copy(
+                    streamUrl = XtreamUrlFactory.sanitizePersistedStreamUrl(history.streamUrl, history.providerId),
+                    watchCount = existing?.watchCount ?: 1,
+                    watchedStatus = resolveWatchedStatus(
+                        resumePositionMs = history.resumePositionMs,
+                        totalDurationMs = history.totalDurationMs,
+                        fallback = existing?.watchedStatus ?: history.watchedStatus
+                    ),
+                    lastWatchedAt = System.currentTimeMillis()
+                )
+                // Steady-state playback is memory-only. The periodic actor and lifecycle
+                // boundaries flush this coalesced value to Room as one durable write.
+                pendingResumeUpdates[key] = updatedHistory
+                publishPendingResumeUpdates()
             }
             Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Result.error("Failed to update playback resume position", e)
         }
     }
 
     override suspend fun removeFromHistory(contentId: Long, contentType: ContentType, providerId: Long): Result<Unit> = try {
-        pendingResumeUpdates.remove(PlaybackKey(contentId, contentType, providerId))
-        transactionRunner.inTransaction {
-            dao.delete(contentId, contentType.name, providerId)
-            syncDenormalizedProgress(contentId, contentType, providerId)
+        pendingProgressMutex.withLock {
+            pendingResumeUpdates.remove(PlaybackKey(contentId, contentType, providerId))
+            transactionRunner.inTransaction {
+                dao.delete(contentId, contentType.name, providerId)
+                syncDenormalizedProgress(contentId, contentType, providerId)
+            }
+            publishPendingResumeUpdates()
         }
         Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         Result.error("Failed to remove playback history item", e)
     }
 
     override suspend fun clearAllHistory(): Result<Unit> = try {
-        pendingResumeUpdates.clear()
-        transactionRunner.inTransaction {
-            dao.deleteAll()
-            movieDao.resetAllWatchProgress()
-            episodeDao.resetAllWatchProgress()
+        pendingProgressMutex.withLock {
+            pendingResumeUpdates.clear()
+            transactionRunner.inTransaction {
+                dao.deleteAll()
+                movieDao.resetAllWatchProgress()
+                episodeDao.resetAllWatchProgress()
+            }
+            publishPendingResumeUpdates()
         }
         Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         Result.error("Failed to clear playback history", e)
     }
 
     override suspend fun clearHistoryForProvider(providerId: Long): Result<Unit> = try {
-        pendingResumeUpdates.keys.removeIf { it.providerId == providerId }
-        transactionRunner.inTransaction {
-            dao.deleteByProvider(providerId)
-            syncDenormalizedProgressForProvider(providerId)
+        pendingProgressMutex.withLock {
+            pendingResumeUpdates.keys.removeIf { it.providerId == providerId }
+            transactionRunner.inTransaction {
+                dao.deleteByProvider(providerId)
+                syncDenormalizedProgressForProvider(providerId)
+            }
+            publishPendingResumeUpdates()
         }
         Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         Result.error("Failed to clear provider playback history", e)
     }
 
     override suspend fun clearLiveHistoryForProvider(providerId: Long): Result<Unit> = try {
-        pendingResumeUpdates.keys.removeIf { it.providerId == providerId && it.contentType == ContentType.LIVE }
-        dao.deleteByProviderAndType(providerId, ContentType.LIVE.name)
+        pendingProgressMutex.withLock {
+            pendingResumeUpdates.keys.removeIf { it.providerId == providerId && it.contentType == ContentType.LIVE }
+            dao.deleteByProviderAndType(providerId, ContentType.LIVE.name)
+            publishPendingResumeUpdates()
+        }
         Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         Result.error("Failed to clear live playback history", e)
     }
@@ -271,28 +317,33 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
     override suspend fun flushPendingProgress(): Result<Unit> = try {
         flushPendingResumeUpdates()
         Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         Result.error("Failed to flush pending progress", e)
     }
 
     private suspend fun flushPendingResumeUpdates() {
-        val snapshot = pendingResumeUpdates.entries.toList()
-        var changed = false
-        snapshot.forEach { (key, history) ->
-            if (pendingResumeUpdates.remove(key, history)) {
-                changed = true
-                transactionRunner.inTransaction {
+        pendingProgressMutex.withLock {
+            val snapshot = pendingResumeUpdates.toMap()
+            if (snapshot.isEmpty()) return@withLock
+
+            // One transaction for the coalesced set avoids a Room transaction per content
+            // item when a lifecycle boundary flushes several recently played items.
+            transactionRunner.inTransaction {
+                snapshot.values.forEach { history ->
                     dao.insertOrUpdate(history.toEntity())
                     syncDenormalizedProgress(history.contentId, history.contentType, history.providerId)
                 }
             }
-        }
-        if (changed) {
+            snapshot.forEach { (key, history) ->
+                pendingResumeUpdates.remove(key, history)
+            }
             publishPendingResumeUpdates()
         }
     }
 
-    private fun clearPendingResumeUpdate(key: PlaybackKey) {
+    private fun clearPendingResumeUpdateLocked(key: PlaybackKey) {
         if (pendingResumeUpdates.remove(key) != null) {
             publishPendingResumeUpdates()
         }
@@ -348,6 +399,10 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
         } else {
             PlaybackWatchedStatus.IN_PROGRESS
         }
+    }
+
+    private companion object {
+        const val TAG = "PlaybackHistoryRepository"
     }
 }
 

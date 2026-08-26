@@ -1,24 +1,28 @@
 package com.streamvault.app
 
 import android.app.Application
+import android.util.Log
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.streamvault.app.diagnostics.CrashReportStore
 import com.streamvault.app.diagnostics.RuntimeDiagnosticsManager
-import com.streamvault.app.update.GitHubReleaseChecker
+import com.streamvault.app.plugins.StreamVaultPluginManager
 import com.streamvault.app.ui.accessibility.isReducedMotionEnabled
-import com.streamvault.data.preferences.PreferencesRepository
-import com.streamvault.domain.model.Result
+import com.streamvault.data.remote.jellyfin.JellyfinImageAuthInterceptor
+import com.streamvault.domain.repository.DownloadManager
+import com.streamvault.domain.manager.ProgramReminderManager
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
 import okio.Path.Companion.toOkioPath
 
 import androidx.work.Constraints
@@ -27,10 +31,13 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.streamvault.data.manager.recording.RecordingReconcileWorker
+import com.streamvault.data.manager.PendingBackupRestoreCoordinator
 import com.streamvault.data.sync.ProviderSyncWorker
 import com.streamvault.data.sync.XtreamIndexWorker
+import com.streamvault.data.sync.ProviderSyncLifecycle
 import com.streamvault.player.timeshift.TimeshiftDiskManager
 import javax.inject.Inject
+import okhttp3.OkHttpClient
 
 @HiltAndroidApp
 class StreamVaultApp : Application(), SingletonImageLoader.Factory {
@@ -38,48 +45,80 @@ class StreamVaultApp : Application(), SingletonImageLoader.Factory {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Inject
-    lateinit var preferencesRepository: PreferencesRepository
+    lateinit var okHttpClient: OkHttpClient
 
     @Inject
-    lateinit var gitHubReleaseChecker: GitHubReleaseChecker
+    lateinit var jellyfinImageAuthInterceptor: JellyfinImageAuthInterceptor
+
+    @Inject
+    lateinit var providerSyncLifecycle: ProviderSyncLifecycle
+
+    @Inject
+    lateinit var downloadManager: DownloadManager
+
+    @Inject
+    lateinit var streamVaultPluginManager: StreamVaultPluginManager
+
+    @Inject
+    lateinit var programReminderManager: ProgramReminderManager
+
+    @Inject
+    lateinit var startupWorkRegistry: StartupWorkRegistry
+
+    @Inject
+    lateinit var pendingBackupRestoreCoordinator: PendingBackupRestoreCoordinator
+
+    @Inject
+    lateinit var databaseStartupCoordinator: DatabaseStartupCoordinator
+
+    private val imageOkHttpClient: OkHttpClient by lazy {
+        okHttpClient.newBuilder()
+            .addInterceptor(jellyfinImageAuthInterceptor)
+            .build()
+    }
 
     override fun onCreate() {
         super.onCreate()
         CrashReportStore.install(this)
         runtimeDiagnosticsManager.start()
         applicationScope.launch {
-            // Clean up any timeshift temp directories left behind by crashes, OOM kills, or
-            // force-stops from the previous run. activeSessionDir = null means wipe everything.
-            TimeshiftDiskManager(applicationContext).cleanupStaleDirectories(activeSessionDir = null)
+            databaseStartupCoordinator.state
+                .filterIsInstance<DatabaseStartupState.Ready>()
+                .first()
+            runDatabaseReadyStartupTasks()
         }
-        applicationScope.launch {
-            refreshCachedAppUpdateIfNeeded()
-        }
-        
-        // Schedule daily data maintenance: EPG pruning, stale-favorite cleanup, and DB compaction checks.
-        // BLD-H02: Require network + device idle so the worker doesn't drain battery.
-        val gcConstraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .setRequiresBatteryNotLow(true)
-            .setRequiresDeviceIdle(true)
-            .build()
+    }
 
-        val gcWorkRequest = PeriodicWorkRequestBuilder<com.streamvault.data.sync.SyncWorker>(24, java.util.concurrent.TimeUnit.HOURS)
-            .setConstraints(gcConstraints)
-            .build()
-            
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "DataMaintenanceWorker",
-            ExistingPeriodicWorkPolicy.KEEP,
-            gcWorkRequest
+    private suspend fun runDatabaseReadyStartupTasks() {
+        runContainedStartupTasks(
+            tasks = listOf(
+                StartupTask("timeshift-cleanup") {
+                    TimeshiftDiskManager(applicationContext)
+                        .cleanupStaleDirectories(activeSessionDir = null)
+                },
+                StartupTask("download-recovery") {
+                    downloadManager.recoverInterruptedDownloads()
+                },
+                StartupTask("plugin-reconcile") {
+                    streamVaultPluginManager.reconcilePluginProviders()
+                },
+                StartupTask("reminder-restore") {
+                    programReminderManager.restoreScheduledReminders()
+                },
+                StartupTask("stalker-work-reconcile") {
+                    providerSyncLifecycle.reconcileStalkerIndexWorkAtStartup()
+                },
+                StartupTask("pending-backup-restore") {
+                    pendingBackupRestoreCoordinator.applyAllAvailable()
+                },
+                StartupTask("work-registration") {
+                    startupWorkRegistry.register()
+                }
+            ),
+            onFailure = { name, error ->
+                Log.e("StreamVaultStartup", "Startup task failed: $name", error)
+            }
         )
-
-        ProviderSyncWorker.enqueuePeriodic(this)
-        ProviderSyncWorker.enqueueLaunchStaleCheck(this)
-        XtreamIndexWorker.enqueuePeriodic(this)
-        XtreamIndexWorker.enqueueLaunchStaleCheck(this)
-        RecordingReconcileWorker.enqueuePeriodic(this)
-        RecordingReconcileWorker.enqueueOneShot(this)
     }
 
     override fun onTerminate() {
@@ -87,37 +126,15 @@ class StreamVaultApp : Application(), SingletonImageLoader.Factory {
         super.onTerminate()
     }
 
-    private suspend fun refreshCachedAppUpdateIfNeeded() {
-        val autoCheckEnabled = preferencesRepository.autoCheckAppUpdates.first()
-        if (!autoCheckEnabled) {
-            return
-        }
-
-        val lastCheckedAt = preferencesRepository.lastAppUpdateCheckTimestamp.first()
-        val now = System.currentTimeMillis()
-        val checkIntervalMs = 24L * 60L * 60L * 1000L
-        if (lastCheckedAt != null && now - lastCheckedAt < checkIntervalMs) {
-            return
-        }
-
-        preferencesRepository.setLastAppUpdateCheckTimestamp(now)
-        when (val result = gitHubReleaseChecker.fetchLatestRelease()) {
-            is Result.Success -> {
-                preferencesRepository.setCachedAppUpdateRelease(
-                    versionName = result.data.versionName,
-                    versionCode = result.data.versionCode,
-                    releaseUrl = result.data.releaseUrl,
-                    downloadUrl = result.data.downloadUrl,
-                    releaseNotes = result.data.releaseNotes,
-                    publishedAt = result.data.publishedAt
-                )
-            }
-            else -> Unit
-        }
-    }
-
     override fun newImageLoader(context: PlatformContext): ImageLoader {
         return ImageLoader.Builder(context)
+            .components {
+                add(
+                    OkHttpNetworkFetcherFactory(
+                        callFactory = { imageOkHttpClient }
+                    )
+                )
+            }
             .memoryCache {
                 MemoryCache.Builder()
                     .maxSizePercent(context, 0.15) // Conservative TV memory cache
@@ -136,3 +153,8 @@ class StreamVaultApp : Application(), SingletonImageLoader.Factory {
             .build()
     }
 }
+
+internal fun dataMaintenanceConstraints(): Constraints = Constraints.Builder()
+    .setRequiresBatteryNotLow(true)
+    .setRequiresDeviceIdle(true)
+    .build()

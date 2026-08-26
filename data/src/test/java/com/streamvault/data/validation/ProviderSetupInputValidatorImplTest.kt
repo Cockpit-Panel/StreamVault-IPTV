@@ -60,7 +60,8 @@ class ProviderSetupInputValidatorImplTest {
         authMode: StalkerAuthMode = StalkerAuthMode.AUTO,
         username: String = "",
         password: String = "",
-        macAddress: String = "00:1A:79:12:34:56"
+        macAddress: String = "00:1A:79:12:34:56",
+        httpHeaders: String = ""
     ) = validator.validateStalker(
         portalUrl = "https://portal.example.com",
         macAddress = macAddress,
@@ -68,6 +69,8 @@ class ProviderSetupInputValidatorImplTest {
         authMode = authMode,
         username = username,
         password = password,
+        httpUserAgent = "",
+        httpHeaders = httpHeaders,
         deviceProfile = deviceProfile,
         timezone = timezone,
         locale = locale,
@@ -80,6 +83,12 @@ class ProviderSetupInputValidatorImplTest {
     @Test
     fun `validateStalker accepts blank optional fields and uses defaults`() {
         val result = stalkerResult(timezone = "", locale = "", deviceProfile = "")
+        assertThat(result).isInstanceOf(Result.Success::class.java)
+    }
+
+    @Test
+    fun `validateStalker allows blank custom header values for default-header removal`() {
+        val result = stalkerResult(httpHeaders = "Referer: | X-Test: hello")
         assertThat(result).isInstanceOf(Result.Success::class.java)
     }
 

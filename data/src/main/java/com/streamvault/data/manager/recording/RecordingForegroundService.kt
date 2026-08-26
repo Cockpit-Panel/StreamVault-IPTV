@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.content.Intent
 import android.util.Log
 import android.os.Build
@@ -13,7 +14,12 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.streamvault.data.R
+import com.streamvault.data.platform.DataSyncQuotaAcquireResult
+import com.streamvault.data.platform.DataSyncQuotaLease
+import com.streamvault.data.platform.DataSyncQuotaOwner
+import com.streamvault.data.platform.DataSyncServiceOwner
 import com.streamvault.domain.manager.RecordingManager
+import com.streamvault.domain.model.RecordingStatus
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -25,6 +31,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class RecordingForegroundService : Service() {
@@ -33,12 +40,15 @@ class RecordingForegroundService : Service() {
     @InstallIn(SingletonComponent::class)
     interface RecordingServiceEntryPoint {
         fun recordingManager(): RecordingManager
+        fun dataSyncQuotaOwner(): DataSyncQuotaOwner
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val idleGate = RecordingForegroundIdleGate()
     private var idleStopJob: Job? = null
     private var notificationJob: Job? = null
+    private var dataSyncQuotaOwner: DataSyncQuotaOwner? = null
+    private var dataSyncQuotaLease: DataSyncQuotaLease? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -51,8 +61,7 @@ class RecordingForegroundService : Service() {
             beginPendingCommand()
         }
         runCatching {
-            startForeground(
-                NOTIFICATION_ID,
+            startDataSyncForeground(
                 buildNotification(
                     activeCount = idleGate.activeRecordingCount,
                     pendingCommand = idleGate.hasPendingCommands
@@ -63,6 +72,7 @@ class RecordingForegroundService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        ensureDataSyncQuotaLease()
         ensureNotificationObserver()
         val manager = entryPoint().recordingManager()
         when (action) {
@@ -101,10 +111,35 @@ class RecordingForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        releaseDataSyncQuotaLease("service_destroyed")
         idleStopJob?.cancel()
         notificationJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.e(TAG, "Foreground-service time allowance exhausted; stopping active recordings")
+        idleStopJob?.cancel()
+        serviceScope.launch {
+            try {
+                val manager = entryPoint().recordingManager()
+                manager.observeRecordingItems().first()
+                    .asSequence()
+                    .filter { it.status == RecordingStatus.RECORDING }
+                    .forEach { recording ->
+                        runCatching {
+                            manager.stopRecordingForForegroundServiceTimeout(recording.id)
+                        }.onFailure { error ->
+                            Log.e(TAG, "Failed to stop recording ${recording.id} after service timeout", error)
+                        }
+                    }
+            } finally {
+                releaseDataSyncQuotaLease("android_timeout")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -166,6 +201,41 @@ class RecordingForegroundService : Service() {
     private fun entryPoint(): RecordingServiceEntryPoint =
         EntryPointAccessors.fromApplication(applicationContext, RecordingServiceEntryPoint::class.java)
 
+    private fun startDataSyncForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun ensureDataSyncQuotaLease() {
+        if (dataSyncQuotaLease != null) return
+        val owner = entryPoint().dataSyncQuotaOwner()
+        when (val result = owner.acquire(DataSyncServiceOwner.RECORDING)) {
+            is DataSyncQuotaAcquireResult.Granted -> {
+                dataSyncQuotaOwner = owner
+                dataSyncQuotaLease = result.lease
+            }
+            is DataSyncQuotaAcquireResult.Exhausted -> {
+                dataSyncQuotaOwner = owner
+                Log.e(TAG, "Shared dataSync quota is exhausted; Android timeout handling remains authoritative")
+            }
+        }
+    }
+
+    private fun releaseDataSyncQuotaLease(reason: String) {
+        val lease = dataSyncQuotaLease ?: return
+        dataSyncQuotaLease = null
+        runCatching { dataSyncQuotaOwner?.release(lease) }
+            .onFailure { error -> Log.w(TAG, "Unable to release dataSync quota lease ($reason)", error) }
+        dataSyncQuotaOwner = null
+    }
+
     private fun beginPendingCommand() {
         idleGate.onCommandStarted()
         idleStopJob?.cancel()
@@ -207,6 +277,7 @@ class RecordingForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "RecordingFgService"
         private const val CHANNEL_ID = "streamvault_recording"
         private const val NOTIFICATION_ID = 4102
         private const val IDLE_GRACE_MS = 3_000L

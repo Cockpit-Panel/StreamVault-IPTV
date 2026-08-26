@@ -2,7 +2,6 @@ package com.streamvault.app
 
 import android.app.SearchManager
 import android.content.Intent
-import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
@@ -25,6 +24,11 @@ import com.streamvault.app.tv.WatchNextManager
 import com.streamvault.app.tvinput.TvInputChannelSyncManager
 import com.streamvault.app.ui.theme.StreamVaultTheme
 import com.streamvault.app.ui.time.LocalAppTimeFormat
+import com.streamvault.domain.repository.ChannelRepository
+import com.streamvault.domain.repository.CombinedM3uRepository
+import com.streamvault.domain.repository.FavoriteRepository
+import com.streamvault.domain.repository.PlaybackHistoryRepository
+import com.streamvault.domain.repository.ProviderRepository
 import dagger.hilt.android.AndroidEntryPoint
 
 import javax.inject.Inject
@@ -32,6 +36,22 @@ import com.streamvault.data.preferences.PreferencesRepository
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.tv.material3.Button
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.runtime.CompositionLocalProvider
@@ -53,6 +73,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.streamvault.app.diagnostics.CrashReportStore
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -75,6 +96,21 @@ class MainActivity : ComponentActivity() {
     lateinit var preferencesRepository: PreferencesRepository
 
     @Inject
+    lateinit var combinedM3uRepository: CombinedM3uRepository
+
+    @Inject
+    lateinit var favoriteRepository: FavoriteRepository
+
+    @Inject
+    lateinit var playbackHistoryRepository: PlaybackHistoryRepository
+
+    @Inject
+    lateinit var channelRepository: ChannelRepository
+
+    @Inject
+    lateinit var providerRepository: ProviderRepository
+
+    @Inject
     lateinit var watchNextManager: WatchNextManager
 
     @Inject
@@ -85,6 +121,9 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var castManager: CastManager
+
+    @Inject
+    lateinit var databaseStartupCoordinator: DatabaseStartupCoordinator
 
     private val _pictureInPictureModeFlow = MutableStateFlow(false)
     val pictureInPictureModeFlow: StateFlow<Boolean> = _pictureInPictureModeFlow.asStateFlow()
@@ -112,16 +151,10 @@ class MainActivity : ComponentActivity() {
         applyImmersiveSystemUi()
         _pictureInPictureModeFlow.value = isInPictureInPictureMode
         handleExternalIntent(intent)
-        if (isTelevisionDevice()) {
-            lifecycleScope.launch {
-                watchNextManager.refreshWatchNext()
-                launcherRecommendationsManager.refreshRecommendations()
-                tvInputChannelSyncManager.refreshTvInputCatalog()
-            }
-        }
         setContent {
             val appLanguage by preferencesRepository.appLanguage.collectAsState(initial = "system")
             val appTimeFormat by preferencesRepository.appTimeFormat.collectAsState(initial = com.streamvault.domain.model.AppTimeFormat.SYSTEM)
+            val databaseStartupState by databaseStartupCoordinator.state.collectAsState()
             val currentContext = LocalContext.current
             
             val configuration = remember(appLanguage) {
@@ -164,10 +197,34 @@ class MainActivity : ComponentActivity() {
                 LocalAppTimeFormat provides appTimeFormat
             ) {
                 StreamVaultTheme {
-                    AppNavigation(mainActivity = this@MainActivity)
+                    when (val state = databaseStartupState) {
+                        DatabaseStartupState.Opening -> DatabaseStartupScreen(state = state)
+                        is DatabaseStartupState.Failed -> DatabaseStartupScreen(
+                            state = state,
+                            onRetry = {
+                                lifecycleScope.launch { databaseStartupCoordinator.open() }
+                            },
+                            onShareReport = ::shareLatestFailureReport
+                        )
+                        DatabaseStartupState.Ready -> {
+                            LaunchedEffect(Unit) {
+                                if (isTelevisionDevice()) {
+                                    watchNextManager.refreshWatchNext()
+                                    launcherRecommendationsManager.refreshRecommendations()
+                                    tvInputChannelSyncManager.refreshTvInputCatalog()
+                                }
+                            }
+                            AppNavigation(mainActivity = this@MainActivity)
+                        }
+                    }
                 }
             }
         }
+
+        // Start Room only after the application/test process has finished its lightweight setup.
+        // Compatibility instrumentation does not create this activity, so it cannot be blocked
+        // by a full schema open while Android is still starting the instrumented process.
+        databaseStartupCoordinator.start()
     }
 
     override fun onResume() {
@@ -258,6 +315,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enterPlayerPictureInPictureModeIfEligible(requirePlaying: Boolean = true): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         if (!supportsPictureInPicture() || isInPictureInPictureMode) {
             return false
         }
@@ -265,29 +323,17 @@ class MainActivity : ComponentActivity() {
         if (!state.enabled || (requirePlaying && !state.isPlaying)) {
             return false
         }
-        val params = buildPlayerPictureInPictureParams(state)
         return runCatching {
-            setPictureInPictureParams(params)
-            enterPictureInPictureMode(params)
+            PictureInPictureCompat.enter(this, state)
         }.getOrDefault(false)
     }
 
     private fun applyPlayerPictureInPictureParams() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         if (!supportsPictureInPicture()) return
         runCatching {
-            setPictureInPictureParams(buildPlayerPictureInPictureParams(playerPictureInPictureState))
+            PictureInPictureCompat.apply(this, playerPictureInPictureState)
         }
-    }
-
-    private fun buildPlayerPictureInPictureParams(
-        state: PlayerPictureInPictureState
-    ): PictureInPictureParams {
-        val builder = PictureInPictureParams.Builder()
-        state.aspectRatio?.let { builder.setAspectRatio(it) }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setAutoEnterEnabled(state.enabled && state.isPlaying)
-        }
-        return builder.build()
     }
 
     private fun videoAspectRatioOrNull(
@@ -309,9 +355,42 @@ class MainActivity : ComponentActivity() {
             packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     }
 
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private object PictureInPictureCompat {
+        fun enter(activity: MainActivity, state: PlayerPictureInPictureState): Boolean {
+            val params = build(state)
+            activity.setPictureInPictureParams(params)
+            return activity.enterPictureInPictureMode(params)
+        }
+
+        fun apply(activity: MainActivity, state: PlayerPictureInPictureState) {
+            activity.setPictureInPictureParams(build(state))
+        }
+
+        private fun build(
+            state: PlayerPictureInPictureState
+        ): android.app.PictureInPictureParams {
+            val builder = android.app.PictureInPictureParams.Builder()
+            state.aspectRatio?.let { builder.setAspectRatio(it) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setAutoEnterEnabled(state.enabled && state.isPlaying)
+            }
+            return builder.build()
+        }
+    }
+
     private fun handleExternalIntent(intent: Intent?) {
         val request = intent?.toExternalNavigationRequest() ?: return
         _externalNavigationRequestFlow.value = request
+    }
+
+    private fun shareLatestFailureReport() {
+        val file = CrashReportStore.latestReportFile(this)
+        if (!file.isFile || file.length() <= 0L) return
+        runCatching {
+            val uri = CrashReportStore.providerUriForFile(this, file)
+            startActivity(CrashReportStore.buildShareIntent(uri))
+        }
     }
 
     private fun Intent.toExternalNavigationRequest(): ExternalNavigationRequest? {
@@ -389,10 +468,15 @@ class MainActivity : ComponentActivity() {
     private fun Intent.isBackupJsonCandidate(uri: Uri): Boolean {
         val normalizedPath = uri.toString().substringBefore('?').lowercase(Locale.ROOT)
         val mimeType = type?.lowercase(Locale.ROOT).orEmpty()
-        val isJsonMime = mimeType in setOf("application/json", "text/json", "application/x-json")
+        val isJsonMime = mimeType in setOf(
+            "application/json",
+            "text/json",
+            "application/x-json",
+            "application/octet-stream",
+            "text/plain",
+        )
         val isJsonPath = normalizedPath.endsWith(".json")
-        val isGenericJsonFile = mimeType == "application/octet-stream" && isJsonPath
-        if (!isJsonMime && !isJsonPath && !isGenericJsonFile) return false
+        if (!isJsonMime && !isJsonPath) return false
         return uri.scheme?.lowercase(Locale.ROOT) in setOf("content", "file")
     }
 
@@ -411,6 +495,52 @@ class MainActivity : ComponentActivity() {
             getSerializableExtra(EXTRA_EXTERNAL_DESTINATION, ExternalDestination::class.java)
         } else {
             getSerializableExtra(EXTRA_EXTERNAL_DESTINATION) as? ExternalDestination
+        }
+    }
+}
+
+@Composable
+private fun DatabaseStartupScreen(
+    state: DatabaseStartupState,
+    onRetry: () -> Unit = {},
+    onShareReport: () -> Unit = {}
+) {
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(48.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            when (state) {
+                DatabaseStartupState.Opening -> {
+                    CircularProgressIndicator()
+                    Text(
+                        text = "Preparing your library…",
+                        modifier = Modifier.padding(top = 24.dp),
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                }
+                is DatabaseStartupState.Failed -> {
+                    Text(
+                        text = "StreamVault couldn't open your library",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = "${state.userMessage}\nError: ${state.errorType}",
+                        modifier = Modifier.padding(top = 16.dp),
+                        textAlign = TextAlign.Center
+                    )
+                    Row(
+                        modifier = Modifier.padding(top = 28.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Button(onClick = onRetry) { Text("Retry") }
+                        Button(onClick = onShareReport) { Text("Share report") }
+                    }
+                }
+                DatabaseStartupState.Ready -> Unit
+            }
         }
     }
 }

@@ -50,7 +50,8 @@ fun CategoryOptionsDialog(
     onClearAll: (() -> Unit)? = null,
     onToggleLock: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
-    onReorderChannels: (() -> Unit)? = null
+    onReorderChannels: (() -> Unit)? = null,
+    onOrganizeM3u: (() -> Unit)? = null
 ) {
     var canInteract by remember { mutableStateOf(false) }
     val blockOpenGesture = rememberDialogOpenGestureBlocker(canInteract)
@@ -172,6 +173,13 @@ fun CategoryOptionsDialog(
                                 onDismissRequest()
                             }
                         }
+                    )
+                }
+
+                if (onOrganizeM3u != null) {
+                    PremiumDialogAction(
+                        label = stringResource(R.string.m3u_organize_items),
+                        onClick = { if (canInteract) onOrganizeM3u() }
                     )
                 }
 

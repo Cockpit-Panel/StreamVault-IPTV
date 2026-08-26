@@ -35,7 +35,8 @@ import javax.inject.Singleton
 data class AppUpdateDownloadState(
     val status: AppUpdateDownloadStatus = AppUpdateDownloadStatus.Idle,
     val versionName: String? = null,
-    val downloadId: Long? = null
+    val downloadId: Long? = null,
+    val installPermissionRequired: Boolean = false
 )
 
 enum class AppUpdateDownloadStatus {
@@ -84,11 +85,7 @@ class AppUpdateInstaller @Inject constructor(
         if (downloadId == null) {
             preferencesRepository.setAppUpdateDownloadVersionName(null)
             val restoredState = if (downloadedVersionName != null && apkFile?.exists() == true) {
-                AppUpdateDownloadState(
-                    status = AppUpdateDownloadStatus.Downloaded,
-                    versionName = downloadedVersionName,
-                    downloadId = null
-                )
+                downloadedState(downloadedVersionName)
             } else {
                 if (downloadedVersionName != null) {
                     preferencesRepository.setDownloadedAppUpdateVersionName(null)
@@ -106,10 +103,7 @@ class AppUpdateInstaller @Inject constructor(
                 preferencesRepository.setAppUpdateDownloadId(null)
                 preferencesRepository.setAppUpdateDownloadVersionName(null)
                 val fallbackState = if (downloadedVersionName != null && apkFile?.exists() == true) {
-                    AppUpdateDownloadState(
-                        status = AppUpdateDownloadStatus.Downloaded,
-                        versionName = downloadedVersionName
-                    )
+                    downloadedState(downloadedVersionName)
                 } else {
                     preferencesRepository.setDownloadedAppUpdateVersionName(null)
                     AppUpdateDownloadState(status = AppUpdateDownloadStatus.Failed)
@@ -135,11 +129,7 @@ class AppUpdateInstaller @Inject constructor(
                     val completedApkFile = trackedVersionName?.let(::apkFileForVersion)
                     if (trackedVersionName != null && completedApkFile?.exists() == true) {
                         preferencesRepository.setDownloadedAppUpdateVersionName(trackedVersionName)
-                        AppUpdateDownloadState(
-                            status = AppUpdateDownloadStatus.Downloaded,
-                            versionName = trackedVersionName,
-                            downloadId = null
-                        )
+                        downloadedState(trackedVersionName)
                     } else {
                         preferencesRepository.setDownloadedAppUpdateVersionName(null)
                         AppUpdateDownloadState(
@@ -229,13 +219,21 @@ class AppUpdateInstaller @Inject constructor(
             return@withContext Result.error("No downloaded update is ready to install")
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+        if (requiresInstallPermission()) {
             val settingsIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
                 data = Uri.parse("package:${context.packageName}")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(settingsIntent)
-            return@withContext Result.error("Allow installs from this app, then try Install update again")
+            val permissionRequiredState = currentState.copy(installPermissionRequired = true)
+            _downloadState.value = permissionRequiredState
+            return@withContext try {
+                context.startActivity(settingsIntent)
+                Result.error("Allow installs from this app, then try Install update again")
+            } catch (error: ActivityNotFoundException) {
+                Result.error("Open Android settings, allow installs from this app, then try Install update again", error)
+            } catch (error: SecurityException) {
+                Result.error("The install permission settings screen could not be opened", error)
+            }
         }
 
         val apkFile = apkFileForVersion(currentState.versionName)
@@ -315,6 +313,20 @@ class AppUpdateInstaller @Inject constructor(
         val downloadsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: File(context.cacheDir, "downloads")
         return File(downloadsDir, "StreamVault-$sanitizedVersion.apk")
+    }
+
+    private fun downloadedState(versionName: String): AppUpdateDownloadState {
+        return AppUpdateDownloadState(
+            status = AppUpdateDownloadStatus.Downloaded,
+            versionName = versionName,
+            downloadId = null,
+            installPermissionRequired = requiresInstallPermission()
+        )
+    }
+
+    private fun requiresInstallPermission(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
     }
 
     private fun registerDownloadReceiver() {

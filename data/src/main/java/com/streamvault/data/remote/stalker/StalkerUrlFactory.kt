@@ -29,7 +29,10 @@ object StalkerUrlFactory {
     private const val INTERNAL_SCHEME = "stalker"
 
     fun normalizePortalUrl(url: String): String =
-        url.trim().trimEnd('/')
+        url.trim()
+            .substringBefore('#')
+            .substringBefore('?')
+            .trimEnd('/')
 
     fun loadUrlCandidates(portalUrl: String): List<String> {
         val normalized = normalizePortalUrl(portalUrl)
@@ -40,6 +43,13 @@ object StalkerUrlFactory {
                 candidates += normalized
             }
 
+            direct.endsWith("/c/index.html") || direct.endsWith("/c/index.htm") -> {
+                val suffix = if (direct.endsWith("/c/index.html")) "/c/index.html" else "/c/index.htm"
+                val base = normalized.dropLast(suffix.length)
+                candidates += "$base/server/load.php"
+                candidates += "$base/portal.php"
+            }
+
             direct.endsWith("/c") -> {
                 val base = normalized.removeSuffix("/c")
                 candidates += "$base/server/load.php"
@@ -47,13 +57,29 @@ object StalkerUrlFactory {
             }
 
             else -> {
+                // Prefer the modern Ministra API family (server/load.php) across the known
+                // install locations before falling back to the legacy portal.php endpoints.
                 candidates += "$normalized/server/load.php"
-                candidates += "$normalized/portal.php"
                 candidates += "${normalized.trimEnd('/')}/stalker_portal/server/load.php"
+                candidates += "$normalized/portal.php"
                 candidates += "${normalized.trimEnd('/')}/stalker_portal/portal.php"
             }
         }
         return candidates.toList()
+    }
+
+    /**
+     * True when the user supplied only a portal base (host or custom path) rather than an
+     * explicit API script (`server/load.php`, `portal.php`) or launcher client path (`/c…`).
+     * Only bare bases benefit from probing `/` for a redirect that reveals the install path.
+     */
+    fun isBarePortalBase(portalUrl: String): Boolean {
+        val direct = normalizePortalUrl(portalUrl).lowercase(Locale.ROOT)
+        return !direct.endsWith("/server/load.php") &&
+            !direct.endsWith("/portal.php") &&
+            !direct.endsWith("/c") &&
+            !direct.endsWith("/c/index.html") &&
+            !direct.endsWith("/c/index.htm")
     }
 
     fun portalReferer(loadUrl: String): String {

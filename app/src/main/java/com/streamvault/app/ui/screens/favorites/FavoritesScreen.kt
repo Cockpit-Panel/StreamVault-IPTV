@@ -503,6 +503,7 @@ fun FavoritesScreen(
                                                     ContentType.LIVE -> viewModel.selectPreset(SavedLibraryPreset.LIVE_RECALL)
                                                     ContentType.MOVIE -> viewModel.selectPreset(SavedLibraryPreset.MOVIES)
                                                     ContentType.SERIES -> viewModel.selectPreset(SavedLibraryPreset.SERIES)
+                                                    ContentType.VOD,
                                                     ContentType.SERIES_EPISODE -> Unit
                                                 }
                                             }

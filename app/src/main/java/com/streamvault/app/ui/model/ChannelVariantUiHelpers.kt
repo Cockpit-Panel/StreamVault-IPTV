@@ -18,10 +18,18 @@ fun List<Channel>.orderedByRequestedRawIds(
         filter { it.providerId == providerId }
     } ?: this
     val byRawId = filtered.associateByAnyRawId()
-    val seenKeys = linkedSetOf<String>()
-    return requestedIds.mapNotNull { rawId ->
+    val orderedChannels = requestedIds.mapNotNull { rawId ->
         byRawId[rawId]
-    }.filter { channel ->
+    }
+    val shouldCollapseGroupedDuplicates = orderedChannels.any { channel ->
+        channel.allVariantRawIds().size > 1
+    }
+    if (!shouldCollapseGroupedDuplicates) {
+        return orderedChannels
+    }
+
+    val seenKeys = linkedSetOf<String>()
+    return orderedChannels.filter { channel ->
         seenKeys.add(channel.logicalGroupId.ifBlank { channel.id.toString() })
     }
 }

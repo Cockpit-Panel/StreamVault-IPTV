@@ -9,9 +9,10 @@ import com.streamvault.data.remote.xtream.OkHttpXtreamApiService
 import com.streamvault.data.remote.xtream.XtreamApiService
 import com.streamvault.data.remote.xtream.XtreamProvider
 import com.streamvault.data.remote.xtream.XtreamUrlFactory
+import com.streamvault.data.util.runSuspendCatching
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Movie
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.Series
 import kotlin.system.measureTimeMillis
 
@@ -82,7 +83,7 @@ internal class SyncManagerXtreamFetcher(
             when (val attempt = xtreamSupport.attemptNonCancellation {
                 xtreamSupport.retryXtreamCatalogTransient(provider.id) {
                     xtreamSupport.executeXtreamRequest(provider.id, XtreamAdaptiveSyncPolicy.Stage.CATEGORY) {
-                        val thinResult = runCatching {
+                        val thinResult = runSuspendCatching {
                             streamThinRowsInBatches()
                         }
                         val thinCount = thinResult.getOrNull()?.first ?: 0

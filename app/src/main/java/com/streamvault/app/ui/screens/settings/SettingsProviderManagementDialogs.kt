@@ -1,15 +1,23 @@
 package com.streamvault.app.ui.screens.settings
 
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import com.streamvault.app.ui.components.dialogs.PremiumDialog
 import com.streamvault.app.ui.components.dialogs.PremiumDialogFooterButton
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Text
 import com.streamvault.app.R
+import com.streamvault.app.ui.theme.OnSurfaceDim
+import com.streamvault.app.ui.theme.Primary
 
 @Composable
 internal fun SettingsProviderManagementDialogs(
@@ -134,7 +142,31 @@ internal fun SettingsProviderManagementDialogs(
             onDismissRequest = { if (!uiState.isDeletingProvider) providerState.pendingDeleteProviderId = null },
             widthFraction = 0.48f,
             heightFraction = null,
-            content = {},
+            content = {
+                if (uiState.isDeletingProvider) {
+                    val fraction = uiState.deleteProviderProgressFraction
+                    if (fraction != null) {
+                        LinearProgressIndicator(
+                            progress = { fraction.coerceIn(0f, 1f) },
+                            color = Primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp)
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            color = Primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp)
+                        )
+                    }
+                    Text(
+                        text = uiState.deleteProviderProgressMessage ?: "Deleting provider...",
+                        color = OnSurfaceDim
+                    )
+                }
+            },
             footer = {
                 PremiumDialogFooterButton(
                     label = stringResource(R.string.settings_cancel),

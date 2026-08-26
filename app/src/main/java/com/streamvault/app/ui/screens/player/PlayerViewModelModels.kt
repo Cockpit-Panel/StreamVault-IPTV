@@ -47,7 +47,8 @@ data class PlayerPreferencesUiState(
 data class PlayerDiagnosticsUiState(
     val providerName: String = "",
     val providerSourceLabel: String = "",
-    val decoderMode: DecoderMode = DecoderMode.AUTO,
+    val audioDecoderMode: DecoderMode = DecoderMode.AUTO,
+    val videoDecoderMode: DecoderMode = DecoderMode.AUTO,
     val activeDecoderName: String = "Unknown",
     val activeAudioDecoderName: String = "Unknown",
     val ffmpegAvailable: Boolean = false,
@@ -213,6 +214,12 @@ enum class PlayerNoticeAction {
     LAST_CHANNEL,
     ALTERNATE_STREAM,
     OPEN_GUIDE
+}
+
+sealed interface PlaybackResolutionUiState {
+    data object Idle : PlaybackResolutionUiState
+    data object Resolving : PlaybackResolutionUiState
+    data class Failure(val message: String) : PlaybackResolutionUiState
 }
 
 enum class AspectRatio(val modeName: String) {

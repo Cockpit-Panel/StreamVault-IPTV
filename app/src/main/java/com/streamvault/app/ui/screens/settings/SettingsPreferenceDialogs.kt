@@ -5,8 +5,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.res.stringResource
 import com.streamvault.app.R
+import com.streamvault.app.ui.screens.dashboard.DashboardShelfCustomizationDialog
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.AppLandingDestination
+import com.streamvault.domain.model.AppTopLevelDestination
 import com.streamvault.domain.model.CategorySortMode
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.DecoderMode
@@ -18,6 +20,10 @@ internal fun SettingsPreferenceDialogs(
     uiState: SettingsUiState,
     viewModel: SettingsViewModel,
     context: Context,
+    showTopNavigationDialog: Boolean,
+    onShowTopNavigationDialogChange: (Boolean) -> Unit,
+    showHomeDashboardDialog: Boolean,
+    onShowHomeDashboardDialogChange: (Boolean) -> Unit,
     showLandingScreenDialog: Boolean,
     onShowLandingScreenDialogChange: (Boolean) -> Unit,
     showGuideDefaultCategoryDialog: Boolean,
@@ -28,8 +34,12 @@ internal fun SettingsPreferenceDialogs(
     onShowTimeFormatDialogChange: (Boolean) -> Unit,
     showAudioVideoOffsetDialog: Boolean,
     onShowAudioVideoOffsetDialogChange: (Boolean) -> Unit,
-    showDecoderModeDialog: Boolean,
-    onShowDecoderModeDialogChange: (Boolean) -> Unit,
+    showAudioDecoderModeDialog: Boolean,
+    onShowAudioDecoderModeDialogChange: (Boolean) -> Unit,
+    showVideoDecoderModeDialog: Boolean,
+    onShowVideoDecoderModeDialogChange: (Boolean) -> Unit,
+    showPlaybackBufferModeDialog: Boolean,
+    onShowPlaybackBufferModeDialogChange: (Boolean) -> Unit,
     showAudioOutputPreferenceDialog: Boolean,
     onShowAudioOutputPreferenceDialogChange: (Boolean) -> Unit,
     showSurfaceModeDialog: Boolean,
@@ -38,6 +48,8 @@ internal fun SettingsPreferenceDialogs(
     onShowVodHttpProtocolDialogChange: (Boolean) -> Unit,
     showTimeshiftDepthDialog: Boolean,
     onShowTimeshiftDepthDialogChange: (Boolean) -> Unit,
+    showTimeshiftBackendDialog: Boolean,
+    onShowTimeshiftBackendDialogChange: (Boolean) -> Unit,
     showDefaultStopTimerDialog: Boolean,
     onShowDefaultStopTimerDialogChange: (Boolean) -> Unit,
     showDefaultIdleTimerDialog: Boolean,
@@ -83,8 +95,12 @@ internal fun SettingsPreferenceDialogs(
         onShowTimeFormatDialogChange = onShowTimeFormatDialogChange,
         showAudioVideoOffsetDialog = showAudioVideoOffsetDialog,
         onShowAudioVideoOffsetDialogChange = onShowAudioVideoOffsetDialogChange,
-        showDecoderModeDialog = showDecoderModeDialog,
-        onShowDecoderModeDialogChange = onShowDecoderModeDialogChange,
+        showAudioDecoderModeDialog = showAudioDecoderModeDialog,
+        onShowAudioDecoderModeDialogChange = onShowAudioDecoderModeDialogChange,
+        showVideoDecoderModeDialog = showVideoDecoderModeDialog,
+        onShowVideoDecoderModeDialogChange = onShowVideoDecoderModeDialogChange,
+        showPlaybackBufferModeDialog = showPlaybackBufferModeDialog,
+        onShowPlaybackBufferModeDialogChange = onShowPlaybackBufferModeDialogChange,
         showAudioOutputPreferenceDialog = showAudioOutputPreferenceDialog,
         onShowAudioOutputPreferenceDialogChange = onShowAudioOutputPreferenceDialogChange,
         showSurfaceModeDialog = showSurfaceModeDialog,
@@ -93,6 +109,8 @@ internal fun SettingsPreferenceDialogs(
         onShowVodHttpProtocolDialogChange = onShowVodHttpProtocolDialogChange,
         showTimeshiftDepthDialog = showTimeshiftDepthDialog,
         onShowTimeshiftDepthDialogChange = onShowTimeshiftDepthDialogChange,
+        showTimeshiftBackendDialog = showTimeshiftBackendDialog,
+        onShowTimeshiftBackendDialogChange = onShowTimeshiftBackendDialogChange,
         showDefaultStopTimerDialog = showDefaultStopTimerDialog,
         onShowDefaultStopTimerDialogChange = onShowDefaultStopTimerDialogChange,
         showDefaultIdleTimerDialog = showDefaultIdleTimerDialog,
@@ -109,12 +127,37 @@ internal fun SettingsPreferenceDialogs(
         onShowLiveTranslationEndpointDialogChange = onShowLiveTranslationEndpointDialogChange
     )
 
+    if (showTopNavigationDialog) {
+        TopNavigationDialog(
+            currentDestinations = uiState.appTopLevelDestinations,
+            onDismiss = { onShowTopNavigationDialogChange(false) },
+            onSave = { destinations ->
+                viewModel.setAppTopLevelDestinations(destinations)
+                onShowTopNavigationDialogChange(false)
+            }
+        )
+    }
+
+    if (showHomeDashboardDialog) {
+        DashboardShelfCustomizationDialog(
+            currentShelves = uiState.appHomeDashboardShelves,
+            onDismiss = { onShowHomeDashboardDialogChange(false) },
+            onSave = { shelves ->
+                viewModel.setAppHomeDashboardShelves(shelves)
+                onShowHomeDashboardDialogChange(false)
+            }
+        )
+    }
+
     if (showLandingScreenDialog) {
+        val availableLandingDestinations = remember(uiState.appTopLevelDestinations) {
+            AppTopLevelDestination.availableLandingDestinations(uiState.appTopLevelDestinations)
+        }
         PremiumSelectionDialog(
             title = stringResource(R.string.settings_select_default_landing_screen),
             onDismiss = { onShowLandingScreenDialogChange(false) }
         ) {
-            AppLandingDestination.entries.forEachIndexed { index, destination ->
+            availableLandingDestinations.forEachIndexed { index, destination ->
                 LevelOption(
                     level = index,
                     text = stringResource(destination.labelResId()),
@@ -323,6 +366,8 @@ internal fun SettingsPreferenceDialogs(
 private fun AppLandingDestination.labelResId(): Int = when (this) {
     AppLandingDestination.HOME -> R.string.nav_home
     AppLandingDestination.LIVE_TV -> R.string.nav_live_tv
+    AppLandingDestination.FIRST_FAVORITE_LIVE -> R.string.settings_startup_first_favorite_live
+    AppLandingDestination.LAST_WATCHED_LIVE -> R.string.settings_startup_last_watched_live
     AppLandingDestination.MOVIES -> R.string.nav_movies
     AppLandingDestination.SERIES -> R.string.nav_series
     AppLandingDestination.GUIDE -> R.string.nav_epg

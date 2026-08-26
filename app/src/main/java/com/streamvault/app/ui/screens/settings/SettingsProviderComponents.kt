@@ -48,7 +48,7 @@ import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createDateTimeFormat
 import com.streamvault.domain.model.ActiveLiveSource
 import com.streamvault.domain.model.CombinedM3uProfile
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
 import kotlinx.coroutines.launch
@@ -118,7 +118,13 @@ internal fun ProviderSettingsCard(
                     color = OnSurface
                 )
             }
-            ProviderStatusBadge(status = provider.status)
+            ProviderStatusBadge(
+                status = provider.status,
+                requiresAttention = provider.type == ProviderType.STALKER_PORTAL &&
+                    provider.status == ProviderStatus.PARTIAL &&
+                    provider.stalkerTransportMode ==
+                    com.streamvault.domain.model.StalkerTransportMode.AUTO_STRICT
+            )
             if (isActive) {
                 Text(
                     text = stringResource(R.string.settings_active),

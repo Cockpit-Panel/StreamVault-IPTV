@@ -1,6 +1,7 @@
 package com.streamvault.domain.repository
 
 import com.streamvault.domain.model.Channel
+import com.streamvault.domain.model.CatalogCompleteness
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.Series
 import kotlinx.coroutines.flow.Flow
@@ -8,7 +9,8 @@ import kotlinx.coroutines.flow.Flow
 data class SearchRepositoryResult(
     val channels: List<Channel> = emptyList(),
     val movies: List<Movie> = emptyList(),
-    val series: List<Series> = emptyList()
+    val series: List<Series> = emptyList(),
+    val catalogCompleteness: CatalogCompleteness = CatalogCompleteness.COMPLETE
 )
 
 interface SearchRepository {

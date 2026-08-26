@@ -4,6 +4,7 @@ import android.app.Application
 import com.streamvault.app.R
 import com.streamvault.domain.manager.RecordingManager
 import com.streamvault.domain.model.RecordingStorageConfig
+import com.streamvault.domain.model.RecordingReconciliationResult
 import com.streamvault.domain.model.Result
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,10 +121,14 @@ internal class SettingsRecordingActions(
             val result = recordingManager.reconcileRecordingState()
             uiState.update {
                 it.copy(
-                    userMessage = if (result is Result.Error) {
-                        appContext.getString(R.string.settings_recording_reconcile_failed, result.message)
-                    } else {
-                        appContext.getString(R.string.settings_recording_reconcile_complete)
+                    userMessage = when (result) {
+                        is RecordingReconciliationResult.TransientFailure ->
+                            appContext.getString(R.string.settings_recording_reconcile_failed, result.message)
+                        is RecordingReconciliationResult.PermanentFailure ->
+                            appContext.getString(R.string.settings_recording_reconcile_failed, result.message)
+                        is RecordingReconciliationResult.Complete,
+                        is RecordingReconciliationResult.Partial ->
+                            appContext.getString(R.string.settings_recording_reconcile_complete)
                     }
                 )
             }

@@ -26,9 +26,10 @@ class CategoryRepositoryImpl @Inject constructor(
         combine(
             categoryDao.getByProviderAndType(providerId, ContentType.LIVE.name),
             categoryDao.getByProviderAndType(providerId, ContentType.MOVIE.name),
-            categoryDao.getByProviderAndType(providerId, ContentType.SERIES.name)
-        ) { live, movies, series ->
-            (live + movies + series)
+            categoryDao.getByProviderAndType(providerId, ContentType.SERIES.name),
+            categoryDao.getByProviderAndType(providerId, ContentType.VOD.name)
+        ) { live, movies, series, vod ->
+            (live + movies + series + vod)
                 .map { it.toDomain() }
                 .sortedWith(compareBy<Category>({ it.type.ordinal }, { it.name.lowercase() }))
         }
@@ -45,6 +46,10 @@ class CategoryRepositoryImpl @Inject constructor(
                 ContentType.LIVE -> channelDao.updateProtectionStatus(providerId, categoryId, isProtected)
                 ContentType.MOVIE -> movieDao.updateProtectionStatus(providerId, categoryId, isProtected)
                 ContentType.SERIES -> seriesDao.updateProtectionStatus(providerId, categoryId, isProtected)
+                ContentType.VOD -> {
+                    movieDao.updateProtectionStatus(providerId, categoryId, isProtected)
+                    seriesDao.updateProtectionStatus(providerId, categoryId, isProtected)
+                }
                 ContentType.SERIES_EPISODE -> Unit
             }
         }

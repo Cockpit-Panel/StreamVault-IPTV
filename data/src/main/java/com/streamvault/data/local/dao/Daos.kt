@@ -2,6 +2,7 @@ package com.streamvault.data.local.dao
 
 import androidx.room.*
 import com.streamvault.data.local.entity.*
+import com.streamvault.domain.model.ProviderType
 import kotlinx.coroutines.flow.Flow
 
 data class RemoteIdMapping(
@@ -29,18 +30,17 @@ abstract class ProviderDao {
     @Query("SELECT * FROM providers WHERE is_active = 1 LIMIT 1")
     abstract fun getActive(): Flow<ProviderEntity?>
 
-    @Query("SELECT * FROM providers WHERE server_url = :serverUrl AND username = :username AND stalker_mac_address = :stalkerMacAddress")
-    abstract suspend fun getByUrlAndUser(
-        serverUrl: String,
-        username: String,
-        stalkerMacAddress: String = ""
-    ): ProviderEntity?
-
     @Query("SELECT * FROM providers WHERE id = :id")
     abstract suspend fun getById(id: Long): ProviderEntity?
 
+    @Query("SELECT * FROM providers WHERE id = :id")
+    abstract fun getByIdSync(id: Long): ProviderEntity?
+
     @Query("SELECT * FROM providers WHERE id IN (:ids)")
     abstract suspend fun getByIds(ids: List<Long>): List<ProviderEntity>
+
+    @Query("SELECT * FROM providers WHERE type = :type")
+    abstract fun getByTypeSync(type: ProviderType): List<ProviderEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun insertDirect(provider: ProviderEntity): Long
@@ -59,9 +59,6 @@ abstract class ProviderDao {
 
     @Query("UPDATE providers SET last_synced_at = :timestamp WHERE id = :id")
     abstract suspend fun updateSyncTime(id: Long, timestamp: Long)
-
-    @Query("UPDATE providers SET epg_url = :epgUrl WHERE id = :id")
-    abstract suspend fun updateEpgUrl(id: Long, epgUrl: String)
 
     @Transaction
     open suspend fun insert(provider: ProviderEntity): Long {
@@ -91,36 +88,57 @@ abstract class ProviderDao {
 abstract class ChannelDao {
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId
+        ORDER BY c.number ASC
         """
     )
     abstract fun getByProvider(providerId: Long): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.error_count = 0
+        ORDER BY c.number ASC
         """
     )
     abstract fun getByProviderWithoutErrors(providerId: Long): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.error_count = 0
+        ORDER BY c.number ASC
         LIMIT :limit
         """
     )
@@ -128,12 +146,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId
+        ORDER BY c.number ASC
         LIMIT :limit
         """
     )
@@ -141,12 +166,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId
+        ORDER BY c.number ASC
         LIMIT :limit
         """
     )
@@ -157,36 +189,57 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId
+        ORDER BY c.number ASC
         """
     )
     abstract fun getByCategory(providerId: Long, categoryId: Long): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId AND c.error_count = 0
+        ORDER BY c.number ASC
         """
     )
     abstract fun getByCategoryWithoutErrors(providerId: Long, categoryId: Long): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId AND c.error_count = 0
+        ORDER BY c.number ASC
         LIMIT :limit
         """
     )
@@ -198,12 +251,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId
+        ORDER BY c.number ASC
         LIMIT :limit OFFSET :offset
         """
     )
@@ -211,12 +271,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.error_count = 0
+        ORDER BY c.number ASC
         LIMIT :limit OFFSET :offset
         """
     )
@@ -224,12 +291,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId
+        ORDER BY c.number ASC
         LIMIT :limit OFFSET :offset
         """
     )
@@ -237,12 +311,19 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND category_id = :categoryId AND error_count = 0
-        ORDER BY number ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.category_id = :categoryId AND c.error_count = 0
+        ORDER BY c.number ASC
         LIMIT :limit OFFSET :offset
         """
     )
@@ -255,9 +336,16 @@ abstract class ChannelDao {
         """
         SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
                c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
-               c.provider_id, c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
         FROM channels c
+        JOIN providers p ON p.id = c.provider_id
         JOIN channels_fts ON c.id = channels_fts.rowid
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
         WHERE c.provider_id = :providerId
           AND channels_fts MATCH :query
         ORDER BY c.name ASC
@@ -270,8 +358,15 @@ abstract class ChannelDao {
         """
         SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
                c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
-               c.provider_id, c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
         FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
         WHERE c.provider_id = :providerId
           AND (
               LOWER(c.name) LIKE LOWER(:queryLike) ESCAPE '\'
@@ -288,9 +383,16 @@ abstract class ChannelDao {
         """
         SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
                c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
-               c.provider_id, c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
         FROM channels c
+        JOIN providers p ON p.id = c.provider_id
         JOIN channels_fts ON c.id = channels_fts.rowid
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
         WHERE c.provider_id = :providerId
           AND c.category_id = :categoryId
           AND channels_fts MATCH :query
@@ -304,8 +406,15 @@ abstract class ChannelDao {
         """
         SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
                c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
-               c.provider_id, c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
         FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
         WHERE c.provider_id = :providerId
           AND c.category_id = :categoryId
           AND (
@@ -321,6 +430,31 @@ abstract class ChannelDao {
 
     @Query("SELECT * FROM channels WHERE id = :id")
     abstract suspend fun getById(id: Long): ChannelEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insert(channel: ChannelEntity): Long
+
+    @Query("SELECT * FROM channels WHERE provider_id = :providerId AND stream_id = :streamId LIMIT 1")
+    abstract suspend fun getByStreamId(providerId: Long, streamId: Long): ChannelEntity?
+
+    @Query(
+        """
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.id = :id
+        LIMIT 1
+        """
+    )
+    abstract suspend fun getBrowseById(id: Long): ChannelBrowseEntity?
 
     @Query(
         """
@@ -344,6 +478,9 @@ abstract class ChannelDao {
     @Query("SELECT * FROM channels WHERE provider_id = :providerId")
     abstract suspend fun getByProviderSync(providerId: Long): List<ChannelEntity>
 
+    @Query("SELECT * FROM channels WHERE provider_id = :providerId AND category_id = :categoryId")
+    abstract suspend fun getByCategorySync(providerId: Long, categoryId: Long): List<ChannelEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun insertAll(channels: List<ChannelEntity>)
 
@@ -353,11 +490,17 @@ abstract class ChannelDao {
     @Query("SELECT id, stream_id AS remote_id FROM channels WHERE provider_id = :providerId")
     abstract suspend fun getIdMappings(providerId: Long): List<RemoteIdMapping>
 
+    @Query("SELECT COUNT(*) FROM channels WHERE provider_id = :providerId")
+    abstract suspend fun countByProvider(providerId: Long): Int
+
     @Query("DELETE FROM channels WHERE provider_id = :providerId")
     abstract suspend fun deleteByProvider(providerId: Long)
 
     @Query("DELETE FROM channels WHERE id IN (:ids)")
     abstract suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("DELETE FROM channels WHERE id = :id")
+    abstract suspend fun deleteById(id: Long)
 
     @Transaction
     open suspend fun replaceAll(providerId: Long, channels: List<ChannelEntity>) {
@@ -371,40 +514,73 @@ abstract class ChannelDao {
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE id IN (:ids)
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.id IN (:ids)
         """
     )
     abstract fun getByIds(ids: List<Long>): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE logical_group_id IN (:logicalGroupIds)
-        ORDER BY provider_id ASC, number ASC, name ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.logical_group_id IN (:logicalGroupIds)
+        ORDER BY c.provider_id ASC, c.number ASC, c.name ASC
         """
     )
     abstract fun getByLogicalGroupIds(logicalGroupIds: List<String>): Flow<List<ChannelBrowseEntity>>
 
     @Query(
         """
-        SELECT id, stream_id, name, logo_url, group_title, category_id, category_name, stream_url,
-               epg_channel_id, number, catch_up_supported, catch_up_days, catchUpSource,
-               provider_id, is_adult, is_user_protected, logical_group_id, error_count
-        FROM channels
-        WHERE provider_id = :providerId AND logical_group_id = :logicalGroupId
-        ORDER BY number ASC, name ASC
+        SELECT c.id, c.stream_id, c.name, c.logo_url, c.group_title, c.category_id, c.category_name, c.stream_url,
+               c.epg_channel_id, c.number, c.catch_up_supported, c.catch_up_days, c.catchUpSource,
+               c.provider_id,
+               (SELECT guide_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS guide_source_policy,
+               (SELECT channel_logo_source_policy FROM provider_configs WHERE provider_id = c.provider_id) AS channel_logo_source_policy,
+               ec.icon_url AS epg_icon_url,
+               c.is_adult, c.is_user_protected, c.logical_group_id, c.error_count
+        FROM channels c
+        JOIN providers p ON p.id = c.provider_id
+        LEFT JOIN channel_epg_mappings cem ON cem.provider_channel_id = c.id AND cem.provider_id = c.provider_id
+        LEFT JOIN epg_channels ec ON ec.epg_source_id = cem.epg_source_id AND ec.xmltv_channel_id = cem.xmltv_channel_id
+        WHERE c.provider_id = :providerId AND c.logical_group_id = :logicalGroupId
+        ORDER BY c.number ASC, c.name ASC
         """
     )
     abstract suspend fun getByLogicalGroupId(providerId: Long, logicalGroupId: String): List<ChannelBrowseEntity>
 
     @Query("SELECT category_id, COUNT(*) as item_count FROM channels WHERE provider_id = :providerId AND category_id IS NOT NULL GROUP BY category_id")
+    abstract fun getRawCategoryCounts(providerId: Long): Flow<List<CategoryCount>>
+
+    @Query(
+        """
+        SELECT category_id, COUNT(*) as item_count
+        FROM channels
+        WHERE provider_id = :providerId
+          AND category_id IS NOT NULL
+          AND NOT (TRIM(name) LIKE '##%' AND TRIM(name) LIKE '%##')
+        GROUP BY category_id
+        """
+    )
     abstract fun getCategoryCounts(providerId: Long): Flow<List<CategoryCount>>
 
     @Query(
@@ -423,9 +599,38 @@ abstract class ChannelDao {
         GROUP BY category_id
         """
     )
+    abstract fun getRawGroupedCategoryCounts(providerId: Long): Flow<List<CategoryCount>>
+
+    @Query(
+        """
+        SELECT
+            category_id,
+            COUNT(
+                DISTINCT CASE
+                    WHEN logical_group_id IS NOT NULL AND logical_group_id != '' THEN logical_group_id
+                    ELSE CAST(id AS TEXT)
+                END
+            ) AS item_count
+        FROM channels
+        WHERE provider_id = :providerId
+          AND category_id IS NOT NULL
+          AND NOT (TRIM(name) LIKE '##%' AND TRIM(name) LIKE '%##')
+        GROUP BY category_id
+        """
+    )
     abstract fun getGroupedCategoryCounts(providerId: Long): Flow<List<CategoryCount>>
 
     @Query("SELECT COUNT(*) FROM channels WHERE provider_id = :providerId")
+    abstract fun getRawCount(providerId: Long): Flow<Int>
+
+    @Query(
+        """
+        SELECT COUNT(*)
+        FROM channels
+        WHERE provider_id = :providerId
+          AND NOT (TRIM(name) LIKE '##%' AND TRIM(name) LIKE '%##')
+        """
+    )
     abstract fun getCount(providerId: Long): Flow<Int>
 
     @Query("SELECT COALESCE(MAX(catch_up_days), 0) FROM channels WHERE catch_up_supported = 1")
@@ -434,8 +639,17 @@ abstract class ChannelDao {
     @Query("UPDATE channels SET is_user_protected = :isProtected WHERE provider_id = :providerId AND category_id = :categoryId")
     abstract suspend fun updateProtectionStatus(providerId: Long, categoryId: Long, isProtected: Boolean)
 
+    @Query("UPDATE channels SET is_user_protected = :isProtected WHERE id = :id AND provider_id = :providerId")
+    abstract suspend fun updateItemProtection(id: Long, providerId: Long, isProtected: Boolean): Int
+
     @Query("UPDATE channels SET is_user_protected = 0 WHERE provider_id = :providerId AND category_id IN (:categoryIds)")
     abstract suspend fun clearProtectionForCategories(providerId: Long, categoryIds: List<Long>)
+
+    @Query("UPDATE channels SET is_user_protected = 0 WHERE provider_id = :providerId")
+    abstract suspend fun clearItemProtectionByProvider(providerId: Long)
+
+    @Query("UPDATE channels SET is_user_protected = CASE WHEN category_id IN (SELECT category_id FROM categories WHERE provider_id = :providerId AND type = 'LIVE' AND is_user_protected = 1) THEN 1 ELSE 0 END WHERE provider_id = :providerId")
+    abstract suspend fun resetProtectionToCategoryState(providerId: Long)
 
     @Query("UPDATE channels SET error_count = error_count + 1 WHERE id = :id")
     abstract suspend fun incrementErrorCount(id: Long)
@@ -461,6 +675,12 @@ abstract class ChannelDao {
 
 @Dao
 interface ChannelPreferenceDao {
+    @Query("SELECT * FROM channel_preferences")
+    suspend fun getAllSync(): List<ChannelPreferenceEntity>
+
+    @Query("DELETE FROM channel_preferences WHERE channel_id IN (SELECT id FROM channels WHERE provider_id = :providerId)")
+    suspend fun deleteByProvider(providerId: Long)
+
     @Query("SELECT aspect_ratio FROM channel_preferences WHERE channel_id = :channelId LIMIT 1")
     fun observeAspectRatio(channelId: Long): Flow<String?>
 
@@ -1423,8 +1643,20 @@ interface MovieDao {
     @Query("SELECT * FROM movies WHERE id = :id")
     suspend fun getById(id: Long): MovieEntity?
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(movie: MovieEntity): Long
+
     @Query("SELECT * FROM movies WHERE provider_id = :providerId")
     suspend fun getByProviderSync(providerId: Long): List<MovieEntity>
+
+    @Query("SELECT * FROM movies WHERE provider_id = :providerId AND tmdb_id = :tmdbId")
+    suspend fun getByProviderAndTmdbIdSync(providerId: Long, tmdbId: Long): List<MovieEntity>
+
+    @Query("SELECT * FROM movies WHERE provider_id = :providerId AND year = :year")
+    suspend fun getByProviderAndYearSync(providerId: Long, year: String): List<MovieEntity>
+
+    @Query("SELECT * FROM movies WHERE provider_id = :providerId AND release_date LIKE :yearPrefix")
+    suspend fun getByProviderAndReleaseYearPrefixSync(providerId: Long, yearPrefix: String): List<MovieEntity>
 
     @Query("SELECT tmdb_id FROM movies WHERE provider_id = :providerId AND tmdb_id IS NOT NULL")
     suspend fun getTmdbIdsByProvider(providerId: Long): List<TmdbIdMapping>
@@ -1437,6 +1669,9 @@ interface MovieDao {
 
     @Query("SELECT * FROM movies WHERE provider_id = :providerId AND stream_id IN (:streamIds)")
     suspend fun getByStreamIds(providerId: Long, streamIds: List<Long>): List<MovieEntity>
+
+    @Query("SELECT * FROM movies WHERE provider_id = :providerId AND stream_id IN (:streamIds)")
+    fun observeByStreamIds(providerId: Long, streamIds: List<Long>): Flow<List<MovieEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(movies: List<MovieEntity>)
@@ -1533,6 +1768,9 @@ interface MovieDao {
     @Query("UPDATE movies SET watch_progress = 0, watch_count = 0, last_watched_at = 0")
     suspend fun resetAllWatchProgress()
 
+    @Query("SELECT COUNT(*) FROM movies WHERE provider_id = :providerId")
+    suspend fun countByProvider(providerId: Long): Int
+
     @Query("DELETE FROM movies WHERE provider_id = :providerId")
     suspend fun deleteByProvider(providerId: Long)
 
@@ -1541,6 +1779,9 @@ interface MovieDao {
 
     @Query("DELETE FROM movies WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("DELETE FROM movies WHERE id = :id")
+    suspend fun deleteById(id: Long)
 
     @Query("DELETE FROM movies WHERE provider_id = :providerId AND category_id = :categoryId AND stream_id NOT IN (:remoteIds)")
     suspend fun deleteMissingByCategory(providerId: Long, categoryId: Long, remoteIds: List<Long>)
@@ -1625,8 +1866,17 @@ interface MovieDao {
     @Query("UPDATE movies SET is_user_protected = :isProtected WHERE provider_id = :providerId AND category_id = :categoryId")
     suspend fun updateProtectionStatus(providerId: Long, categoryId: Long, isProtected: Boolean)
 
+    @Query("UPDATE movies SET is_user_protected = :isProtected WHERE id = :id AND provider_id = :providerId")
+    suspend fun updateItemProtection(id: Long, providerId: Long, isProtected: Boolean): Int
+
     @Query("UPDATE movies SET is_user_protected = 0 WHERE provider_id = :providerId AND category_id IN (:categoryIds)")
     suspend fun clearProtectionForCategories(providerId: Long, categoryIds: List<Long>)
+
+    @Query("UPDATE movies SET is_user_protected = 0 WHERE provider_id = :providerId")
+    suspend fun clearItemProtectionByProvider(providerId: Long)
+
+    @Query("UPDATE movies SET is_user_protected = CASE WHEN category_id IN (SELECT category_id FROM categories WHERE provider_id = :providerId AND type IN ('MOVIE', 'VOD') AND is_user_protected = 1) THEN 1 ELSE 0 END WHERE provider_id = :providerId")
+    suspend fun resetProtectionToCategoryState(providerId: Long)
 }
 
 @Dao
@@ -2415,8 +2665,17 @@ interface SeriesDao {
     @Query("SELECT * FROM series WHERE id = :id")
     suspend fun getById(id: Long): SeriesEntity?
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(series: SeriesEntity): Long
+
     @Query("SELECT * FROM series WHERE provider_id = :providerId")
     suspend fun getByProviderSync(providerId: Long): List<SeriesEntity>
+
+    @Query("SELECT * FROM series WHERE provider_id = :providerId AND tmdb_id = :tmdbId")
+    suspend fun getByProviderAndTmdbIdSync(providerId: Long, tmdbId: Long): List<SeriesEntity>
+
+    @Query("SELECT * FROM series WHERE provider_id = :providerId AND release_date LIKE :yearPrefix")
+    suspend fun getByProviderAndReleaseYearPrefixSync(providerId: Long, yearPrefix: String): List<SeriesEntity>
 
     @Query("SELECT tmdb_id FROM series WHERE provider_id = :providerId AND tmdb_id IS NOT NULL")
     suspend fun getTmdbIdsByProvider(providerId: Long): List<TmdbIdMapping>
@@ -2430,10 +2689,24 @@ interface SeriesDao {
     @Query("SELECT * FROM series WHERE provider_id = :providerId AND series_id IN (:seriesIds)")
     suspend fun getBySeriesIds(providerId: Long, seriesIds: List<Long>): List<SeriesEntity>
 
+    @Query("SELECT COUNT(*) FROM series WHERE provider_id = :providerId AND category_id = :categoryId AND catalog_origin = :origin")
+    suspend fun countByCategoryAndOrigin(
+        providerId: Long,
+        categoryId: Long,
+        origin: com.streamvault.domain.model.SeriesCatalogOrigin
+    ): Int
+
+    @Query("SELECT * FROM series WHERE provider_id = :providerId AND series_id IN (:seriesIds)")
+    fun observeBySeriesIds(providerId: Long, seriesIds: List<Long>): Flow<List<SeriesEntity>>
+
     @Query("SELECT * FROM series WHERE provider_id = :providerId AND provider_series_id = :providerSeriesId LIMIT 1")
     suspend fun getByProviderSeriesId(providerId: Long, providerSeriesId: String): SeriesEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    // REPLACE deletes the existing parent row before inserting it again. Because
+    // episodes reference series with ON DELETE CASCADE, a catalog-page refresh
+    // could silently erase already-hydrated episodes. UPSERT updates matched
+    // primary keys in place and keeps those children intact.
+    @Upsert
     suspend fun insertAll(series: List<SeriesEntity>)
 
     @Update
@@ -2460,6 +2733,9 @@ interface SeriesDao {
     )
     suspend fun getIdMappingsByCategory(providerId: Long, categoryId: Long): List<SeriesRemoteIdMapping>
 
+    @Query("SELECT COUNT(*) FROM series WHERE provider_id = :providerId")
+    suspend fun countByProvider(providerId: Long): Int
+
     @Query("DELETE FROM series WHERE provider_id = :providerId")
     suspend fun deleteByProvider(providerId: Long)
 
@@ -2468,6 +2744,9 @@ interface SeriesDao {
 
     @Query("DELETE FROM series WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("DELETE FROM series WHERE id = :id")
+    suspend fun deleteById(id: Long)
 
     @Transaction
     suspend fun replaceAll(providerId: Long, series: List<SeriesEntity>) {
@@ -2509,11 +2788,46 @@ interface SeriesDao {
     @Transaction
     suspend fun upsertCategoryPage(providerId: Long, series: List<SeriesEntity>) {
         if (series.isEmpty()) return
-        val existingByRemoteId = getIdMappings(providerId).associate { it.remoteId to it.id }
+        val existing = getByProviderSync(providerId)
+        val existingByRemoteId = existing.associateBy {
+            it.providerSeriesId?.takeIf(String::isNotBlank) ?: it.seriesId.toString()
+        }
         fun SeriesEntity.remoteKey(): String = providerSeriesId?.takeIf { it.isNotBlank() } ?: seriesId.toString()
         val remapped = series
             .distinctBy { it.remoteKey() }
-            .map { entity -> entity.copy(id = existingByRemoteId[entity.remoteKey()] ?: 0L) }
+            .map { incoming ->
+                val current = existingByRemoteId[incoming.remoteKey()]
+                when {
+                    current == null -> incoming
+                    current.catalogOrigin == com.streamvault.domain.model.SeriesCatalogOrigin.NATIVE &&
+                        incoming.catalogOrigin == com.streamvault.domain.model.SeriesCatalogOrigin.VOD_DERIVED ->
+                        current.copy(
+                            episodePlaybackTemplateUrl = current.episodePlaybackTemplateUrl
+                                ?: incoming.episodePlaybackTemplateUrl
+                        )
+                    else -> {
+                        val preserveDetails = current.cacheState == "DETAIL_HYDRATED" &&
+                            current.detailHydratedAt > 0L
+                        incoming.copy(
+                            id = current.id,
+                            backdropUrl = if (preserveDetails) current.backdropUrl else incoming.backdropUrl,
+                            plot = if (preserveDetails) current.plot else incoming.plot,
+                            cast = if (preserveDetails) current.cast else incoming.cast,
+                            director = if (preserveDetails) current.director else incoming.director,
+                            releaseDate = if (preserveDetails) current.releaseDate else incoming.releaseDate,
+                            tmdbId = incoming.tmdbId ?: current.tmdbId,
+                            youtubeTrailer = incoming.youtubeTrailer ?: current.youtubeTrailer,
+                            episodeRunTime = if (preserveDetails) current.episodeRunTime else incoming.episodeRunTime,
+                            isUserProtected = current.isUserProtected,
+                            cacheState = if (preserveDetails) current.cacheState else incoming.cacheState,
+                            detailHydratedAt = if (preserveDetails) current.detailHydratedAt else incoming.detailHydratedAt,
+                            remoteStaleAt = if (preserveDetails) current.remoteStaleAt else incoming.remoteStaleAt,
+                            episodePlaybackTemplateUrl = incoming.episodePlaybackTemplateUrl
+                                ?: current.episodePlaybackTemplateUrl
+                        )
+                    }
+                }
+            }
         insertAll(remapped)
     }
 
@@ -2529,22 +2843,57 @@ interface SeriesDao {
     @Query("UPDATE series SET is_user_protected = :isProtected WHERE provider_id = :providerId AND category_id = :categoryId")
     suspend fun updateProtectionStatus(providerId: Long, categoryId: Long, isProtected: Boolean)
 
+    @Query("UPDATE series SET is_user_protected = :isProtected WHERE id = :id AND provider_id = :providerId")
+    suspend fun updateItemProtection(id: Long, providerId: Long, isProtected: Boolean): Int
+
     @Query("UPDATE series SET is_user_protected = 0 WHERE provider_id = :providerId AND category_id IN (:categoryIds)")
     suspend fun clearProtectionForCategories(providerId: Long, categoryIds: List<Long>)
+
+    @Query("UPDATE series SET is_user_protected = 0 WHERE provider_id = :providerId")
+    suspend fun clearItemProtectionByProvider(providerId: Long)
+
+    @Query("UPDATE series SET is_user_protected = CASE WHEN category_id IN (SELECT category_id FROM categories WHERE provider_id = :providerId AND type IN ('SERIES', 'VOD') AND is_user_protected = 1) THEN 1 ELSE 0 END WHERE provider_id = :providerId")
+    suspend fun resetProtectionToCategoryState(providerId: Long)
 }
 
 
 @Dao
 @RewriteQueriesToDropUnusedColumns
 interface EpisodeDao {
+    @Query("UPDATE episodes SET is_user_protected = :isProtected WHERE id = :id AND provider_id = :providerId")
+    suspend fun updateItemProtection(id: Long, providerId: Long, isProtected: Boolean): Int
+
+    @Query("UPDATE episodes SET is_user_protected = 0 WHERE provider_id = :providerId")
+    suspend fun clearItemProtectionByProvider(providerId: Long)
+
+    @Query("UPDATE episodes SET is_user_protected = CASE WHEN series_id IN (SELECT id FROM series WHERE provider_id = :providerId AND is_user_protected = 1) THEN 1 ELSE 0 END WHERE provider_id = :providerId")
+    suspend fun resetProtectionToCategoryState(providerId: Long)
+
     @Query("SELECT * FROM episodes WHERE series_id = :seriesId ORDER BY season_number ASC, episode_number ASC")
     fun getBySeries(seriesId: Long): Flow<List<EpisodeBrowseEntity>>
 
     @Query("SELECT * FROM episodes WHERE series_id = :seriesId ORDER BY season_number ASC, episode_number ASC")
     suspend fun getBySeriesSync(seriesId: Long): List<EpisodeBrowseEntity>
 
+    @Query("SELECT * FROM episodes WHERE series_id = :seriesId ORDER BY season_number ASC, episode_number ASC")
+    suspend fun getEntitiesBySeriesSync(seriesId: Long): List<EpisodeEntity>
+
     @Query("SELECT * FROM episodes WHERE id = :id")
     suspend fun getById(id: Long): EpisodeEntity?
+
+    @Query("SELECT * FROM episodes WHERE provider_id = :providerId AND episode_id = :episodeId LIMIT 1")
+    suspend fun getByProviderAndEpisodeId(providerId: Long, episodeId: Long): EpisodeEntity?
+
+    @Query("SELECT * FROM episodes WHERE provider_id = :providerId")
+    suspend fun getByProviderSync(providerId: Long): List<EpisodeEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(episode: EpisodeEntity): Long
+
+    @Query(
+        "SELECT * FROM episodes WHERE provider_id = :providerId AND series_id = :seriesId AND episode_id = :episodeId LIMIT 1"
+    )
+    suspend fun getByProviderSeriesAndEpisodeId(providerId: Long, seriesId: Long, episodeId: Long): EpisodeEntity?
 
     @Query(
         """
@@ -2638,6 +2987,9 @@ interface EpisodeDao {
     @Query("DELETE FROM episodes WHERE series_id = :seriesId")
     suspend fun deleteBySeries(seriesId: Long)
 
+    @Query("DELETE FROM episodes WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     @Query("DELETE FROM episodes WHERE series_id NOT IN (SELECT id FROM series)")
     suspend fun deleteOrphans(): Int
 
@@ -2672,10 +3024,10 @@ interface EpisodeDao {
 
 @Dao
 interface CategoryDao {
-    @Query("SELECT * FROM categories WHERE provider_id = :providerId AND type = :type ORDER BY id ASC")
+    @Query("SELECT * FROM categories WHERE provider_id = :providerId AND type = :type ORDER BY provider_order ASC, id ASC")
     fun getByProviderAndType(providerId: Long, type: String): Flow<List<CategoryEntity>>
 
-    @Query("SELECT * FROM categories WHERE provider_id = :providerId AND type = :type ORDER BY id ASC")
+    @Query("SELECT * FROM categories WHERE provider_id = :providerId AND type = :type ORDER BY provider_order ASC, id ASC")
     suspend fun getByProviderAndTypeSync(providerId: Long, type: String): List<CategoryEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -3016,6 +3368,9 @@ abstract class FavoriteDao {
     @Query("SELECT * FROM favorites WHERE provider_id = :providerId AND content_type = :contentType ORDER BY position ASC")
     abstract fun getAllByType(providerId: Long, contentType: String): Flow<List<FavoriteEntity>>
 
+    @Query("SELECT * FROM favorites WHERE provider_id IN (:providerIds) AND content_type = :contentType ORDER BY provider_id ASC, position ASC")
+    abstract fun getAllByTypeForProviders(providerIds: List<Long>, contentType: String): Flow<List<FavoriteEntity>>
+
     @Query(
         """
         SELECT f.*
@@ -3056,6 +3411,28 @@ abstract class FavoriteDao {
 
     @Query("DELETE FROM favorites WHERE provider_id = :providerId AND content_id = :contentId AND content_type = :contentType AND (:groupId IS NULL AND group_id IS NULL OR group_id = :groupId)")
     abstract suspend fun delete(providerId: Long, contentId: Long, contentType: String, groupId: Long?)
+
+    @Query("DELETE FROM favorites WHERE provider_id = :providerId AND content_id = :contentId AND content_type = :contentType")
+    abstract suspend fun deleteByContent(providerId: Long, contentId: Long, contentType: String)
+
+    @Query("DELETE FROM favorites WHERE provider_id = :providerId AND content_type = :contentType")
+    abstract suspend fun deleteByProviderAndType(providerId: Long, contentType: String)
+
+    @Query("DELETE FROM favorites WHERE provider_id = :providerId AND content_type = :contentType AND group_id IS NULL")
+    abstract suspend fun deleteGlobalByProviderAndType(providerId: Long, contentType: String)
+
+    @Query(
+        "UPDATE favorites SET content_id = :newContentId, content_type = :newContentType, " +
+            "group_id = NULL, group_key = 0 WHERE provider_id = :providerId " +
+            "AND content_id = :oldContentId AND content_type = :oldContentType"
+    )
+    abstract suspend fun migrateContent(
+        providerId: Long,
+        oldContentId: Long,
+        oldContentType: String,
+        newContentId: Long,
+        newContentType: String
+    )
 
     @Query("DELETE FROM favorites WHERE content_type = 'LIVE' AND content_id NOT IN (SELECT id FROM channels)")
     abstract suspend fun deleteMissingLiveFavorites(): Int
@@ -3139,6 +3516,9 @@ interface VirtualGroupDao {
 
     @Query("DELETE FROM virtual_groups WHERE id = :id")
     suspend fun delete(id: Long)
+
+    @Query("DELETE FROM virtual_groups WHERE provider_id = :providerId AND content_type = :contentType")
+    suspend fun deleteByProviderAndType(providerId: Long, contentType: String)
 }
 
 @Dao
@@ -3234,6 +3614,22 @@ interface PlaybackHistoryDao {
     @Query("DELETE FROM playback_history WHERE content_id = :contentId AND content_type = :contentType AND provider_id = :providerId")
     suspend fun delete(contentId: Long, contentType: String, providerId: Long)
 
+    @Query(
+        "UPDATE playback_history SET content_id = :newContentId, content_type = :newContentType, " +
+            "series_id = :newSeriesId, season_number = :seasonNumber, episode_number = :episodeNumber " +
+            "WHERE content_id = :oldContentId AND content_type = :oldContentType AND provider_id = :providerId"
+    )
+    suspend fun migrateContent(
+        oldContentId: Long,
+        oldContentType: String,
+        newContentId: Long,
+        newContentType: String,
+        providerId: Long,
+        newSeriesId: Long? = null,
+        seasonNumber: Int? = null,
+        episodeNumber: Int? = null
+    )
+
     @Query("DELETE FROM playback_history")
     suspend fun deleteAll()
 
@@ -3249,6 +3645,15 @@ interface PlaybackHistoryDao {
 
 @Dao
 interface SearchHistoryDao {
+    @Query("SELECT * FROM search_history ORDER BY used_at DESC")
+    suspend fun getAllSync(): List<SearchHistoryEntity>
+
+    @Query("SELECT * FROM search_history WHERE query = :query AND content_scope = :contentScope AND provider_id = :providerId LIMIT 1")
+    suspend fun get(query: String, contentScope: String, providerId: Long): SearchHistoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: SearchHistoryEntity): Long
+
     @Query(
         """
         SELECT * FROM search_history
@@ -3297,6 +3702,9 @@ interface SearchHistoryDao {
     @Query("DELETE FROM search_history WHERE content_scope = :contentScope AND provider_id = :providerId")
     suspend fun deleteByScope(contentScope: String, providerId: Long)
 
+    @Query("DELETE FROM search_history WHERE provider_id = :providerId")
+    suspend fun deleteByProvider(providerId: Long)
+
     @Query("DELETE FROM search_history WHERE used_at < :minUsedAt")
     suspend fun pruneOlderThan(minUsedAt: Long)
 
@@ -3324,6 +3732,9 @@ interface MovieCategoryHydrationDao {
     @Query("SELECT * FROM movie_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
     suspend fun get(providerId: Long, categoryId: Long): MovieCategoryHydrationEntity?
 
+    @Query("SELECT * FROM movie_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
+    fun observe(providerId: Long, categoryId: Long): Flow<MovieCategoryHydrationEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(metadata: MovieCategoryHydrationEntity)
 
@@ -3339,6 +3750,9 @@ interface SeriesCategoryHydrationDao {
     @Query("SELECT * FROM series_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
     suspend fun get(providerId: Long, categoryId: Long): SeriesCategoryHydrationEntity?
 
+    @Query("SELECT * FROM series_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
+    fun observe(providerId: Long, categoryId: Long): Flow<SeriesCategoryHydrationEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(metadata: SeriesCategoryHydrationEntity)
 
@@ -3347,6 +3761,48 @@ interface SeriesCategoryHydrationDao {
 
     @Query("DELETE FROM series_category_hydration WHERE provider_id = :providerId")
     suspend fun deleteByProvider(providerId: Long)
+}
+
+@Dao
+interface VodCategoryHydrationDao {
+    @Query("SELECT * FROM vod_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
+    suspend fun get(providerId: Long, categoryId: Long): VodCategoryHydrationEntity?
+
+    @Query("SELECT * FROM vod_category_hydration WHERE provider_id = :providerId AND category_id = :categoryId")
+    fun observe(providerId: Long, categoryId: Long): Flow<VodCategoryHydrationEntity?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(metadata: VodCategoryHydrationEntity)
+
+    @Query("DELETE FROM vod_category_hydration WHERE provider_id = :providerId")
+    suspend fun deleteByProvider(providerId: Long)
+}
+
+@Dao
+abstract class VodCatalogEntryDao {
+    @Query("SELECT * FROM vod_catalog_entries WHERE provider_id = :providerId AND category_id = :categoryId ORDER BY raw_page ASC, raw_index ASC")
+    abstract fun observeByCategory(providerId: Long, categoryId: Long): Flow<List<VodCatalogEntryEntity>>
+
+    @Query("SELECT COUNT(*) FROM vod_catalog_entries WHERE provider_id = :providerId AND category_id = :categoryId")
+    abstract suspend fun countByCategory(providerId: Long, categoryId: Long): Int
+
+    @Query("DELETE FROM vod_catalog_entries WHERE provider_id = :providerId AND category_id = :categoryId AND raw_page = :page")
+    abstract suspend fun deletePage(providerId: Long, categoryId: Long, page: Int)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insertAll(entries: List<VodCatalogEntryEntity>)
+
+    @Transaction
+    open suspend fun replacePage(providerId: Long, categoryId: Long, page: Int, entries: List<VodCatalogEntryEntity>) {
+        deletePage(providerId, categoryId, page)
+        if (entries.isNotEmpty()) insertAll(entries)
+    }
+
+    @Query("DELETE FROM vod_catalog_entries WHERE provider_id = :providerId AND category_id = :categoryId")
+    abstract suspend fun deleteByCategory(providerId: Long, categoryId: Long)
+
+    @Query("DELETE FROM vod_catalog_entries WHERE provider_id = :providerId")
+    abstract suspend fun deleteByProvider(providerId: Long)
 }
 
 // ── EPG Source DAOs ────────────────────────────────────────────────

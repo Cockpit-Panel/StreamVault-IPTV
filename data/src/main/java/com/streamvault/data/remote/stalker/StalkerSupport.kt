@@ -2,11 +2,22 @@ package com.streamvault.data.remote.stalker
 
 import com.streamvault.data.local.entity.CategoryEntity
 import com.streamvault.domain.model.ContentType
+import java.security.MessageDigest
 import java.util.Locale
 
 internal fun stalkerSyntheticId(providerId: Long, type: ContentType, seed: String): Long {
+    return stalkerStableHashId(providerId, type, seed)
+}
+
+internal fun stalkerStableHashId(providerId: Long, type: ContentType, seed: String): Long {
     val normalized = "$providerId/${type.name}/${seed.trim().lowercase(Locale.ROOT)}"
-    return (normalized.hashCode().toLong() and 0x7fff_ffffL).coerceAtLeast(1L)
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(normalized.toByteArray(Charsets.UTF_8))
+    var value = 0L
+    repeat(Long.SIZE_BYTES) { index ->
+        value = (value shl 8) or (digest[index].toLong() and 0xffL)
+    }
+    return (value and Long.MAX_VALUE).coerceAtLeast(1L)
 }
 
 internal fun StalkerCategoryRecord.toCategoryEntity(

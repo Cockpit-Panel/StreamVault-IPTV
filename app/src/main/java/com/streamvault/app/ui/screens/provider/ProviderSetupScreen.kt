@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
+
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -76,14 +78,33 @@ import com.streamvault.app.pairing.ProviderQrPairingStatus
 import com.streamvault.app.ui.components.dialogs.PremiumDialog
 import com.streamvault.app.ui.components.dialogs.PremiumDialogFooterButton
 import com.streamvault.app.ui.components.extractProgressFraction
+import com.streamvault.app.ui.interaction.TvButton
 import com.streamvault.app.ui.interaction.TvClickableSurface
 import com.streamvault.app.ui.components.shell.StatusPill
 import com.streamvault.app.ui.screens.settings.BackupImportPreviewDialog
 import com.streamvault.app.ui.theme.*
+import com.streamvault.data.remote.stalker.StalkerAdvancedOptions
+import com.streamvault.data.remote.stalker.StalkerAdvancedOptionsCodec
+import com.streamvault.data.remote.stalker.StalkerParamOverride
+import com.streamvault.data.remote.stalker.StalkerRequestRule
+import com.streamvault.data.remote.stalker.StalkerCompatibilityRegistry
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProfileVerification
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerTransportChallengeReason
+import com.streamvault.domain.manager.DriveBackupSnapshot
+import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.BarcodeFormat
+import android.graphics.Bitmap
 import com.streamvault.data.util.ProviderInputSanitizer
 import com.streamvault.domain.model.ProviderEpgSyncMode
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
 import com.streamvault.domain.model.StalkerAuthMode
+import com.streamvault.domain.usecase.JellyfinProviderSetupCommand
+import com.streamvault.domain.usecase.JellyfinQuickConnectProviderSetupCommand
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,7 +115,126 @@ import kotlin.coroutines.resume
 
 // ??? Source type ?????????????????????????????????????????????????????????????
 
-private enum class SourceType { XTREAM, STALKER, M3U_URL, M3U_FILE }
+private enum class SourceType { XTREAM, STALKER, M3U_URL, M3U_FILE, JELLYFIN }
+
+private data class StalkerRequestRuleUiState(
+    val action: String = "",
+    val blockRequest: Boolean = false,
+    val paramsText: String = ""
+)
+
+@Composable
+private fun StalkerCompatibilitySelector(
+    protocol: StalkerProtocolPreference,
+    profileId: String,
+    onProtocolSelected: (StalkerProtocolPreference) -> Unit,
+    onProfileSelected: (String) -> Unit
+) {
+    var showProtocols by rememberSaveable { mutableStateOf(false) }
+    var showProfiles by rememberSaveable { mutableStateOf(false) }
+    val selectedProfile = StalkerCompatibilityRegistry.find(profileId)
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Compatibility", style = MaterialTheme.typography.titleSmall, color = OnBackground)
+        SmallActionButton(
+            text = "Protocol: ${protocol.name.replace('_', ' ')}",
+            onClick = { showProtocols = !showProtocols }
+        )
+        AnimatedVisibility(showProtocols) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                StalkerProtocolPreference.entries
+                    .filterNot { it == StalkerProtocolPreference.MINISTRA_API_V3 }
+                    .forEach { option ->
+                    SmallActionButton(
+                        text = if (option == protocol) "✓ ${option.name.replace('_', ' ')}" else option.name.replace('_', ' '),
+                        onClick = {
+                            onProtocolSelected(option)
+                            onProfileSelected(StalkerCompatibilityProfileIds.AUTO)
+                            showProtocols = false
+                        }
+                    )
+                }
+            }
+        }
+        SmallActionButton(
+            text = "Model: ${selectedProfile?.displayName ?: "Automatic"}",
+            onClick = { showProfiles = !showProfiles }
+        )
+        AnimatedVisibility(showProfiles) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SmallActionButton(
+                    text = if (profileId == StalkerCompatibilityProfileIds.AUTO) "✓ Automatic" else "Automatic",
+                    onClick = {
+                        onProfileSelected(StalkerCompatibilityProfileIds.AUTO)
+                        showProfiles = false
+                    }
+                )
+                val family = if (protocol == StalkerProtocolPreference.MINISTRA_API_V3) {
+                    com.streamvault.domain.model.StalkerProtocolFamily.MINISTRA_API_V3
+                } else {
+                    com.streamvault.domain.model.StalkerProtocolFamily.CLASSIC_MAG
+                }
+                StalkerCompatibilityRegistry.profiles
+                    .filter { it.protocolFamily == family }
+                    .groupBy { it.generation }
+                    .forEach { (generation, profiles) ->
+                        Text(generation, style = MaterialTheme.typography.labelMedium, color = OnBackground.copy(alpha = 0.72f))
+                        profiles.forEach { option ->
+                            val experimental = option.verification == StalkerProfileVerification.EXPERIMENTAL
+                            SmallActionButton(
+                                text = buildString {
+                                    if (option.id == profileId) append("✓ ")
+                                    append(option.displayName)
+                                    if (experimental) append(" — EXPERIMENTAL")
+                                },
+                                onClick = {
+                                    onProfileSelected(option.id)
+                                    showProfiles = false
+                                }
+                            )
+                        }
+                    }
+                if (family == com.streamvault.domain.model.StalkerProtocolFamily.CLASSIC_MAG) {
+                    Text(
+                        "Experimental profiles require captured/manual identity fields and are excluded from automatic discovery.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AccentAmber
+                    )
+                    SmallActionButton(
+                        text = if (profileId == StalkerCompatibilityProfileIds.CUSTOM) "✓ Custom profile" else "Custom profile",
+                        onClick = {
+                            onProfileSelected(StalkerCompatibilityProfileIds.CUSTOM)
+                            showProfiles = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun StalkerRequestRuleUiState.toRule(): StalkerRequestRule =
+    StalkerRequestRule(
+        action = action.trim(),
+        blockRequest = blockRequest,
+        paramOverrides = paramsText
+            .split('|', '\n')
+            .mapNotNull { entry ->
+                val trimmed = entry.trim()
+                if (trimmed.isBlank()) return@mapNotNull null
+                val separator = trimmed.indexOf('=').takeIf { it >= 0 } ?: trimmed.indexOf(':')
+                val name = if (separator >= 0) trimmed.substring(0, separator).trim() else trimmed
+                val value = if (separator >= 0) trimmed.substring(separator + 1).trim() else ""
+                name.takeIf { it.isNotBlank() }?.let { StalkerParamOverride(it, value) }
+            }
+    )
+
+private fun StalkerRequestRule.toUiState(): StalkerRequestRuleUiState =
+    StalkerRequestRuleUiState(
+        action = action,
+        blockRequest = blockRequest,
+        paramsText = paramOverrides.joinToString(" | ") { "${it.name}=${it.value}" }
+    )
 
 // ??? Screen ??????????????????????????????????????????????????????????????????
 
@@ -131,10 +271,28 @@ fun ProviderSetupScreen(
     var stalkerDeviceId by rememberSaveable { mutableStateOf("") }
     var stalkerDeviceId2 by rememberSaveable { mutableStateOf("") }
     var stalkerSignature by rememberSaveable { mutableStateOf("") }
+    var stalkerHwVersion by rememberSaveable { mutableStateOf("") }
+    var stalkerApiUserAgent by rememberSaveable { mutableStateOf("") }
+    var stalkerPlayerUserAgent by rememberSaveable { mutableStateOf("") }
+    var stalkerPlayerHeaders by rememberSaveable { mutableStateOf("") }
+    var stalkerXUserAgentLink by rememberSaveable { mutableStateOf(StalkerAdvancedOptions.LINK_ETHERNET) }
+    var stalkerProxyEnabled by rememberSaveable { mutableStateOf(false) }
+    var stalkerProxyHost by rememberSaveable { mutableStateOf("") }
+    var stalkerProxyPort by rememberSaveable { mutableStateOf("") }
+    val stalkerRequestRules = remember { mutableStateListOf<StalkerRequestRuleUiState>() }
+    var jellyfinQuickConnectCode by rememberSaveable { mutableStateOf("") }
     var fileImportError by rememberSaveable { mutableStateOf<String?>(null) }
     var handledInitialImportUri by rememberSaveable { mutableStateOf<String?>(null) }
     var showDiscardDraftDialog by rememberSaveable { mutableStateOf(false) }
     var showImportOptionsDialog by rememberSaveable { mutableStateOf(false) }
+    val showXtream = uiState.portals.isEmpty() || uiState.portals.any { it.type.equals("xc", true) }
+    val showStalker = uiState.portals.isEmpty() || uiState.portals.any { it.type.equals("stalker", true) }
+
+    LaunchedEffect(uiState.portals) {
+        if (!uiState.isEditing && uiState.portals.isNotEmpty()) {
+            selectedTab = if (!showXtream && showStalker) 1 else 0
+        }
+    }
 
     // ?? File import helper ????????????????????????????????????????????????????
     fun importM3uUri(uri: android.net.Uri) {
@@ -217,21 +375,6 @@ fun ProviderSetupScreen(
             onProviderAdded()
         }
     }
-    val showXtream = uiState.portals.isEmpty() || uiState.portals.any { it.type.lowercase() == "xc" }
-    val showStalker = uiState.portals.isEmpty() || uiState.portals.any { it.type.lowercase() == "stalker" }
-
-    LaunchedEffect(uiState.portals) {
-        if (!uiState.isEditing && uiState.portals.isNotEmpty()) {
-            val hasXc = uiState.portals.any { it.type.lowercase() == "xc" }
-            val hasStalker = uiState.portals.any { it.type.lowercase() == "stalker" }
-            if (!hasXc && hasStalker) {
-                selectedTab = 1
-            } else if (hasXc) {
-                selectedTab = 0
-            }
-        }
-    }
-
     ProviderSetupCompletionLayer(
         uiState = uiState,
         knownLocalM3uUrls = knownLocalM3uUrls,
@@ -254,7 +397,8 @@ fun ProviderSetupScreen(
             username = uiState.username
             password = uiState.password
             m3uUrl = uiState.m3uUrl
-            httpUserAgent = uiState.httpUserAgent
+            val isEditingStalker = uiState.selectedTab == 1
+            httpUserAgent = if (isEditingStalker) "" else uiState.httpUserAgent
             httpHeaders = uiState.httpHeaders
             stalkerMacAddress = uiState.stalkerMacAddress
             stalkerAuthMode = uiState.stalkerAuthMode
@@ -265,13 +409,57 @@ fun ProviderSetupScreen(
             stalkerDeviceId = uiState.stalkerDeviceId
             stalkerDeviceId2 = uiState.stalkerDeviceId2
             stalkerSignature = uiState.stalkerSignature
+            val advanced = StalkerAdvancedOptionsCodec.decode(uiState.stalkerAdvancedOptionsJson)
+            val legacy = StalkerAdvancedOptionsCodec.decodeLegacyEditFields(uiState.stalkerAdvancedOptionsJson)
+            stalkerSerialNumber = uiState.stalkerSerialNumber.ifBlank { legacy.serialNumber }
+            stalkerDeviceId = uiState.stalkerDeviceId.ifBlank { legacy.deviceId }
+            stalkerDeviceId2 = uiState.stalkerDeviceId2.ifBlank { legacy.deviceId2 }
+            stalkerSignature = uiState.stalkerSignature.ifBlank { legacy.signature }
+            stalkerHwVersion = advanced.hwVersion.ifBlank { legacy.hwVersion }
+            stalkerApiUserAgent = advanced.apiUserAgent.ifBlank {
+                legacy.apiUserAgent.ifBlank {
+                    if (isEditingStalker) uiState.httpUserAgent else ""
+                }
+            }
+            stalkerPlayerUserAgent = advanced.playerUserAgent.ifBlank { legacy.playerUserAgent }
+            stalkerPlayerHeaders = advanced.playerHeaders.ifBlank { legacy.playerHeaders }
+            stalkerXUserAgentLink = advanced.normalizedLink.takeIf { advanced != StalkerAdvancedOptions() }
+                ?: legacy.xUserAgentLink
+            stalkerProxyEnabled = if (advanced.proxyEnabled || advanced.proxyHost.isNotBlank() || advanced.proxyPort != null) {
+                advanced.proxyEnabled
+            } else {
+                legacy.proxyEnabled
+            }
+            stalkerProxyHost = advanced.proxyHost.ifBlank { legacy.proxyHost }
+            stalkerProxyPort = advanced.proxyPort?.toString() ?: legacy.proxyPort?.toString().orEmpty()
+            stalkerRequestRules.clear()
+            stalkerRequestRules.addAll(advanced.requestRules.map { it.toUiState() })
         }
     }
+
+    fun buildStalkerAdvancedOptionsJson(): String =
+        StalkerAdvancedOptionsCodec.encode(
+            StalkerAdvancedOptions(
+                hwVersion = stalkerHwVersion.trim(),
+                apiUserAgent = stalkerApiUserAgent.trim(),
+                playerUserAgent = stalkerPlayerUserAgent.trim(),
+                playerHeaders = stalkerPlayerHeaders.trim(),
+                xUserAgentLink = stalkerXUserAgentLink,
+                proxyEnabled = stalkerProxyEnabled,
+                proxyHost = stalkerProxyHost.trim(),
+                proxyPort = stalkerProxyPort.trim().toIntOrNull(),
+                requestRules = stalkerRequestRules.map { it.toRule() }
+                    .filter { rule ->
+                        rule.action.isNotBlank() || rule.blockRequest || rule.paramOverrides.isNotEmpty()
+                    }
+            )
+        )
 
     // ?? Derived UI source type ????????????????????????????????????????????????
     val sourceType = when {
         selectedTab == 0 -> SourceType.XTREAM
         selectedTab == 1 -> SourceType.STALKER
+        selectedTab == 3 -> SourceType.JELLYFIN
         uiState.m3uTab == 1 -> SourceType.M3U_FILE
         else -> SourceType.M3U_URL
     }
@@ -297,6 +485,10 @@ fun ProviderSetupScreen(
                 viewModel.updateM3uTab(1)
                 viewModel.applySourceDefaults(ProviderSetupViewModel.SetupSourceType.M3U)
             }
+            SourceType.JELLYFIN -> {
+                selectedTab = 3
+                viewModel.applySourceDefaults(ProviderSetupViewModel.SetupSourceType.JELLYFIN)
+            }
         }
     }
 
@@ -315,6 +507,14 @@ fun ProviderSetupScreen(
             stalkerDeviceId.isNotBlank() ||
             stalkerDeviceId2.isNotBlank() ||
             stalkerSignature.isNotBlank() ||
+            stalkerHwVersion.isNotBlank() ||
+            stalkerApiUserAgent.isNotBlank() ||
+            stalkerPlayerUserAgent.isNotBlank() ||
+            stalkerXUserAgentLink != StalkerAdvancedOptions.LINK_ETHERNET ||
+            stalkerProxyEnabled ||
+            stalkerProxyHost.isNotBlank() ||
+            stalkerProxyPort.isNotBlank() ||
+            stalkerRequestRules.isNotEmpty() ||
             m3uUrl.isNotBlank()
         )
 
@@ -377,16 +577,37 @@ fun ProviderSetupScreen(
                         stalkerDeviceId = stalkerDeviceId, onStalkerDeviceIdChange = { stalkerDeviceId = ProviderInputSanitizer.sanitizeStalkerDeviceIdForEditing(it) },
                         stalkerDeviceId2 = stalkerDeviceId2, onStalkerDeviceId2Change = { stalkerDeviceId2 = ProviderInputSanitizer.sanitizeStalkerDeviceIdForEditing(it) },
                         stalkerSignature = stalkerSignature, onStalkerSignatureChange = { stalkerSignature = ProviderInputSanitizer.sanitizeStalkerSignatureForEditing(it) },
+                        stalkerHwVersion = stalkerHwVersion, onStalkerHwVersionChange = { stalkerHwVersion = it },
+                        stalkerApiUserAgent = stalkerApiUserAgent, onStalkerApiUserAgentChange = { stalkerApiUserAgent = ProviderInputSanitizer.sanitizeHttpUserAgentForEditing(it) },
+                        stalkerPlayerUserAgent = stalkerPlayerUserAgent, onStalkerPlayerUserAgentChange = { stalkerPlayerUserAgent = ProviderInputSanitizer.sanitizeHttpUserAgentForEditing(it) },
+                        stalkerPlayerHeaders = stalkerPlayerHeaders, onStalkerPlayerHeadersChange = { stalkerPlayerHeaders = ProviderInputSanitizer.sanitizeHttpHeadersForEditing(it) },
+                        stalkerXUserAgentLink = stalkerXUserAgentLink, onStalkerXUserAgentLinkChange = { stalkerXUserAgentLink = it },
+                        stalkerProxyEnabled = stalkerProxyEnabled, onStalkerProxyEnabledChange = { stalkerProxyEnabled = it },
+                        stalkerProxyHost = stalkerProxyHost, onStalkerProxyHostChange = { stalkerProxyHost = it.trim() },
+                        stalkerProxyPort = stalkerProxyPort, onStalkerProxyPortChange = { stalkerProxyPort = it.filter(Char::isDigit).take(5) },
+                        stalkerRequestRules = stalkerRequestRules,
+                        onAddStalkerRequestRule = { stalkerRequestRules.add(StalkerRequestRuleUiState()) },
+                        onUpdateStalkerRequestRule = { index, rule -> if (index in stalkerRequestRules.indices) stalkerRequestRules[index] = rule },
+                        onRemoveStalkerRequestRule = { index -> if (index in stalkerRequestRules.indices) stalkerRequestRules.removeAt(index) },
                         fileImportError = fileImportError,
                         onFilePick = { filePickerLauncher.launch(arrayOf("*/*")) },
                         onLoginXtream = { viewModel.loginXtream(serverUrl, username, password, name, httpUserAgent, httpHeaders) },
-                        onLoginStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature) },
+                        onLoginStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, "", httpHeaders, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature, buildStalkerAdvancedOptionsJson(), uiState.stalkerProtocolPreference, uiState.stalkerRequestedProfileId) },
+                        onRepairStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, "", httpHeaders, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature, buildStalkerAdvancedOptionsJson(), uiState.stalkerProtocolPreference, uiState.stalkerRequestedProfileId, repairConnection = true) },
                         onAddM3u = { viewModel.addM3u(m3uUrl, name, httpUserAgent, httpHeaders) },
+                        onLoginJellyfin = { viewModel.loginJellyfin(serverUrl, username, password, name) },
+                        quickConnectCode = uiState.jellyfinQuickConnectCode,
+                        onQuickConnectRequest = { viewModel.loginJellyfinQuickConnect(serverUrl.trim(), name.trim()) },
                         onStartPhonePairing = viewModel::startPhonePairing,
                         onStopPhonePairing = viewModel::stopPhonePairing,
                         onToggleM3uVodClassification = { viewModel.updateM3uVodClassificationEnabled(!uiState.m3uVodClassificationEnabled) },
                         onSelectEpgSyncMode = viewModel::updateEpgSyncMode,
+                        onSelectStalkerCatalogMode = viewModel::updateStalkerCatalogMode,
+                        onSelectStalkerProtocolPreference = viewModel::updateStalkerProtocolPreference,
+                        onSelectStalkerProfile = viewModel::updateStalkerRequestedProfile,
                         onSelectXtreamLiveSyncMode = viewModel::updateXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = viewModel::updateGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = viewModel::updateChannelLogoSourcePolicy,
                         modifier = Modifier.weight(1f).fillMaxHeight()
                     )
                 }
@@ -423,16 +644,37 @@ fun ProviderSetupScreen(
                         stalkerDeviceId = stalkerDeviceId, onStalkerDeviceIdChange = { stalkerDeviceId = ProviderInputSanitizer.sanitizeStalkerDeviceIdForEditing(it) },
                         stalkerDeviceId2 = stalkerDeviceId2, onStalkerDeviceId2Change = { stalkerDeviceId2 = ProviderInputSanitizer.sanitizeStalkerDeviceIdForEditing(it) },
                         stalkerSignature = stalkerSignature, onStalkerSignatureChange = { stalkerSignature = ProviderInputSanitizer.sanitizeStalkerSignatureForEditing(it) },
+                        stalkerHwVersion = stalkerHwVersion, onStalkerHwVersionChange = { stalkerHwVersion = it },
+                        stalkerApiUserAgent = stalkerApiUserAgent, onStalkerApiUserAgentChange = { stalkerApiUserAgent = ProviderInputSanitizer.sanitizeHttpUserAgentForEditing(it) },
+                        stalkerPlayerUserAgent = stalkerPlayerUserAgent, onStalkerPlayerUserAgentChange = { stalkerPlayerUserAgent = ProviderInputSanitizer.sanitizeHttpUserAgentForEditing(it) },
+                        stalkerPlayerHeaders = stalkerPlayerHeaders, onStalkerPlayerHeadersChange = { stalkerPlayerHeaders = ProviderInputSanitizer.sanitizeHttpHeadersForEditing(it) },
+                        stalkerXUserAgentLink = stalkerXUserAgentLink, onStalkerXUserAgentLinkChange = { stalkerXUserAgentLink = it },
+                        stalkerProxyEnabled = stalkerProxyEnabled, onStalkerProxyEnabledChange = { stalkerProxyEnabled = it },
+                        stalkerProxyHost = stalkerProxyHost, onStalkerProxyHostChange = { stalkerProxyHost = it.trim() },
+                        stalkerProxyPort = stalkerProxyPort, onStalkerProxyPortChange = { stalkerProxyPort = it.filter(Char::isDigit).take(5) },
+                        stalkerRequestRules = stalkerRequestRules,
+                        onAddStalkerRequestRule = { stalkerRequestRules.add(StalkerRequestRuleUiState()) },
+                        onUpdateStalkerRequestRule = { index, rule -> if (index in stalkerRequestRules.indices) stalkerRequestRules[index] = rule },
+                        onRemoveStalkerRequestRule = { index -> if (index in stalkerRequestRules.indices) stalkerRequestRules.removeAt(index) },
                         fileImportError = fileImportError,
                         onFilePick = { filePickerLauncher.launch(arrayOf("*/*")) },
                         onLoginXtream = { viewModel.loginXtream(serverUrl, username, password, name, httpUserAgent, httpHeaders) },
-                        onLoginStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature) },
+                        onLoginStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, "", httpHeaders, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature, buildStalkerAdvancedOptionsJson(), uiState.stalkerProtocolPreference, uiState.stalkerRequestedProfileId) },
+                        onRepairStalker = { viewModel.loginStalker(serverUrl, stalkerMacAddress, stalkerAuthMode, username, password, name, "", httpHeaders, stalkerDeviceProfile, stalkerDeviceTimezone, stalkerDeviceLocale, stalkerSerialNumber, stalkerDeviceId, stalkerDeviceId2, stalkerSignature, buildStalkerAdvancedOptionsJson(), uiState.stalkerProtocolPreference, uiState.stalkerRequestedProfileId, repairConnection = true) },
                         onAddM3u = { viewModel.addM3u(m3uUrl, name, httpUserAgent, httpHeaders) },
+                        onLoginJellyfin = { viewModel.loginJellyfin(serverUrl, username, password, name) },
+                        quickConnectCode = uiState.jellyfinQuickConnectCode,
+                        onQuickConnectRequest = { viewModel.loginJellyfinQuickConnect(serverUrl.trim(), name.trim()) },
                         onStartPhonePairing = viewModel::startPhonePairing,
                         onStopPhonePairing = viewModel::stopPhonePairing,
                         onToggleM3uVodClassification = { viewModel.updateM3uVodClassificationEnabled(!uiState.m3uVodClassificationEnabled) },
                         onSelectEpgSyncMode = viewModel::updateEpgSyncMode,
+                        onSelectStalkerCatalogMode = viewModel::updateStalkerCatalogMode,
+                        onSelectStalkerProtocolPreference = viewModel::updateStalkerProtocolPreference,
+                        onSelectStalkerProfile = viewModel::updateStalkerRequestedProfile,
                         onSelectXtreamLiveSyncMode = viewModel::updateXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = viewModel::updateGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = viewModel::updateChannelLogoSourcePolicy,
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
                 }
@@ -452,7 +694,18 @@ fun ProviderSetupScreen(
     }
 
     if (uiState.syncProgress != null) {
-        SyncProgressDialog(message = uiState.syncProgress!!)
+        SyncProgressDialog(
+            message = uiState.syncProgress!!,
+            quickConnectCode = if (uiState.jellyfinQuickConnectCode.isNotBlank()) uiState.jellyfinQuickConnectCode else null,
+            serverUrl = serverUrl,
+            onCancel = when {
+                uiState.jellyfinQuickConnectCode.isNotBlank() ->
+                    ({ viewModel.cancelJellyfinQuickConnect() })
+                uiState.selectedTab == 1 && uiState.isLoading ->
+                    ({ viewModel.cancelStalkerSetup() })
+                else -> null
+            }
+        )
     }
 
     val backupPreview = uiState.backupPreview
@@ -470,6 +723,74 @@ fun ProviderSetupScreen(
             onImportRecordingSchedulesChanged = { viewModel.setImportRecordingSchedules(it) },
             isImporting = uiState.isImportingBackup,
             onConfirm = { viewModel.confirmBackupImport() }
+        )
+    }
+
+    if (uiState.driveBackupOptions.isNotEmpty()) {
+        DriveBackupSnapshotChoiceDialog(
+            snapshots = uiState.driveBackupOptions,
+            onSelect = viewModel::selectDriveBackup,
+            onDismiss = viewModel::dismissDriveBackupOptions,
+        )
+    }
+
+uiState.stalkerTransportChallenge?.let { challenge ->
+        val (title, body) = when (challenge.reason) {
+            StalkerTransportChallengeReason.INVALID_TLS ->
+                stringResource(R.string.stalker_transport_invalid_tls_title) to
+                    stringResource(
+                        R.string.stalker_transport_invalid_tls_body,
+                        challenge.displayHost
+                    )
+            StalkerTransportChallengeReason.CLEARTEXT_HTTP ->
+                stringResource(R.string.stalker_transport_http_title) to
+                    stringResource(
+                        R.string.stalker_transport_http_body,
+                        challenge.displayHost
+                    )
+            StalkerTransportChallengeReason.ORIGIN_CHANGED ->
+                stringResource(R.string.stalker_transport_origin_changed_title) to
+                    stringResource(
+                        R.string.stalker_transport_origin_changed_body,
+                        challenge.displayHost
+                    )
+        }
+        PremiumDialog(
+            title = title,
+            subtitle = body,
+            onDismissRequest = viewModel::dismissStalkerTransportChallenge,
+            content = {},
+            footer = {
+                PremiumDialogFooterButton(
+                    label = stringResource(R.string.stalker_transport_go_back),
+                    onClick = viewModel::dismissStalkerTransportChallenge
+                )
+                PremiumDialogFooterButton(
+                    label = stringResource(R.string.stalker_transport_connect_anyway),
+                    onClick = viewModel::acceptStalkerTransportChallenge,
+                    emphasized = true
+                )
+            }
+        )
+    }
+
+    uiState.stalkerVerificationInconclusive?.let {
+        PremiumDialog(
+            title = stringResource(R.string.stalker_verification_inconclusive_title),
+            subtitle = stringResource(R.string.stalker_verification_inconclusive_body),
+            onDismissRequest = viewModel::dismissStalkerVerificationInconclusive,
+            content = {},
+            footer = {
+                PremiumDialogFooterButton(
+                    label = stringResource(R.string.stalker_transport_go_back),
+                    onClick = viewModel::dismissStalkerVerificationInconclusive
+                )
+                PremiumDialogFooterButton(
+                    label = stringResource(R.string.stalker_save_without_verification),
+                    onClick = viewModel::saveStalkerWithoutVerification,
+                    emphasized = true
+                )
+            }
         )
     }
 
@@ -558,30 +879,23 @@ fun ProviderSetupScreen(
         }
 
         if (uiState.pendingCombinedAttachProfileId != null) {
-            androidx.compose.material3.AlertDialog(
+            PremiumDialog(
+                title = "Add Playlist To Combined M3U?",
+                subtitle = "Add ${uiState.createdProviderName ?: "this playlist"} to " +
+                    "${uiState.pendingCombinedAttachProfileName ?: "the active combined source"} " +
+                    "and keep that combined source active for Live TV?",
                 onDismissRequest = onSkipCreatedProviderCombinedAttach,
-                title = { Text("Add Playlist To Combined M3U?") },
-                text = {
-                    Text(
-                        buildString {
-                            append("Add ")
-                            append(uiState.createdProviderName ?: "this playlist")
-                            append(" to ")
-                            append(uiState.pendingCombinedAttachProfileName ?: "the active combined source")
-                            append(" and keep that combined source active for Live TV?")
-                        },
-                        color = OnSurface
+                content = {},
+                footer = {
+                    PremiumDialogFooterButton(
+                        label = "Not Now",
+                        onClick = onSkipCreatedProviderCombinedAttach
                     )
-                },
-                confirmButton = {
-                    TextButton(onClick = onAttachCreatedProvider) {
-                        Text("Add To Combined", color = Primary)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = onSkipCreatedProviderCombinedAttach) {
-                        Text("Not Now", color = OnSurface)
-                    }
+                    PremiumDialogFooterButton(
+                        label = "Add To Combined",
+                        onClick = onAttachCreatedProvider,
+                        emphasized = true
+                    )
                 }
             )
         }
@@ -745,16 +1059,37 @@ private fun ProviderFormContent(
     stalkerDeviceId: String, onStalkerDeviceIdChange: (String) -> Unit,
     stalkerDeviceId2: String, onStalkerDeviceId2Change: (String) -> Unit,
     stalkerSignature: String, onStalkerSignatureChange: (String) -> Unit,
+    stalkerHwVersion: String, onStalkerHwVersionChange: (String) -> Unit,
+    stalkerApiUserAgent: String, onStalkerApiUserAgentChange: (String) -> Unit,
+    stalkerPlayerUserAgent: String, onStalkerPlayerUserAgentChange: (String) -> Unit,
+    stalkerPlayerHeaders: String, onStalkerPlayerHeadersChange: (String) -> Unit,
+    stalkerXUserAgentLink: String, onStalkerXUserAgentLinkChange: (String) -> Unit,
+    stalkerProxyEnabled: Boolean, onStalkerProxyEnabledChange: (Boolean) -> Unit,
+    stalkerProxyHost: String, onStalkerProxyHostChange: (String) -> Unit,
+    stalkerProxyPort: String, onStalkerProxyPortChange: (String) -> Unit,
+    stalkerRequestRules: List<StalkerRequestRuleUiState>,
+    onAddStalkerRequestRule: () -> Unit,
+    onUpdateStalkerRequestRule: (Int, StalkerRequestRuleUiState) -> Unit,
+    onRemoveStalkerRequestRule: (Int) -> Unit,
     fileImportError: String?,
     onFilePick: () -> Unit,
     onLoginXtream: () -> Unit,
     onLoginStalker: () -> Unit,
+    onRepairStalker: () -> Unit,
     onAddM3u: () -> Unit,
+    onLoginJellyfin: () -> Unit,
+    quickConnectCode: String,
+    onQuickConnectRequest: () -> Unit,
     onStartPhonePairing: () -> Unit,
     onStopPhonePairing: () -> Unit,
     onToggleM3uVodClassification: () -> Unit,
     onSelectEpgSyncMode: (ProviderEpgSyncMode) -> Unit,
+    onSelectStalkerCatalogMode: (StalkerCatalogMode) -> Unit,
+    onSelectStalkerProtocolPreference: (StalkerProtocolPreference) -> Unit,
+    onSelectStalkerProfile: (String) -> Unit,
     onSelectXtreamLiveSyncMode: (ProviderXtreamLiveSyncMode) -> Unit,
+    onSelectGuideSourcePolicy: (GuideSourcePolicy) -> Unit,
+    onSelectChannelLogoSourcePolicy: (ChannelLogoSourcePolicy) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -799,26 +1134,11 @@ private fun ProviderFormContent(
                         portalType = "xc",
                         onPortalSelected = { portal ->
                             onServerUrlChange(portal.url)
-                            val prefix = username.trim()
-                            val newDefaultName = if (prefix.isNotEmpty()) "$prefix@${portal.name}" else portal.name
-                            if (name.isEmpty() || name == "Phone Xtream Provider" || uiState.portals.any { it.name == name } || (name.contains("@") && uiState.portals.any { it.name == name.substringAfter("@") })) {
-                                onNameChange(newDefaultName)
-                            }
+                            if (name.isBlank() || uiState.portals.any { it.name == name }) onNameChange(portal.name)
                         }
                     )
                     ProviderTextField(
-                        value = username, onValueChange = { newVal ->
-                            onUsernameChange(newVal)
-                            val selectedPortal = uiState.portals.find { it.url == serverUrl }
-                            if (selectedPortal != null) {
-                                val currentServerName = selectedPortal.name
-                                val prefix = newVal.trim()
-                                val newDefaultName = if (prefix.isNotEmpty()) "$prefix@$currentServerName" else currentServerName
-                                if (name.isEmpty() || name == currentServerName || (name.contains("@") && name.substringAfter("@") == currentServerName)) {
-                                    onNameChange(newDefaultName)
-                                }
-                            }
-                        },
+                        value = username, onValueChange = onUsernameChange,
                         placeholder = androidx.compose.ui.res.stringResource(R.string.setup_user_hint),
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
@@ -847,7 +1167,10 @@ private fun ProviderFormContent(
                         onHttpHeadersChange = onHttpHeadersChange,
                         onToggleM3uVodClassification = onToggleM3uVodClassification,
                         onSelectEpgSyncMode = onSelectEpgSyncMode,
+                        onSelectStalkerCatalogMode = onSelectStalkerCatalogMode,
                         onSelectXtreamLiveSyncMode = onSelectXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = onSelectGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = onSelectChannelLogoSourcePolicy,
                         username = username,
                         onUsernameChange = onUsernameChange,
                         password = password,
@@ -868,7 +1191,27 @@ private fun ProviderFormContent(
                         stalkerDeviceId2 = stalkerDeviceId2,
                         onStalkerDeviceId2Change = onStalkerDeviceId2Change,
                         stalkerSignature = stalkerSignature,
-                        onStalkerSignatureChange = onStalkerSignatureChange
+                        onStalkerSignatureChange = onStalkerSignatureChange,
+                        stalkerHwVersion = stalkerHwVersion,
+                        onStalkerHwVersionChange = onStalkerHwVersionChange,
+                        stalkerApiUserAgent = stalkerApiUserAgent,
+                        onStalkerApiUserAgentChange = onStalkerApiUserAgentChange,
+                        stalkerPlayerUserAgent = stalkerPlayerUserAgent,
+                        onStalkerPlayerUserAgentChange = onStalkerPlayerUserAgentChange,
+                        stalkerPlayerHeaders = stalkerPlayerHeaders,
+                        onStalkerPlayerHeadersChange = onStalkerPlayerHeadersChange,
+                        stalkerXUserAgentLink = stalkerXUserAgentLink,
+                        onStalkerXUserAgentLinkChange = onStalkerXUserAgentLinkChange,
+                        stalkerProxyEnabled = stalkerProxyEnabled,
+                        onStalkerProxyEnabledChange = onStalkerProxyEnabledChange,
+                        stalkerProxyHost = stalkerProxyHost,
+                        onStalkerProxyHostChange = onStalkerProxyHostChange,
+                        stalkerProxyPort = stalkerProxyPort,
+                        onStalkerProxyPortChange = onStalkerProxyPortChange,
+                        stalkerRequestRules = stalkerRequestRules,
+                        onAddStalkerRequestRule = onAddStalkerRequestRule,
+                        onUpdateStalkerRequestRule = onUpdateStalkerRequestRule,
+                        onRemoveStalkerRequestRule = onRemoveStalkerRequestRule
                     )
                     FormErrors(uiState.validationError, uiState.error)
                     ActionButton(
@@ -889,26 +1232,11 @@ private fun ProviderFormContent(
                         portalType = "stalker",
                         onPortalSelected = { portal ->
                             onServerUrlChange(portal.url)
-                            val macPart = stalkerMacAddress.trim().takeLast(8)
-                            val newDefaultName = if (macPart.isNotEmpty()) "$macPart@${portal.name}" else portal.name
-                            if (name.isEmpty() || name == "Phone Stalker Portal" || uiState.portals.any { it.name == name } || (name.contains("@") && uiState.portals.any { it.name == name.substringAfter("@") })) {
-                                onNameChange(newDefaultName)
-                            }
+                            if (name.isBlank() || uiState.portals.any { it.name == name }) onNameChange(portal.name)
                         }
                     )
                     ProviderTextField(
-                        value = stalkerMacAddress, onValueChange = { newVal ->
-                            onStalkerMacAddressChange(newVal)
-                            val selectedPortal = uiState.portals.find { it.url == serverUrl }
-                            if (selectedPortal != null) {
-                                val currentServerName = selectedPortal.name
-                                val macPart = newVal.trim().takeLast(8)
-                                val newDefaultName = if (macPart.isNotEmpty()) "$macPart@$currentServerName" else currentServerName
-                                if (name.isEmpty() || name == currentServerName || (name.contains("@") && name.substringAfter("@") == currentServerName)) {
-                                    onNameChange(newDefaultName)
-                                }
-                            }
-                        },
+                        value = stalkerMacAddress, onValueChange = onStalkerMacAddressChange,
                         placeholder = if (stalkerAuthMode == StalkerAuthMode.CREDENTIALS_ONLY) {
                             "MAC address (optional)"
                         } else {
@@ -921,6 +1249,12 @@ private fun ProviderFormContent(
                             imeAction = ImeAction.Next
                         )
                     )
+                    StalkerCompatibilitySelector(
+                        protocol = uiState.stalkerProtocolPreference,
+                        profileId = uiState.stalkerRequestedProfileId,
+                        onProtocolSelected = onSelectStalkerProtocolPreference,
+                        onProfileSelected = onSelectStalkerProfile
+                    )
                     AdvancedProviderOptionsSection(
                         sourceType = sourceType,
                         uiState = uiState,
@@ -930,7 +1264,10 @@ private fun ProviderFormContent(
                         onHttpHeadersChange = onHttpHeadersChange,
                         onToggleM3uVodClassification = onToggleM3uVodClassification,
                         onSelectEpgSyncMode = onSelectEpgSyncMode,
+                        onSelectStalkerCatalogMode = onSelectStalkerCatalogMode,
                         onSelectXtreamLiveSyncMode = onSelectXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = onSelectGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = onSelectChannelLogoSourcePolicy,
                         username = username,
                         onUsernameChange = onUsernameChange,
                         password = password,
@@ -951,7 +1288,27 @@ private fun ProviderFormContent(
                         stalkerDeviceId2 = stalkerDeviceId2,
                         onStalkerDeviceId2Change = onStalkerDeviceId2Change,
                         stalkerSignature = stalkerSignature,
-                        onStalkerSignatureChange = onStalkerSignatureChange
+                        onStalkerSignatureChange = onStalkerSignatureChange,
+                        stalkerHwVersion = stalkerHwVersion,
+                        onStalkerHwVersionChange = onStalkerHwVersionChange,
+                        stalkerApiUserAgent = stalkerApiUserAgent,
+                        onStalkerApiUserAgentChange = onStalkerApiUserAgentChange,
+                        stalkerPlayerUserAgent = stalkerPlayerUserAgent,
+                        onStalkerPlayerUserAgentChange = onStalkerPlayerUserAgentChange,
+                        stalkerPlayerHeaders = stalkerPlayerHeaders,
+                        onStalkerPlayerHeadersChange = onStalkerPlayerHeadersChange,
+                        stalkerXUserAgentLink = stalkerXUserAgentLink,
+                        onStalkerXUserAgentLinkChange = onStalkerXUserAgentLinkChange,
+                        stalkerProxyEnabled = stalkerProxyEnabled,
+                        onStalkerProxyEnabledChange = onStalkerProxyEnabledChange,
+                        stalkerProxyHost = stalkerProxyHost,
+                        onStalkerProxyHostChange = onStalkerProxyHostChange,
+                        stalkerProxyPort = stalkerProxyPort,
+                        onStalkerProxyPortChange = onStalkerProxyPortChange,
+                        stalkerRequestRules = stalkerRequestRules,
+                        onAddStalkerRequestRule = onAddStalkerRequestRule,
+                        onUpdateStalkerRequestRule = onUpdateStalkerRequestRule,
+                        onRemoveStalkerRequestRule = onRemoveStalkerRequestRule
                     )
                     FormErrors(uiState.validationError, uiState.error)
                     ActionButton(
@@ -963,6 +1320,13 @@ private fun ProviderFormContent(
                         isLoading = uiState.isLoading,
                         onClick = onLoginStalker
                     )
+                    if (uiState.isEditing) {
+                        SmallActionButton(
+                            text = androidx.compose.ui.res.stringResource(R.string.stalker_repair_connection),
+                            isLoading = uiState.isLoading,
+                            onClick = onRepairStalker
+                        )
+                    }
                 }
 
                 SourceType.M3U_URL -> {
@@ -980,7 +1344,10 @@ private fun ProviderFormContent(
                         onHttpHeadersChange = onHttpHeadersChange,
                         onToggleM3uVodClassification = onToggleM3uVodClassification,
                         onSelectEpgSyncMode = onSelectEpgSyncMode,
+                        onSelectStalkerCatalogMode = onSelectStalkerCatalogMode,
                         onSelectXtreamLiveSyncMode = onSelectXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = onSelectGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = onSelectChannelLogoSourcePolicy,
                         username = username,
                         onUsernameChange = onUsernameChange,
                         password = password,
@@ -1035,7 +1402,10 @@ private fun ProviderFormContent(
                         onHttpHeadersChange = onHttpHeadersChange,
                         onToggleM3uVodClassification = onToggleM3uVodClassification,
                         onSelectEpgSyncMode = onSelectEpgSyncMode,
+                        onSelectStalkerCatalogMode = onSelectStalkerCatalogMode,
                         onSelectXtreamLiveSyncMode = onSelectXtreamLiveSyncMode,
+                        onSelectGuideSourcePolicy = onSelectGuideSourcePolicy,
+                        onSelectChannelLogoSourcePolicy = onSelectChannelLogoSourcePolicy,
                         username = username,
                         onUsernameChange = onUsernameChange,
                         password = password,
@@ -1069,6 +1439,32 @@ private fun ProviderFormContent(
                         onClick = onAddM3u
                     )
                 }
+
+                SourceType.JELLYFIN -> {
+                    JellyfinProviderForm(
+                        serverUrl = serverUrl,
+                        onServerUrlChange = onServerUrlChange,
+                        username = username,
+                        onUsernameChange = onUsernameChange,
+                        password = password,
+                        onPasswordChange = onPasswordChange,
+                        name = name,
+                        onNameChange = onNameChange,
+                        quickConnectCode = quickConnectCode,
+                        onQuickConnectRequest = onQuickConnectRequest,
+                        isEditing = uiState.isEditing
+                    )
+                    FormErrors(uiState.validationError, uiState.error)
+                    ActionButton(
+                        text = when {
+                            uiState.isLoading -> stringResource(R.string.setup_validating)
+                            uiState.isEditing -> stringResource(R.string.setup_save)
+                            else -> stringResource(R.string.setup_add)
+                        },
+                        isLoading = uiState.isLoading,
+                        onClick = onLoginJellyfin
+                    )
+                }
             }
         }
     }
@@ -1085,7 +1481,10 @@ private fun AdvancedProviderOptionsSection(
     onHttpHeadersChange: (String) -> Unit,
     onToggleM3uVodClassification: () -> Unit,
     onSelectEpgSyncMode: (ProviderEpgSyncMode) -> Unit,
+    onSelectStalkerCatalogMode: (StalkerCatalogMode) -> Unit,
     onSelectXtreamLiveSyncMode: (ProviderXtreamLiveSyncMode) -> Unit,
+    onSelectGuideSourcePolicy: (GuideSourcePolicy) -> Unit,
+    onSelectChannelLogoSourcePolicy: (ChannelLogoSourcePolicy) -> Unit,
     username: String,
     onUsernameChange: (String) -> Unit,
     password: String,
@@ -1106,34 +1505,69 @@ private fun AdvancedProviderOptionsSection(
     stalkerDeviceId2: String,
     onStalkerDeviceId2Change: (String) -> Unit,
     stalkerSignature: String,
-    onStalkerSignatureChange: (String) -> Unit
+    onStalkerSignatureChange: (String) -> Unit,
+    stalkerHwVersion: String = "",
+    onStalkerHwVersionChange: (String) -> Unit = {},
+    stalkerApiUserAgent: String = "",
+    onStalkerApiUserAgentChange: (String) -> Unit = {},
+    stalkerPlayerUserAgent: String = "",
+    onStalkerPlayerUserAgentChange: (String) -> Unit = {},
+    stalkerPlayerHeaders: String = "",
+    onStalkerPlayerHeadersChange: (String) -> Unit = {},
+    stalkerXUserAgentLink: String = StalkerAdvancedOptions.LINK_ETHERNET,
+    onStalkerXUserAgentLinkChange: (String) -> Unit = {},
+    stalkerProxyEnabled: Boolean = false,
+    onStalkerProxyEnabledChange: (Boolean) -> Unit = {},
+    stalkerProxyHost: String = "",
+    onStalkerProxyHostChange: (String) -> Unit = {},
+    stalkerProxyPort: String = "",
+    onStalkerProxyPortChange: (String) -> Unit = {},
+    stalkerRequestRules: List<StalkerRequestRuleUiState> = emptyList(),
+    onAddStalkerRequestRule: () -> Unit = {},
+    onUpdateStalkerRequestRule: (Int, StalkerRequestRuleUiState) -> Unit = { _, _ -> },
+    onRemoveStalkerRequestRule: (Int) -> Unit = {}
 ) {
     var showAdvancedOptions by rememberSaveable(sourceType) { mutableStateOf(false) }
     val defaultEpgSyncMode = when (sourceType) {
         SourceType.STALKER -> ProviderEpgSyncMode.BACKGROUND
         SourceType.XTREAM,
         SourceType.M3U_URL,
-        SourceType.M3U_FILE -> ProviderEpgSyncMode.UPFRONT
+        SourceType.M3U_FILE,
+        SourceType.JELLYFIN -> ProviderEpgSyncMode.UPFRONT
     }
 
-    LaunchedEffect(uiState.isEditing, uiState.epgSyncMode, uiState.xtreamLiveSyncMode, sourceType) {
+    LaunchedEffect(uiState.isEditing, uiState.epgSyncMode, uiState.stalkerCatalogMode, uiState.xtreamLiveSyncMode, uiState.guideSourcePolicy, uiState.channelLogoSourcePolicy, sourceType) {
         val hasNonDefaultSelection = ((sourceType == SourceType.XTREAM || sourceType == SourceType.STALKER) && uiState.epgSyncMode != defaultEpgSyncMode) ||
+            (sourceType == SourceType.STALKER && uiState.stalkerCatalogMode != StalkerCatalogMode.ON_DEMAND) ||
             (sourceType == SourceType.XTREAM && uiState.xtreamLiveSyncMode != ProviderXtreamLiveSyncMode.AUTO) ||
+            (supportsGuideAndLogoPolicy(sourceType) && uiState.guideSourcePolicy != GuideSourcePolicy.AUTO) ||
+            (supportsGuideAndLogoPolicy(sourceType) && uiState.channelLogoSourcePolicy != ChannelLogoSourcePolicy.SUPPLIER_PREFERRED) ||
             ((sourceType == SourceType.M3U_URL || sourceType == SourceType.M3U_FILE) && !uiState.m3uVodClassificationEnabled) ||
             ((sourceType == SourceType.XTREAM || sourceType == SourceType.M3U_URL || sourceType == SourceType.M3U_FILE) &&
-                (httpUserAgent.isNotBlank() || httpHeaders.isNotBlank())) ||
+                httpUserAgent.isNotBlank()) ||
+            ((sourceType == SourceType.XTREAM || sourceType == SourceType.STALKER || sourceType == SourceType.M3U_URL || sourceType == SourceType.M3U_FILE) &&
+                httpHeaders.isNotBlank()) ||
             (sourceType == SourceType.STALKER && (
                 stalkerAuthMode != StalkerAuthMode.AUTO ||
                     username.isNotBlank() ||
                     password.isNotBlank() ||
                     stalkerMacAddress.isBlank() ||
-                stalkerDeviceProfile.isNotBlank() ||
+                    stalkerDeviceProfile.isNotBlank() ||
                     stalkerDeviceTimezone.isNotBlank() ||
                     stalkerDeviceLocale.isNotBlank() ||
                     stalkerSerialNumber.isNotBlank() ||
                     stalkerDeviceId.isNotBlank() ||
                     stalkerDeviceId2.isNotBlank() ||
-                    stalkerSignature.isNotBlank()
+                    stalkerSignature.isNotBlank() ||
+                    stalkerHwVersion.isNotBlank() ||
+                    stalkerApiUserAgent.isNotBlank() ||
+                    stalkerPlayerUserAgent.isNotBlank() ||
+                    stalkerPlayerHeaders.isNotBlank() ||
+                    stalkerXUserAgentLink != StalkerAdvancedOptions.LINK_ETHERNET ||
+                    stalkerProxyEnabled ||
+                    stalkerProxyHost.isNotBlank() ||
+                    stalkerProxyPort.isNotBlank() ||
+                    stalkerRequestRules.isNotEmpty()
                 ))
         if (uiState.isEditing && hasNonDefaultSelection) {
             showAdvancedOptions = true
@@ -1255,10 +1689,17 @@ private fun AdvancedProviderOptionsSection(
                             imeAction = ImeAction.Next
                         )
                     )
+                }
+
+                if (sourceType == SourceType.XTREAM || sourceType == SourceType.STALKER || sourceType == SourceType.M3U_URL || sourceType == SourceType.M3U_FILE) {
                     ProviderTextField(
                         value = httpHeaders,
                         onValueChange = onHttpHeadersChange,
-                        placeholder = "Custom headers (optional, Header: Value | Header2: Value)",
+                        placeholder = if (sourceType == SourceType.STALKER) {
+                            "Headers (API, optional, Header: Value | HeaderToRemove:)"
+                        } else {
+                            "Custom headers (optional, Header: Value | Header2: Value)"
+                        },
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
                             autoCorrectEnabled = false,
@@ -1268,7 +1709,7 @@ private fun AdvancedProviderOptionsSection(
                     )
                 }
 
-                if (sourceType == SourceType.XTREAM || sourceType == SourceType.STALKER) {
+                if (supportsGuideAndLogoPolicy(sourceType)) {
                     if (sourceType == SourceType.XTREAM) {
                         Column(
                             modifier = Modifier
@@ -1295,6 +1736,60 @@ private fun AdvancedProviderOptionsSection(
                                     onSelect = { onSelectXtreamLiveSyncMode(mode) }
                                 )
                             }
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, SurfaceHighlight, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Guide source",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Choose whether this provider uses its supplier guide, your assigned external XMLTV sources, or no guide at all.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = OnSurfaceDim
+                        )
+                        GuideSourcePolicy.entries.forEach { policy ->
+                            GuideSourcePolicyOptionRow(
+                                policy = policy,
+                                selected = uiState.guideSourcePolicy == policy,
+                                onSelect = { onSelectGuideSourcePolicy(policy) }
+                            )
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, SurfaceHighlight, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Channel logos",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Pick whether channel logos come from the supplier, the matched EPG channel icon, or a strict single source.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = OnSurfaceDim
+                        )
+                        ChannelLogoSourcePolicy.entries.forEach { policy ->
+                            ChannelLogoSourcePolicyOptionRow(
+                                policy = policy,
+                                selected = uiState.channelLogoSourcePolicy == policy,
+                                onSelect = { onSelectChannelLogoSourcePolicy(policy) }
+                            )
                         }
                     }
 
@@ -1334,6 +1829,38 @@ private fun AdvancedProviderOptionsSection(
                 }
 
                 if (sourceType == SourceType.STALKER) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, SurfaceHighlight, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Movie and series catalog",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "This is separate from EPG loading. On demand makes the provider ready after categories load; background indexing downloads the complete catalog later.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = OnSurfaceDim
+                        )
+                        PolicyOptionRow(
+                            title = "On demand (recommended)",
+                            description = "Load visible shelves and opened categories as needed. Existing cached items are kept.",
+                            selected = uiState.stalkerCatalogMode == StalkerCatalogMode.ON_DEMAND,
+                            onSelect = { onSelectStalkerCatalogMode(StalkerCatalogMode.ON_DEMAND) }
+                        )
+                        PolicyOptionRow(
+                            title = "Complete background index",
+                            description = "Make the provider ready first, then maintain a complete searchable catalog in the background.",
+                            selected = uiState.stalkerCatalogMode == StalkerCatalogMode.BACKGROUND_INDEX,
+                            onSelect = { onSelectStalkerCatalogMode(StalkerCatalogMode.BACKGROUND_INDEX) }
+                        )
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1396,7 +1923,7 @@ private fun AdvancedProviderOptionsSection(
                     ProviderTextField(
                         value = stalkerDeviceProfile,
                         onValueChange = onStalkerDeviceProfileChange,
-                        placeholder = "Device profile (optional)"
+                        placeholder = "MAG Type (optional)"
                     )
                     ProviderTextField(
                         value = stalkerDeviceTimezone,
@@ -1428,8 +1955,294 @@ private fun AdvancedProviderOptionsSection(
                         onValueChange = onStalkerSignatureChange,
                         placeholder = "Signature (optional)"
                     )
+                    HorizontalDivider(color = SurfaceHighlight.copy(alpha = 0.45f))
+                    Text(
+                        text = "Stalker compatibility",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Portal-specific overrides for stubborn MAG/Stalker servers. Leave fields empty unless a server needs them.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurfaceDim
+                    )
+                    ProviderTextField(
+                        value = stalkerHwVersion,
+                        onValueChange = onStalkerHwVersionChange,
+                        placeholder = "hw_version override (optional)"
+                    )
+                    ProviderTextField(
+                        value = stalkerApiUserAgent,
+                        onValueChange = onStalkerApiUserAgentChange,
+                        placeholder = "User-Agent (API, optional)"
+                    )
+                    ProviderTextField(
+                        value = stalkerPlayerUserAgent,
+                        onValueChange = onStalkerPlayerUserAgentChange,
+                        placeholder = "User-Agent (Player, optional)"
+                    )
+                    ProviderTextField(
+                        value = stalkerPlayerHeaders,
+                        onValueChange = onStalkerPlayerHeadersChange,
+                        placeholder = "Headers (Player, optional, Header: Value | HeaderToRemove:)"
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "X-User-Agent Link",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            StalkerLinkOptionButton(
+                                text = StalkerAdvancedOptions.LINK_ETHERNET,
+                                selected = stalkerXUserAgentLink == StalkerAdvancedOptions.LINK_ETHERNET,
+                                onClick = { onStalkerXUserAgentLinkChange(StalkerAdvancedOptions.LINK_ETHERNET) }
+                            )
+                            StalkerLinkOptionButton(
+                                text = StalkerAdvancedOptions.LINK_WIFI,
+                                selected = stalkerXUserAgentLink == StalkerAdvancedOptions.LINK_WIFI,
+                                onClick = { onStalkerXUserAgentLinkChange(StalkerAdvancedOptions.LINK_WIFI) }
+                            )
+                        }
+                    }
+                    TvClickableSurface(
+                        onClick = { onStalkerProxyEnabledChange(!stalkerProxyEnabled) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = "Use HTTP proxy" },
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(12.dp)),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = if (stalkerProxyEnabled) Primary.copy(alpha = 0.1f) else Surface,
+                            focusedContainerColor = Primary.copy(alpha = 0.22f)
+                        ),
+                        border = ClickableSurfaceDefaults.border(
+                            border = Border(
+                                BorderStroke(
+                                    1.dp,
+                                    if (stalkerProxyEnabled) Primary.copy(alpha = 0.4f) else SurfaceHighlight
+                                )
+                            ),
+                            focusedBorder = Border(BorderStroke(3.dp, PrimaryLight))
+                        ),
+                        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "Use HTTP proxy",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Applies to Stalker API and playback only.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = OnSurfaceDim
+                                )
+                            }
+                            Switch(
+                                checked = stalkerProxyEnabled,
+                                onCheckedChange = onStalkerProxyEnabledChange
+                            )
+                        }
+                    }
+                    AnimatedVisibility(stalkerProxyEnabled) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ProviderTextField(
+                                value = stalkerProxyHost,
+                                onValueChange = onStalkerProxyHostChange,
+                                placeholder = "Proxy host"
+                            )
+                            ProviderTextField(
+                                value = stalkerProxyPort,
+                                onValueChange = onStalkerProxyPortChange,
+                                placeholder = "Proxy port",
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                            )
+                        }
+                    }
+                    StalkerRequestRulesEditor(
+                        rules = stalkerRequestRules,
+                        onAddRule = onAddStalkerRequestRule,
+                        onUpdateRule = onUpdateStalkerRequestRule,
+                        onRemoveRule = onRemoveStalkerRequestRule
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun StalkerLinkOptionButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.mouseClickable(onClick = onClick),
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(999.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (selected) Primary.copy(alpha = 0.18f) else Surface,
+            focusedContainerColor = Primary.copy(alpha = 0.28f)
+        ),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(BorderStroke(1.dp, if (selected) Primary else SurfaceHighlight)),
+            focusedBorder = Border(BorderStroke(3.dp, PrimaryLight))
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = TextPrimary
+        )
+    }
+}
+
+@Composable
+private fun StalkerRequestRulesEditor(
+    rules: List<StalkerRequestRuleUiState>,
+    onAddRule: () -> Unit,
+    onUpdateRule: (Int, StalkerRequestRuleUiState) -> Unit,
+    onRemoveRule: (Int) -> Unit
+) {
+    val newestRuleBringIntoViewRequester = remember { BringIntoViewRequester() }
+    var previousRuleCount by remember { mutableIntStateOf(rules.size) }
+
+    LaunchedEffect(rules.size) {
+        if (rules.size > previousRuleCount) {
+            delay(120)
+            runCatching { newestRuleBringIntoViewRequester.bringIntoView() }
+        }
+        previousRuleCount = rules.size
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface, RoundedCornerShape(12.dp))
+            .border(1.dp, SurfaceHighlight, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Request rules", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                Text(
+                    "Match by action, block calls, or override params. Blank values remove params.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceDim
+                )
+            }
+            RequestRuleActionButton(text = "Add Rule", onClick = onAddRule)
+        }
+        rules.forEachIndexed { index, rule ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (index == rules.lastIndex) {
+                            Modifier.bringIntoViewRequester(newestRuleBringIntoViewRequester)
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .border(1.dp, SurfaceHighlight.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Rule ${index + 1}", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                    RequestRuleActionButton(
+                        text = "Delete",
+                        onClick = { onRemoveRule(index) },
+                        compact = true
+                    )
+                }
+                ProviderTextField(
+                    value = rule.action,
+                    onValueChange = { onUpdateRule(index, rule.copy(action = it.trim())) },
+                    placeholder = "action, e.g. get_profile"
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Block this request", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                    Switch(
+                        checked = rule.blockRequest,
+                        onCheckedChange = { onUpdateRule(index, rule.copy(blockRequest = it)) }
+                    )
+                }
+                if (rule.blockRequest && rule.action.trim() in setOf("handshake", "get_profile")) {
+                    Text(
+                        text = "Warning: blocking ${rule.action.trim()} can prevent login.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AccentAmber
+                    )
+                }
+                ProviderTextField(
+                    value = rule.paramsText,
+                    onValueChange = { onUpdateRule(index, rule.copy(paramsText = it)) },
+                    placeholder = "Param overrides: name=value | remove_me="
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RequestRuleActionButton(
+    text: String,
+    onClick: () -> Unit,
+    compact: Boolean = false
+) {
+    TvClickableSurface(
+        onClick = onClick,
+        modifier = Modifier
+            .width(if (compact) 88.dp else 124.dp)
+            .height(40.dp)
+            .mouseClickable(onClick = onClick)
+            .semantics { contentDescription = text },
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (compact) SurfaceHighlight.copy(alpha = 0.9f) else Primary,
+            focusedContainerColor = if (compact) SurfaceHighlight else PrimaryLight
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        glow = ClickableSurfaceDefaults.glow(focusedGlow = Glow.None),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(
+                BorderStroke(
+                    1.dp,
+                    if (compact) SurfaceHighlight.copy(alpha = 0.8f) else PrimaryLight
+                )
+            ),
+            focusedBorder = Border(BorderStroke(3.dp, FocusBorder))
+        )
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextPrimary,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -1635,6 +2448,98 @@ private fun EpgSyncModeOptionRow(
     }
 }
 
+private fun supportsGuideAndLogoPolicy(sourceType: SourceType): Boolean = when (sourceType) {
+    SourceType.XTREAM,
+    SourceType.STALKER,
+    SourceType.M3U_URL,
+    SourceType.M3U_FILE -> true
+    SourceType.JELLYFIN -> false
+}
+
+@Composable
+private fun GuideSourcePolicyOptionRow(
+    policy: GuideSourcePolicy,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    val title = when (policy) {
+        GuideSourcePolicy.AUTO -> "Auto"
+        GuideSourcePolicy.EXTERNAL_ONLY -> "Use external EPG only"
+        GuideSourcePolicy.PROVIDER_ONLY -> "Use supplier EPG only"
+        GuideSourcePolicy.DISABLED -> "Disable guide data"
+    }
+    val description = when (policy) {
+        GuideSourcePolicy.AUTO -> "Keep the current mixed behavior: external XMLTV can override supplier guide data, and unmatched channels may still use supplier fallback."
+        GuideSourcePolicy.EXTERNAL_ONLY -> "Use only assigned external XMLTV sources. Unmatched channels stay without guide data."
+        GuideSourcePolicy.PROVIDER_ONLY -> "Ignore assigned external XMLTV sources for this provider and use only the supplier guide paths."
+        GuideSourcePolicy.DISABLED -> "Do not import or resolve guide data for this provider."
+    }
+    PolicyOptionRow(title = title, description = description, selected = selected, onSelect = onSelect)
+}
+
+@Composable
+private fun ChannelLogoSourcePolicyOptionRow(
+    policy: ChannelLogoSourcePolicy,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    val title = when (policy) {
+        ChannelLogoSourcePolicy.SUPPLIER_PREFERRED -> "Supplier logos first"
+        ChannelLogoSourcePolicy.EPG_PREFERRED -> "Prefer EPG logos"
+        ChannelLogoSourcePolicy.SUPPLIER_ONLY -> "Supplier logos only"
+        ChannelLogoSourcePolicy.EPG_ONLY -> "EPG logos only"
+    }
+    val description = when (policy) {
+        ChannelLogoSourcePolicy.SUPPLIER_PREFERRED -> "Use the supplier logo when it exists, then fall back to the matched EPG icon."
+        ChannelLogoSourcePolicy.EPG_PREFERRED -> "Use the matched EPG icon first, then fall back to the supplier logo."
+        ChannelLogoSourcePolicy.SUPPLIER_ONLY -> "Always use supplier logos for this provider."
+        ChannelLogoSourcePolicy.EPG_ONLY -> "Always use matched EPG icons for this provider."
+    }
+    PolicyOptionRow(title = title, description = description, selected = selected, onSelect = onSelect)
+}
+
+@Composable
+private fun PolicyOptionRow(
+    title: String,
+    description: String,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    Surface(
+        onClick = onSelect,
+        modifier = Modifier
+            .fillMaxWidth()
+            .mouseClickable(onClick = onSelect),
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (selected) Primary.copy(alpha = 0.12f) else Color.Transparent,
+            focusedContainerColor = if (selected) Primary.copy(alpha = 0.26f) else SurfaceHighlight.copy(alpha = 0.9f)
+        ),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(
+                BorderStroke(
+                    1.dp,
+                    if (selected) Primary.copy(alpha = 0.45f) else Color.Transparent
+                )
+            ),
+            focusedBorder = Border(BorderStroke(3.dp, PrimaryLight))
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(selected = selected, onClick = onSelect)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(text = title, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                Text(text = description, style = MaterialTheme.typography.bodySmall, color = OnSurfaceDim)
+            }
+        }
+    }
+}
+
 @Composable
 private fun FormErrors(validationError: String?, error: String?) {
     validationError?.let {
@@ -1699,6 +2604,33 @@ private fun SourceTypeSelectorPanel(
                     selected = sourceType == SourceType.STALKER,
                     enabled = !isEditing,
                     onClick = { onSelect(SourceType.STALKER) }
+                )
+            }
+            if (isEditing && sourceType == SourceType.M3U_URL) {
+                SourceTypeCard(
+                    title = androidx.compose.ui.res.stringResource(R.string.setup_tab_url),
+                    subtitle = androidx.compose.ui.res.stringResource(R.string.setup_info_m3u_body),
+                    selected = sourceType == SourceType.M3U_URL,
+                    enabled = !isEditing,
+                    onClick = { onSelect(SourceType.M3U_URL) }
+                )
+            }
+            if (isEditing && sourceType == SourceType.M3U_FILE) {
+                SourceTypeCard(
+                    title = androidx.compose.ui.res.stringResource(R.string.setup_tab_file),
+                    subtitle = androidx.compose.ui.res.stringResource(R.string.setup_file_browse_hint),
+                    selected = sourceType == SourceType.M3U_FILE,
+                    enabled = !isEditing,
+                    onClick = { onSelect(SourceType.M3U_FILE) }
+                )
+            }
+            if (isEditing && sourceType == SourceType.JELLYFIN) {
+                SourceTypeCard(
+                    title = androidx.compose.ui.res.stringResource(R.string.setup_tab_jellyfin),
+                    subtitle = "Jellyfin media server",
+                    selected = sourceType == SourceType.JELLYFIN,
+                    enabled = !isEditing,
+                    onClick = { onSelect(SourceType.JELLYFIN) }
                 )
             }
             if (!isEditing) {
@@ -1802,10 +2734,82 @@ private fun SourceTypeTabRow(
                 onClick = { if (!isEditing) onSelect(SourceType.STALKER) }
             )
         }
+        if (isEditing && sourceType == SourceType.M3U_URL) {
+            TabButton(
+                text = androidx.compose.ui.res.stringResource(R.string.setup_tab_url),
+                isSelected = sourceType == SourceType.M3U_URL,
+                onClick = { if (!isEditing) onSelect(SourceType.M3U_URL) }
+            )
+        }
+        if (isEditing && sourceType == SourceType.M3U_FILE) {
+            TabButton(
+                text = androidx.compose.ui.res.stringResource(R.string.setup_tab_file),
+                isSelected = sourceType == SourceType.M3U_FILE,
+                onClick = { if (!isEditing) onSelect(SourceType.M3U_FILE) }
+            )
+        }
+        if (isEditing && sourceType == SourceType.JELLYFIN) {
+            TabButton(
+                text = androidx.compose.ui.res.stringResource(R.string.setup_tab_jellyfin),
+                isSelected = sourceType == SourceType.JELLYFIN,
+                onClick = { if (!isEditing) onSelect(SourceType.JELLYFIN) }
+            )
+        }
     }
 }
 
 // ??? ProviderTextField ????????????????????????????????????????????????????????
+@Composable
+private fun PortalSelector(
+    selectedUrl: String,
+    portals: List<com.streamvault.app.pairing.PortalInfo>,
+    portalType: String,
+    onPortalSelected: (com.streamvault.app.pairing.PortalInfo) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    val filtered = portals.filter { it.type.equals(portalType, ignoreCase = true) }
+    val selected = filtered.firstOrNull { it.url == selectedUrl }
+    Surface(
+        onClick = { showDialog = true },
+        modifier = modifier.fillMaxWidth().height(52.dp).mouseClickable { showDialog = true },
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
+        border = ClickableSurfaceDefaults.border(
+            border = Border(BorderStroke(1.dp, SurfaceHighlight)),
+            focusedBorder = Border(BorderStroke(2.dp, FocusBorder))
+        ),
+        colors = ClickableSurfaceDefaults.colors(containerColor = SurfaceElevated)
+    ) {
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(selected?.name ?: "Select service", color = if (selected == null) OnSurfaceDim else OnBackground)
+            Text("▼", color = OnSurfaceDim)
+        }
+    }
+    if (showDialog) {
+        PremiumDialog(
+            title = "Select service",
+            subtitle = "Choose your service",
+            onDismissRequest = { showDialog = false },
+            content = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    if (filtered.isEmpty()) Text("No services available.", color = OnSurfaceDim)
+                    filtered.forEach { portal ->
+                        SmallActionButton(
+                            text = portal.name,
+                            isLoading = false,
+                            onClick = { onPortalSelected(portal); showDialog = false }
+                        )
+                    }
+                }
+            },
+            footer = { PremiumDialogFooterButton(label = "Cancel", onClick = { showDialog = false }) }
+        )
+    }
+}
 //
 // Key fix: uses BasicTextField with decorationBox and tracks focus via
 // onFocusEvent { it.hasFocus } ן¿½ hasFocus is true when this node OR any
@@ -2037,7 +3041,7 @@ private fun ProviderTextField(
                         modifier = Modifier.weight(1f),
                         contentAlignment = Alignment.CenterStart
                     ) {
-                        if (value.isEmpty()) {
+                        if (fieldValue.text.isEmpty()) {
                             Text(text = placeholder, style = MaterialTheme.typography.bodyMedium, color = OnSurfaceDim)
                         }
                         innerTextField()
@@ -2118,51 +3122,108 @@ private fun PasswordVisibilityGlyph(
 // ??? Sync progress dialog ?????????????????????????????????????????????????????
 
 @Composable
-fun SyncProgressDialog(message: String) {
-    val fraction = extractProgressFraction(message)
-    val animatedFraction by animateFloatAsState(
-        targetValue = fraction ?: 0f,
-        animationSpec = tween(durationMillis = 400),
-        label = "syncFraction"
-    )
-    PremiumDialog(
-        title = androidx.compose.ui.res.stringResource(R.string.settings_syncing_title),
-        subtitle = androidx.compose.ui.res.stringResource(R.string.settings_syncing_subtitle),
-        onDismissRequest = {},
-        widthFraction = 0.32f,
-        heightFraction = null,
-        content = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                CircularProgressIndicator(color = Primary)
-                StatusPill(
-                    label = androidx.compose.ui.res.stringResource(R.string.settings_syncing_btn),
-                    containerColor = PrimaryGlow
-                )
-                if (fraction != null) {
-                    LinearProgressIndicator(
-                        progress = { animatedFraction },
-                        color = Primary,
-                        modifier = Modifier.fillMaxWidth()
+fun SyncProgressDialog(
+    message: String,
+    quickConnectCode: String? = null,
+    serverUrl: String? = null,
+    onCancel: (() -> Unit)? = null
+) {
+    if (quickConnectCode != null && serverUrl != null) {
+        val qrCodeBitmap = remember(quickConnectCode, serverUrl) {
+            generateJellyfinQuickConnectQrCode(serverUrl, quickConnectCode)
+        }
+        PremiumDialog(
+            title = "Quick Connect",
+            subtitle = "Enter this code on your Jellyfin server",
+            onDismissRequest = {},
+            widthFraction = 0.38f,
+            heightFraction = null,
+            content = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (qrCodeBitmap != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(200.dp)
+                                .background(Color.White, RoundedCornerShape(12.dp))
+                                .padding(8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                bitmap = qrCodeBitmap.asImageBitmap(),
+                                contentDescription = "Quick Connect QR Code",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                    Text(
+                        text = stringResource(R.string.setup_jellyfin_quick_connect_code, quickConnectCode),
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = Color.White
                     )
-                } else {
-                    LinearProgressIndicator(
-                        color = Primary,
-                        modifier = Modifier.fillMaxWidth()
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+                    if (onCancel != null) {
+                        TextButton(onClick = onCancel) {
+                            Text("Cancel", color = Color.White)
+                        }
+                    }
+                }
+            }
+        )
+    } else {
+        val fraction = extractProgressFraction(message)
+        val animatedFraction by animateFloatAsState(
+            targetValue = fraction ?: 0f,
+            animationSpec = tween(durationMillis = 400),
+            label = "syncFraction"
+        )
+        PremiumDialog(
+            title = androidx.compose.ui.res.stringResource(R.string.settings_syncing_title),
+            subtitle = androidx.compose.ui.res.stringResource(R.string.settings_syncing_subtitle),
+            onDismissRequest = {},
+            widthFraction = 0.32f,
+            heightFraction = null,
+            content = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    CircularProgressIndicator(color = Primary)
+                    StatusPill(
+                        label = androidx.compose.ui.res.stringResource(R.string.settings_syncing_btn),
+                        containerColor = PrimaryGlow
+                    )
+                    if (fraction != null) {
+                        LinearProgressIndicator(
+                            progress = { animatedFraction },
+                            color = Primary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            color = Primary,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = OnBackground,
+                        textAlign = TextAlign.Center
                     )
                 }
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = OnBackground,
-                    textAlign = TextAlign.Center
-                )
             }
-        }
-    )
+        )
+    }
 }
 
 // ??? ActionButton ?????????????????????????????????????????????????????????????
@@ -2321,6 +3382,61 @@ private fun ImportOptionsDialog(
 }
 
 @Composable
+private fun DriveBackupSnapshotChoiceDialog(
+    snapshots: List<DriveBackupSnapshot>,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    PremiumDialog(
+        title = stringResource(R.string.settings_drive_choose_backup_title),
+        subtitle = stringResource(R.string.settings_drive_choose_backup_subtitle),
+        onDismissRequest = onDismiss,
+        widthFraction = 0.52f,
+        heightFraction = 0.82f,
+        bodyHeightFraction = 0.64f,
+        content = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                snapshots.forEach { snapshot ->
+                    SmallActionButton(
+                        text = snapshot.fileName,
+                        isLoading = false,
+                        onClick = { onSelect(snapshot.id) },
+                    )
+                    Text(
+                        text = formatDriveSnapshotDetails(snapshot),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OnSurface.copy(alpha = 0.72f),
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                }
+            }
+        },
+        footer = {
+            PremiumDialogFooterButton(
+                label = stringResource(R.string.settings_drive_cancel_backup_choice),
+                onClick = onDismiss,
+            )
+        },
+    )
+}
+
+private fun formatDriveSnapshotDetails(snapshot: DriveBackupSnapshot): String {
+    val date = snapshot.modifiedAtMs?.let {
+        java.text.DateFormat.getDateTimeInstance(
+            java.text.DateFormat.SHORT,
+            java.text.DateFormat.SHORT,
+        ).format(java.util.Date(it))
+    } ?: "Date unavailable"
+    val size = if (snapshot.sizeBytes > 0L) "${snapshot.sizeBytes / 1024L} KB" else "Size unavailable"
+    return "$date · $size"
+}
+
+@Composable
 private fun ImportDialogActionButton(
     text: String,
     isLoading: Boolean,
@@ -2473,121 +3589,114 @@ private fun resolveFileImportError(context: android.content.Context, error: Thro
            else context.getString(R.string.setup_file_import_failed)
 }
 
+// ??? Jellyfin form ?????????????????????????????????????????????????????????????
+
 @Composable
-private fun PortalSelector(
-    selectedUrl: String,
-    portals: List<com.streamvault.app.pairing.PortalInfo>,
-    portalType: String,
-    onPortalSelected: (com.streamvault.app.pairing.PortalInfo) -> Unit,
-    modifier: Modifier = Modifier
+private fun JellyfinProviderForm(
+    serverUrl: String,
+    onServerUrlChange: (String) -> Unit,
+    username: String,
+    onUsernameChange: (String) -> Unit,
+    password: String,
+    onPasswordChange: (String) -> Unit,
+    name: String,
+    onNameChange: (String) -> Unit,
+    quickConnectCode: String,
+    onQuickConnectRequest: () -> Unit,
+    isEditing: Boolean
 ) {
-    var showDialog by remember { mutableStateOf(false) }
-    val filteredPortals = portals.filter { it.type.lowercase() == portalType.lowercase() }
-    
-    val selectedPortal = filteredPortals.find { it.url == selectedUrl }
-    val displayText = when {
-        selectedPortal != null -> selectedPortal.name
-        else -> "Select Portal"
-    }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text(
+            text = stringResource(R.string.setup_tab_jellyfin),
+            style = MaterialTheme.typography.titleLarge,
+            color = TextPrimary
+        )
 
-    var isFocused by remember { mutableStateOf(false) }
-    val borderColor = if (isFocused) Primary else SurfaceHighlight
-    val bgColor     = if (isFocused) Surface  else SurfaceElevated
+        // Step 1: Server URL
+        ProviderTextField(
+            value = serverUrl,
+            onValueChange = onServerUrlChange,
+            placeholder = stringResource(R.string.setup_server_url)
+        )
 
-    Surface(
-        onClick = { showDialog = true },
-        modifier = modifier
-            .fillMaxWidth()
-            .height(52.dp)
-            .onFocusEvent { isFocused = it.hasFocus }
-            .mouseClickable(onClick = { showDialog = true }),
-        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(10.dp)),
-        border = ClickableSurfaceDefaults.border(
-            border = Border(BorderStroke(1.dp, borderColor)),
-            focusedBorder = Border(BorderStroke(2.dp, FocusBorder))
-        ),
-        colors = ClickableSurfaceDefaults.colors(containerColor = bgColor, focusedContainerColor = bgColor)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = displayText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (selectedUrl.isNotEmpty()) OnBackground else OnSurfaceDim
-            )
-            Text(
-                text = "▼",
-                style = MaterialTheme.typography.bodySmall,
-                color = OnSurfaceDim
-            )
-        }
-    }
-
-    if (showDialog) {
-        PremiumDialog(
-            title = "Select Portal",
-            subtitle = "Choose a portal from the list",
-            onDismissRequest = { showDialog = false },
-            content = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                ) {
-                    if (filteredPortals.isEmpty()) {
-                        Text(
-                            text = "No portals available.",
-                            color = OnSurfaceDim,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    } else {
-                        filteredPortals.forEach { portal ->
-                            var itemFocused by remember { mutableStateOf(false) }
-                            Surface(
-                                onClick = {
-                                    onPortalSelected(portal)
-                                    showDialog = false
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .onFocusEvent { itemFocused = it.hasFocus }
-                                    .mouseClickable {
-                                        onPortalSelected(portal)
-                                        showDialog = false
-                                    },
-                                shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
-                                colors = ClickableSurfaceDefaults.colors(
-                                    containerColor = if (itemFocused) Primary.copy(alpha = 0.15f) else Color.Transparent,
-                                    focusedContainerColor = Primary.copy(alpha = 0.25f)
-                                ),
-                                border = ClickableSurfaceDefaults.border(
-                                    border = Border(BorderStroke(1.dp, if (itemFocused) Primary else Color.Transparent)),
-                                    focusedBorder = Border(BorderStroke(2.dp, FocusBorder))
-                                )
-                            ) {
-                                Text(
-                                    text = portal.name,
-                                    modifier = Modifier.padding(16.dp),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = OnBackground
-                                )
-                            }
-                        }
-                    }
-                }
-            },
-            footer = {
-                PremiumDialogFooterButton(
-                    label = "Cancel",
-                    onClick = { showDialog = false }
-                )
+        // Quick Connect button + QR code display
+        if (!isEditing) {
+            TvButton(
+                onClick = onQuickConnectRequest,
+                colors = ButtonDefaults.colors(containerColor = AccentCyan, contentColor = Color.Black)
+            ) {
+                Text(stringResource(R.string.setup_jellyfin_quick_connect))
             }
+        }
+
+        // QR code and code text (shown after quick connect is initiated)
+        if (quickConnectCode.isNotBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            val qrCodeBitmap = remember(quickConnectCode, serverUrl) {
+                generateJellyfinQuickConnectQrCode(serverUrl, quickConnectCode)
+            }
+            if (qrCodeBitmap != null) {
+                Box(
+                    modifier = Modifier
+                        .size(240.dp)
+                        .background(Color.White, RoundedCornerShape(12.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        bitmap = qrCodeBitmap.asImageBitmap(),
+                        contentDescription = "Quick Connect QR Code",
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            Text(
+                text = stringResource(R.string.setup_jellyfin_quick_connect_code, quickConnectCode),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary
+            )
+            Text(
+                text = stringResource(R.string.setup_jellyfin_quick_connect_code_instructions),
+                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+        }
+
+        // Step 2: Manual credentials (for password auth or existing provider edit)
+        ProviderTextField(
+            value = username,
+            onValueChange = onUsernameChange,
+            placeholder = stringResource(R.string.setup_username)
+        )
+        ProviderTextField(
+            value = password,
+            onValueChange = onPasswordChange,
+            placeholder = stringResource(R.string.setup_password),
+            isPassword = true
+        )
+        ProviderTextField(
+            value = name,
+            onValueChange = onNameChange,
+            placeholder = stringResource(R.string.setup_name_placeholder)
         )
     }
 }
 
+private fun generateJellyfinQuickConnectQrCode(serverUrl: String, code: String): Bitmap? {
+    return try {
+        val qrUrl = "${serverUrl.trimEnd('/')}/web/index.html#!/quickconnect.html?code=$code"
+        val writer = QRCodeWriter()
+        val bitMatrix = writer.encode(qrUrl, BarcodeFormat.QR_CODE, 512, 512)
+        val bitmap = Bitmap.createBitmap(512, 512, Bitmap.Config.RGB_565)
+        for (x in 0 until 512) {
+            for (y in 0 until 512) {
+                bitmap.setPixel(x, y, if (bitMatrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            }
+        }
+        bitmap
+    } catch (e: Exception) {
+        null
+    }
+}

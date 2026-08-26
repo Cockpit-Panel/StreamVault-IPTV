@@ -1,13 +1,28 @@
 package com.streamvault.domain.usecase
 
 import com.streamvault.domain.manager.ProviderSetupInputValidator
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderEpgSyncMode
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
 import com.streamvault.domain.model.ProviderSavedWithSyncErrorException
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.StalkerAuthMode
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerReadinessInconclusiveException
+import com.streamvault.domain.model.StalkerTransportChallenge
+import com.streamvault.domain.model.StalkerTransportGrant
+import com.streamvault.domain.model.StalkerTransportConsentRequiredException
 import com.streamvault.domain.repository.ProviderRepository
+import com.streamvault.domain.repository.ProviderSetupRequest
+import com.streamvault.domain.model.XtreamConfig
+import com.streamvault.domain.model.M3uConfig
+import com.streamvault.domain.model.StalkerConfig
+import com.streamvault.domain.model.StalkerDeviceIdentity
+import com.streamvault.domain.model.JellyfinConfig
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -23,6 +38,8 @@ data class XtreamProviderSetupCommand(
     val xtreamFastSyncEnabled: Boolean = false,
     val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
     val xtreamLiveSyncMode: ProviderXtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
+    val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
     val existingProviderId: Long? = null
 )
 
@@ -33,6 +50,8 @@ data class M3uProviderSetupCommand(
     val httpHeaders: String = "",
     val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
     val m3uVodClassificationEnabled: Boolean = false,
+    val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
     val existingProviderId: Long? = null
 )
 
@@ -43,6 +62,8 @@ data class StalkerProviderSetupCommand(
     val authMode: StalkerAuthMode = StalkerAuthMode.AUTO,
     val username: String = "",
     val password: String = "",
+    val httpUserAgent: String = "",
+    val httpHeaders: String = "",
     val deviceProfile: String = "",
     val timezone: String = "",
     val locale: String = "",
@@ -50,7 +71,30 @@ data class StalkerProviderSetupCommand(
     val deviceId: String = "",
     val deviceId2: String = "",
     val signature: String = "",
+    val stalkerAdvancedOptionsJson: String = "",
+    val protocolPreference: StalkerProtocolPreference = StalkerProtocolPreference.AUTO,
+    val transportGrant: StalkerTransportGrant? = null,
+    val saveWithoutVerification: Boolean = false,
+    val repairConnection: Boolean = false,
+    val requestedProfileId: String = StalkerCompatibilityProfileIds.AUTO,
     val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
+    val catalogMode: StalkerCatalogMode = StalkerCatalogMode.ON_DEMAND,
+    val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
+    val existingProviderId: Long? = null
+)
+
+data class JellyfinProviderSetupCommand(
+    val serverUrl: String,
+    val username: String,
+    val password: String,
+    val name: String,
+    val existingProviderId: Long? = null
+)
+
+data class JellyfinQuickConnectProviderSetupCommand(
+    val serverUrl: String,
+    val name: String,
     val existingProviderId: Long? = null
 )
 
@@ -58,6 +102,12 @@ sealed class ValidateAndAddProviderResult {
     data class Success(val provider: Provider) : ValidateAndAddProviderResult()
     data class SavedWithWarning(val provider: Provider, val warning: String) : ValidateAndAddProviderResult()
     data class ValidationError(val message: String) : ValidateAndAddProviderResult()
+    data class TransportConsentRequired(
+        val challenge: StalkerTransportChallenge
+    ) : ValidateAndAddProviderResult()
+    data class VerificationInconclusive(
+        val message: String
+    ) : ValidateAndAddProviderResult()
     data class Error(val message: String, val exception: Throwable? = null) : ValidateAndAddProviderResult()
 }
 
@@ -126,13 +176,16 @@ class ValidateAndAddProvider @Inject constructor(
                 username = command.username,
                 password = command.password,
                 allowBlankPassword = command.existingProviderId != null,
+                httpUserAgent = command.httpUserAgent,
+                httpHeaders = command.httpHeaders,
                 deviceProfile = command.deviceProfile,
                 timezone = command.timezone,
                 locale = command.locale,
                 serialNumber = command.serialNumber,
                 deviceId = command.deviceId,
                 deviceId2 = command.deviceId2,
-                signature = command.signature
+                signature = command.signature,
+                stalkerAdvancedOptionsJson = command.stalkerAdvancedOptionsJson
             )
         ) {
             is Result.Error -> ValidateAndAddProviderResult.ValidationError(result.message)
@@ -155,18 +208,24 @@ class ValidateAndAddProvider @Inject constructor(
                 httpHeaders = command.httpHeaders
             )
         ) {
-            is Result.Success -> providerRepository.loginXtream(
-                serverUrl = validated.data.serverUrl,
-                username = validated.data.username,
-                password = validated.data.password,
-                name = validated.data.name,
-                httpUserAgent = validated.data.httpUserAgent,
-                httpHeaders = validated.data.httpHeaders,
-                xtreamFastSyncEnabled = command.xtreamFastSyncEnabled,
-                epgSyncMode = command.epgSyncMode,
-                xtreamLiveSyncMode = command.xtreamLiveSyncMode,
-                onProgress = onProgress,
-                id = command.existingProviderId
+            is Result.Success -> providerRepository.setupProvider(
+                ProviderSetupRequest.Configured(
+                    name = validated.data.name,
+                    configuration = XtreamConfig(
+                        serverUrl = validated.data.serverUrl,
+                        username = validated.data.username,
+                        password = validated.data.password,
+                        httpUserAgent = validated.data.httpUserAgent,
+                        httpHeaders = validated.data.httpHeaders,
+                        fastSyncEnabled = command.xtreamFastSyncEnabled,
+                        epgSyncMode = command.epgSyncMode,
+                        liveSyncMode = command.xtreamLiveSyncMode,
+                        guideSourcePolicy = command.guideSourcePolicy,
+                        channelLogoSourcePolicy = command.channelLogoSourcePolicy
+                    ),
+                    existingProviderId = command.existingProviderId
+                ),
+                onProgress = onProgress
             ).toUseCaseResult()
 
             is Result.Error -> ValidateAndAddProviderResult.ValidationError(validated.message)
@@ -193,31 +252,43 @@ class ValidateAndAddProvider @Inject constructor(
                         ValidateAndAddProviderResult.ValidationError(parsedXtream.message)
 
                     is ParsedXtreamPlaylistUrlResult.Success -> {
-                        providerRepository.loginXtream(
-                            serverUrl = parsedXtream.serverUrl,
-                            username = parsedXtream.username,
-                            password = parsedXtream.password,
-                            name = validatedInput.name,
-                            httpUserAgent = validatedInput.httpUserAgent,
-                            httpHeaders = validatedInput.httpHeaders,
-                            xtreamFastSyncEnabled = false,
-                            epgSyncMode = command.epgSyncMode,
-                            xtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
-                            onProgress = onProgress,
-                            id = command.existingProviderId
+                        providerRepository.setupProvider(
+                            ProviderSetupRequest.Configured(
+                                name = validatedInput.name,
+                                configuration = XtreamConfig(
+                                    serverUrl = parsedXtream.serverUrl,
+                                    username = parsedXtream.username,
+                                    password = parsedXtream.password,
+                                    httpUserAgent = validatedInput.httpUserAgent,
+                                    httpHeaders = validatedInput.httpHeaders,
+                                    fastSyncEnabled = false,
+                                    epgSyncMode = command.epgSyncMode,
+                                    liveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
+                                    guideSourcePolicy = command.guideSourcePolicy,
+                                    channelLogoSourcePolicy = command.channelLogoSourcePolicy
+                                ),
+                                existingProviderId = command.existingProviderId
+                            ),
+                            onProgress = onProgress
                         ).toUseCaseResult()
                     }
 
                     ParsedXtreamPlaylistUrlResult.NotXtreamPlaylist -> {
-                        providerRepository.validateM3u(
-                            url = validatedInput.url,
-                            name = validatedInput.name,
-                            httpUserAgent = validatedInput.httpUserAgent,
-                            httpHeaders = validatedInput.httpHeaders,
-                            epgSyncMode = command.epgSyncMode,
-                            m3uVodClassificationEnabled = command.m3uVodClassificationEnabled,
-                            onProgress = onProgress,
-                            id = command.existingProviderId
+                        providerRepository.setupProvider(
+                            ProviderSetupRequest.Configured(
+                                name = validatedInput.name,
+                                configuration = M3uConfig(
+                                    playlistUrl = validatedInput.url,
+                                    httpUserAgent = validatedInput.httpUserAgent,
+                                    httpHeaders = validatedInput.httpHeaders,
+                                    epgSyncMode = command.epgSyncMode,
+                                    vodClassificationEnabled = command.m3uVodClassificationEnabled,
+                                    guideSourcePolicy = command.guideSourcePolicy,
+                                    channelLogoSourcePolicy = command.channelLogoSourcePolicy
+                                ),
+                                existingProviderId = command.existingProviderId
+                            ),
+                            onProgress = onProgress
                         ).toUseCaseResult()
                     }
                 }
@@ -241,32 +312,109 @@ class ValidateAndAddProvider @Inject constructor(
                 username = command.username,
                 password = command.password,
                 allowBlankPassword = command.existingProviderId != null,
+                httpUserAgent = command.httpUserAgent,
+                httpHeaders = command.httpHeaders,
                 deviceProfile = command.deviceProfile,
                 timezone = command.timezone,
                 locale = command.locale,
                 serialNumber = command.serialNumber,
                 deviceId = command.deviceId,
                 deviceId2 = command.deviceId2,
-                signature = command.signature
+                signature = command.signature,
+                stalkerAdvancedOptionsJson = command.stalkerAdvancedOptionsJson
             )
         ) {
-            is Result.Success -> providerRepository.loginStalker(
-                portalUrl = validated.data.portalUrl,
-                macAddress = validated.data.macAddress,
-                name = validated.data.name,
-                authMode = validated.data.authMode,
-                username = validated.data.username,
-                password = validated.data.password,
-                deviceProfile = validated.data.deviceProfile,
-                timezone = validated.data.timezone,
-                locale = validated.data.locale,
-                serialNumber = validated.data.serialNumber,
-                deviceId = validated.data.deviceId,
-                deviceId2 = validated.data.deviceId2,
-                signature = validated.data.signature,
-                epgSyncMode = command.epgSyncMode,
+            is Result.Success -> providerRepository.setupProvider(
+                ProviderSetupRequest.Configured(
+                    name = validated.data.name,
+                    configuration = StalkerConfig(
+                        portalUrl = validated.data.portalUrl,
+                        device = StalkerDeviceIdentity(
+                            macAddress = validated.data.macAddress,
+                            deviceProfile = validated.data.deviceProfile,
+                            timezone = validated.data.timezone,
+                            locale = validated.data.locale,
+                            serialNumber = validated.data.serialNumber,
+                            deviceId = validated.data.deviceId,
+                            deviceId2 = validated.data.deviceId2,
+                            signature = validated.data.signature
+                        ),
+                        authMode = validated.data.authMode,
+                        username = validated.data.username,
+                        password = validated.data.password,
+                        httpUserAgent = validated.data.httpUserAgent,
+                        httpHeaders = validated.data.httpHeaders,
+                        advancedOptionsJson = validated.data.stalkerAdvancedOptionsJson,
+                        protocolPreference = command.protocolPreference,
+                        transportGrant = command.transportGrant,
+                        requestedProfileId = command.requestedProfileId,
+                        epgSyncMode = command.epgSyncMode,
+                        catalogMode = command.catalogMode,
+                        guideSourcePolicy = command.guideSourcePolicy,
+                        channelLogoSourcePolicy = command.channelLogoSourcePolicy
+                    ),
+                    existingProviderId = command.existingProviderId,
+                    saveWithoutVerification = command.saveWithoutVerification,
+                    repairConnection = command.repairConnection
+                ),
+                onProgress = onProgress
+            ).toUseCaseResult()
+
+            is Result.Error -> ValidateAndAddProviderResult.ValidationError(validated.message)
+            is Result.Loading -> ValidateAndAddProviderResult.Error("Unexpected loading state")
+        }
+    }
+
+    suspend fun loginJellyfin(
+        command: JellyfinProviderSetupCommand,
+        onProgress: ((String) -> Unit)? = null
+    ): ValidateAndAddProviderResult {
+        return when (
+            val validated = providerSetupInputValidator.validateJellyfin(
+                serverUrl = command.serverUrl,
+                username = command.username,
+                password = command.password,
+                allowBlankPassword = command.existingProviderId != null,
+                name = command.name
+            )
+        ) {
+            is Result.Success -> providerRepository.setupProvider(
+                ProviderSetupRequest.Configured(
+                    name = validated.data.name,
+                    configuration = JellyfinConfig(
+                        serverUrl = validated.data.serverUrl,
+                        username = validated.data.username,
+                        credential = validated.data.password
+                    ),
+                    existingProviderId = command.existingProviderId
+                ),
+                onProgress = onProgress
+            ).toUseCaseResult()
+
+            is Result.Error -> ValidateAndAddProviderResult.ValidationError(validated.message)
+            is Result.Loading -> ValidateAndAddProviderResult.Error("Unexpected loading state")
+        }
+    }
+
+    suspend fun loginJellyfinQuickConnect(
+        command: JellyfinQuickConnectProviderSetupCommand,
+        onCode: ((String) -> Unit)? = null,
+        onProgress: ((String) -> Unit)? = null
+    ): ValidateAndAddProviderResult {
+        return when (
+            val validated = providerSetupInputValidator.validateJellyfinQuickConnect(
+                serverUrl = command.serverUrl,
+                name = command.name
+            )
+        ) {
+            is Result.Success -> providerRepository.setupProvider(
+                ProviderSetupRequest.JellyfinQuickConnect(
+                    serverUrl = validated.data.serverUrl,
+                    name = validated.data.name,
+                    existingProviderId = command.existingProviderId
+                ),
                 onProgress = onProgress,
-                id = command.existingProviderId
+                onCode = onCode
             ).toUseCaseResult()
 
             is Result.Error -> ValidateAndAddProviderResult.ValidationError(validated.message)
@@ -277,14 +425,33 @@ class ValidateAndAddProvider @Inject constructor(
     private fun Result<Provider>.toUseCaseResult(): ValidateAndAddProviderResult = when (this) {
         is Result.Success -> ValidateAndAddProviderResult.Success(data)
         is Result.Error -> {
-            val savedWithWarning = exception as? ProviderSavedWithSyncErrorException
-            if (savedWithWarning != null) {
-                ValidateAndAddProviderResult.SavedWithWarning(
-                    provider = savedWithWarning.provider,
-                    warning = savedWithWarning.message ?: message
+            val transportConsent = generateSequence(exception) { it.cause }
+                .filterIsInstance<StalkerTransportConsentRequiredException>()
+                .firstOrNull()
+            if (transportConsent != null) {
+                ValidateAndAddProviderResult.TransportConsentRequired(
+                    transportConsent.challenge
                 )
             } else {
-                ValidateAndAddProviderResult.Error(message, exception)
+                val readinessInconclusive = generateSequence(exception) { it.cause }
+                    .filterIsInstance<StalkerReadinessInconclusiveException>()
+                    .firstOrNull()
+                if (readinessInconclusive != null) {
+                    ValidateAndAddProviderResult.VerificationInconclusive(
+                        readinessInconclusive.message
+                            ?: "Authentication succeeded, but Live TV could not be verified."
+                    )
+                } else {
+                    val savedWithWarning = exception as? ProviderSavedWithSyncErrorException
+                    if (savedWithWarning != null) {
+                        ValidateAndAddProviderResult.SavedWithWarning(
+                            provider = savedWithWarning.provider,
+                            warning = savedWithWarning.message ?: message
+                        )
+                    } else {
+                        ValidateAndAddProviderResult.Error(message, exception)
+                    }
+                }
             }
         }
         is Result.Loading -> ValidateAndAddProviderResult.Error("Unexpected loading state")

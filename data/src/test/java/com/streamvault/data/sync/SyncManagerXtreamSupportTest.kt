@@ -2,7 +2,7 @@ package com.streamvault.data.sync
 
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.data.remote.dto.XtreamCategory
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import java.io.IOException
 import kotlinx.coroutines.delay

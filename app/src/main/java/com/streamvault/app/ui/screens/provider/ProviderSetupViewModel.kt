@@ -11,17 +11,26 @@ import com.streamvault.data.remote.xtream.XtreamRequestException
 import com.streamvault.data.remote.xtream.XtreamResponseTooLargeException
 import com.streamvault.data.security.CredentialDecryptionException
 import com.streamvault.domain.manager.BackupConflictStrategy
+import com.streamvault.domain.manager.BackupRestoreOutcome
 import com.streamvault.domain.manager.DriveAuthState
+import com.streamvault.domain.manager.DriveBackupSnapshot
 import com.streamvault.domain.manager.DriveBackupSyncManager
 import com.streamvault.domain.manager.ProviderCredentials
 import com.streamvault.domain.model.Result as DomainResult
 import com.streamvault.domain.manager.BackupImportPlan
 import com.streamvault.domain.manager.BackupPreview
 import com.streamvault.domain.model.ActiveLiveSource
+import com.streamvault.domain.model.ChannelLogoSourcePolicy
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.ProviderEpgSyncMode
 import com.streamvault.domain.model.ProviderXtreamLiveSyncMode
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.StalkerAuthMode
+import com.streamvault.domain.model.StalkerCatalogMode
+import com.streamvault.domain.model.StalkerCompatibilityProfileIds
+import com.streamvault.domain.model.StalkerProtocolPreference
+import com.streamvault.domain.model.StalkerTransportChallenge
+import com.streamvault.domain.model.StalkerTransportChallengeReason
 import com.streamvault.domain.repository.CombinedM3uRepository
 import com.streamvault.domain.repository.ProviderRepository
 import com.streamvault.domain.usecase.ImportBackup
@@ -29,6 +38,8 @@ import com.streamvault.domain.usecase.ImportBackupCommand
 import com.streamvault.domain.usecase.ImportBackupResult
 import com.streamvault.domain.usecase.InspectBackupCommand
 import com.streamvault.domain.usecase.InspectBackupResult
+import com.streamvault.domain.usecase.JellyfinProviderSetupCommand
+import com.streamvault.domain.usecase.JellyfinQuickConnectProviderSetupCommand
 import com.streamvault.domain.usecase.M3uProviderSetupCommand
 import com.streamvault.domain.usecase.StalkerProviderSetupCommand
 import com.streamvault.domain.usecase.ValidateAndAddProvider
@@ -73,7 +84,8 @@ class ProviderSetupViewModel @Inject constructor(
     enum class SetupSourceType {
         XTREAM,
         STALKER,
-        M3U
+        M3U,
+        JELLYFIN
     }
 
     private val _uiState = MutableStateFlow(ProviderSetupState())
@@ -81,6 +93,9 @@ class ProviderSetupViewModel @Inject constructor(
     private val _knownLocalM3uUrls = MutableStateFlow<Set<String>>(emptySet())
     val knownLocalM3uUrls: StateFlow<Set<String>> = _knownLocalM3uUrls.asStateFlow()
     val pairingState: StateFlow<ProviderQrPairingState> = providerQrPairingManager.state
+    private var jellyfinQuickConnectJob: kotlinx.coroutines.Job? = null
+    private var stalkerSetupJob: kotlinx.coroutines.Job? = null
+    private var pendingStalkerCommand: StalkerProviderSetupCommand? = null
 
     init {
         fetchPortals()
@@ -157,35 +172,102 @@ class ProviderSetupViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     isImportingBackup = true,
+                    driveBackupOptions = emptyList(),
                     syncProgress = "Downloading from Drive...",
                     validationError = null,
-                    error = null
+                    error = null,
+                    pendingDriveCredentials = null
                 )
             }
-            when (val pullResult = driveBackupSyncManager.pullBackup()) {
+            when (val listResult = driveBackupSyncManager.listBackups()) {
                 is DomainResult.Success -> {
-                    // Best-effort companion fetch (M3). Failures are non-fatal.
-                    val credentials = (driveBackupSyncManager.pullCredentials() as? DomainResult.Success)?.data
-                    _uiState.update {
-                        it.copy(
-                            isImportingBackup = false,
-                            pendingDriveCredentials = credentials,
-                        )
+                    if (listResult.data.isEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                isImportingBackup = false,
+                                syncProgress = null,
+                                pendingDriveCredentials = null,
+                                error = "Drive pull failed: no backups found",
+                            )
+                        }
+                    } else if (listResult.data.size > 1) {
+                        _uiState.update {
+                            it.copy(
+                                isImportingBackup = false,
+                                syncProgress = null,
+                                driveBackupOptions = listResult.data,
+                            )
+                        }
+                    } else {
+                        downloadBackupFromDrive(listResult.data.single().id)
                     }
-                    inspectBackup(pullResult.data.localUriString)
                 }
                 is DomainResult.Error -> {
                     _uiState.update {
                         it.copy(
                             isImportingBackup = false,
                             syncProgress = null,
-                            error = "Drive pull failed: ${pullResult.message}"
+                            driveBackupOptions = emptyList(),
+                            pendingDriveCredentials = null,
+                            error = "Drive pull failed: ${listResult.message}"
                         )
                     }
                 }
                 is DomainResult.Loading -> Unit
             }
         }
+    }
+
+    fun selectDriveBackup(snapshotId: String) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isImportingBackup = true,
+                    driveBackupOptions = emptyList(),
+                    syncProgress = "Downloading from Drive...",
+                    validationError = null,
+                    error = null,
+                    pendingDriveCredentials = null,
+                )
+            }
+            downloadBackupFromDrive(snapshotId)
+        }
+    }
+
+    fun dismissDriveBackupOptions() {
+        _uiState.update { it.copy(driveBackupOptions = emptyList()) }
+    }
+
+    private suspend fun downloadBackupFromDrive(snapshotId: String) {
+        when (val pullResult = driveBackupSyncManager.pullBackup(snapshotId)) {
+            is DomainResult.Success -> {
+                    // New bundles carry credentials with the exact backup
+                    // snapshot. Legacy standalone backups fall back to the
+                    // old companion credentials file.
+                    val credentials = pullResult.data.credentials
+                        ?: (driveBackupSyncManager.pullCredentials() as? DomainResult.Success)?.data
+                    _uiState.update {
+                        it.copy(
+                            isImportingBackup = false,
+                            driveBackupOptions = emptyList(),
+                            pendingDriveCredentials = credentials,
+                        )
+                    }
+                    inspectBackup(pullResult.data.localUriString, preserveDriveCredentials = true)
+                }
+                is DomainResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            isImportingBackup = false,
+                            syncProgress = null,
+                            driveBackupOptions = emptyList(),
+                            pendingDriveCredentials = null,
+                            error = "Drive pull failed: ${pullResult.message}"
+                        )
+                    }
+                }
+                is DomainResult.Loading -> Unit
+            }
     }
 
     private suspend fun applyPendingDriveCredentials() {
@@ -225,14 +307,23 @@ class ProviderSetupViewModel @Inject constructor(
                         stalkerDeviceId = provider.stalkerDeviceId,
                         stalkerDeviceId2 = provider.stalkerDeviceId2,
                         stalkerSignature = provider.stalkerSignature,
+                        stalkerAdvancedOptionsJson = provider.stalkerAdvancedOptionsJson,
+                        stalkerProtocolPreference = provider.stalkerProtocolPreference
+                            .takeUnless { it == StalkerProtocolPreference.MINISTRA_API_V3 }
+                            ?: StalkerProtocolPreference.CLASSIC_MAG,
+                        stalkerRequestedProfileId = provider.stalkerRequestedProfileId,
                         epgSyncMode = provider.epgSyncMode,
+                        stalkerCatalogMode = provider.stalkerCatalogMode,
                         xtreamLiveSyncMode = provider.xtreamLiveSyncMode,
+                        guideSourcePolicy = provider.guideSourcePolicy,
+                        channelLogoSourcePolicy = provider.channelLogoSourcePolicy,
                         hasCustomizedEpgSyncMode = true,
                         m3uVodClassificationEnabled = provider.m3uVodClassificationEnabled,
                         selectedTab = when (provider.type) {
                             ProviderType.XTREAM_CODES -> 0
                             ProviderType.STALKER_PORTAL -> 1
                             ProviderType.M3U -> 2
+                            ProviderType.JELLYFIN -> 3
                         },
                         m3uTab = if (provider.m3uUrl.startsWith("file://")) 1 else 0
                     )
@@ -253,8 +344,29 @@ class ProviderSetupViewModel @Inject constructor(
         _uiState.update { it.copy(epgSyncMode = mode, hasCustomizedEpgSyncMode = true) }
     }
 
+    fun updateStalkerCatalogMode(mode: StalkerCatalogMode) {
+        _uiState.update { it.copy(stalkerCatalogMode = mode) }
+    }
+
+    fun updateStalkerProtocolPreference(preference: StalkerProtocolPreference) {
+        if (preference == StalkerProtocolPreference.MINISTRA_API_V3) return
+        _uiState.update { it.copy(stalkerProtocolPreference = preference) }
+    }
+
+    fun updateStalkerRequestedProfile(profileId: String) {
+        _uiState.update { it.copy(stalkerRequestedProfileId = profileId) }
+    }
+
     fun updateXtreamLiveSyncMode(mode: ProviderXtreamLiveSyncMode) {
         _uiState.update { it.copy(xtreamLiveSyncMode = mode) }
+    }
+
+    fun updateGuideSourcePolicy(policy: GuideSourcePolicy) {
+        _uiState.update { it.copy(guideSourcePolicy = policy) }
+    }
+
+    fun updateChannelLogoSourcePolicy(policy: ChannelLogoSourcePolicy) {
+        _uiState.update { it.copy(channelLogoSourcePolicy = policy) }
     }
 
     fun applySourceDefaults(sourceType: SetupSourceType) {
@@ -276,49 +388,137 @@ class ProviderSetupViewModel @Inject constructor(
         username: String,
         password: String,
         name: String,
+        httpUserAgent: String,
+        httpHeaders: String,
         deviceProfile: String,
         timezone: String,
         locale: String,
         serialNumber: String = "",
         deviceId: String = "",
         deviceId2: String = "",
-        signature: String = ""
+        signature: String = "",
+        stalkerAdvancedOptionsJson: String = "",
+        protocolPreference: StalkerProtocolPreference = StalkerProtocolPreference.AUTO,
+        requestedProfileId: String = StalkerCompatibilityProfileIds.AUTO,
+        repairConnection: Boolean = false
     ) {
+        val current = _uiState.value
+        submitStalker(
+            StalkerProviderSetupCommand(
+                portalUrl = portalUrl,
+                macAddress = macAddress,
+                authMode = authMode,
+                username = username,
+                password = password,
+                name = name,
+                httpUserAgent = httpUserAgent,
+                httpHeaders = httpHeaders,
+                deviceProfile = deviceProfile,
+                timezone = timezone,
+                locale = locale,
+                serialNumber = serialNumber,
+                deviceId = deviceId,
+                deviceId2 = deviceId2,
+                signature = signature,
+                stalkerAdvancedOptionsJson = stalkerAdvancedOptionsJson,
+                protocolPreference = protocolPreference,
+                repairConnection = repairConnection,
+                requestedProfileId = requestedProfileId,
+                epgSyncMode = current.epgSyncMode,
+                catalogMode = current.stalkerCatalogMode,
+                guideSourcePolicy = current.guideSourcePolicy,
+                channelLogoSourcePolicy = current.channelLogoSourcePolicy,
+                existingProviderId = current.existingProviderId.takeIf { current.isEditing }
+            )
+        )
+    }
+
+    fun acceptStalkerTransportChallenge() {
+        val challenge = _uiState.value.stalkerTransportChallenge ?: return
+        val command = pendingStalkerCommand ?: return
+        if (challenge.reason == StalkerTransportChallengeReason.INVALID_TLS &&
+            challenge.proposedSpkiSha256.isNullOrBlank()
+        ) {
+            _uiState.update {
+                it.copy(
+                    stalkerTransportChallenge = null,
+                    error = "The provider certificate could not be read safely. Check the address and try again."
+                )
+            }
+            pendingStalkerCommand = null
+            return
+        }
+        _uiState.update { it.copy(stalkerTransportChallenge = null) }
+        pendingStalkerCommand = null
+        submitStalker(command.copy(transportGrant = challenge.acceptedGrant()))
+    }
+
+    fun dismissStalkerTransportChallenge() {
+        pendingStalkerCommand = null
+        _uiState.update {
+            it.copy(
+                stalkerTransportChallenge = null,
+                isLoading = false,
+                syncProgress = null
+            )
+        }
+    }
+
+    fun saveStalkerWithoutVerification() {
+        val command = pendingStalkerCommand ?: return
+        pendingStalkerCommand = null
+        _uiState.update { it.copy(stalkerVerificationInconclusive = null) }
+        submitStalker(command.copy(saveWithoutVerification = true))
+    }
+
+    fun dismissStalkerVerificationInconclusive() {
+        pendingStalkerCommand = null
+        _uiState.update {
+            it.copy(
+                stalkerVerificationInconclusive = null,
+                isLoading = false,
+                syncProgress = null
+            )
+        }
+    }
+
+    fun cancelStalkerSetup() {
+        stalkerSetupJob?.cancel()
+        stalkerSetupJob = null
+        pendingStalkerCommand = null
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                syncProgress = null,
+                stalkerTransportChallenge = null,
+                stalkerVerificationInconclusive = null
+            )
+        }
+    }
+
+    private fun submitStalker(command: StalkerProviderSetupCommand) {
         _uiState.update {
             it.copy(
                 validationError = null,
                 error = null,
                 completionWarning = null,
                 onboardingCompletion = OnboardingCompletion.NONE,
-                loginSuccess = false
+                loginSuccess = false,
+                stalkerTransportChallenge = null,
+                stalkerVerificationInconclusive = null
             )
         }
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, validationError = null, syncProgress = "Connecting...") }
-            val existingId = if (_uiState.value.isEditing) _uiState.value.existingProviderId else null
-
+        stalkerSetupJob?.cancel()
+        stalkerSetupJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(isLoading = true, validationError = null, syncProgress = "Connecting...")
+            }
             when (val result = validateAndAddProvider.loginStalker(
-                StalkerProviderSetupCommand(
-                    portalUrl = portalUrl,
-                    macAddress = macAddress,
-                    authMode = authMode,
-                    username = username,
-                    password = password,
-                    name = name,
-                    deviceProfile = deviceProfile,
-                    timezone = timezone,
-                    locale = locale,
-                    serialNumber = serialNumber,
-                    deviceId = deviceId,
-                    deviceId2 = deviceId2,
-                    signature = signature,
-                    epgSyncMode = _uiState.value.epgSyncMode,
-                    existingProviderId = existingId
-                ),
+                command,
                 onProgress = { msg -> _uiState.update { it.copy(syncProgress = msg) } }
             )) {
                 is ValidateAndAddProviderResult.Success -> {
+                    pendingStalkerCommand = null
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -332,6 +532,7 @@ class ProviderSetupViewModel @Inject constructor(
                     }
                 }
                 is ValidateAndAddProviderResult.SavedWithWarning -> {
+                    pendingStalkerCommand = null
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -346,11 +547,37 @@ class ProviderSetupViewModel @Inject constructor(
                     }
                 }
                 is ValidateAndAddProviderResult.ValidationError -> {
+                    pendingStalkerCommand = null
                     _uiState.update {
                         it.copy(isLoading = false, validationError = result.message, error = null, syncProgress = null)
                     }
                 }
+                is ValidateAndAddProviderResult.TransportConsentRequired -> {
+                    pendingStalkerCommand = command
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            syncProgress = null,
+                            error = null,
+                            validationError = null,
+                            stalkerTransportChallenge = result.challenge
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.VerificationInconclusive -> {
+                    pendingStalkerCommand = command
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            syncProgress = null,
+                            error = null,
+                            validationError = null,
+                            stalkerVerificationInconclusive = result.message
+                        )
+                    }
+                }
                 is ValidateAndAddProviderResult.Error -> {
+                    pendingStalkerCommand = null
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -397,6 +624,8 @@ class ProviderSetupViewModel @Inject constructor(
                     xtreamFastSyncEnabled = false,
                     epgSyncMode = _uiState.value.epgSyncMode,
                     xtreamLiveSyncMode = _uiState.value.xtreamLiveSyncMode,
+                    guideSourcePolicy = _uiState.value.guideSourcePolicy,
+                    channelLogoSourcePolicy = _uiState.value.channelLogoSourcePolicy,
                     existingProviderId = existingId
                 ),
                 onProgress = { msg -> _uiState.update { it.copy(syncProgress = msg) } }
@@ -431,6 +660,17 @@ class ProviderSetupViewModel @Inject constructor(
                 is ValidateAndAddProviderResult.ValidationError -> {
                     _uiState.update {
                         it.copy(isLoading = false, validationError = result.message, error = null, syncProgress = null)
+                    }
+                }
+                is ValidateAndAddProviderResult.TransportConsentRequired,
+                is ValidateAndAddProviderResult.VerificationInconclusive -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = "A transport warning was returned for a non-Stalker provider.",
+                            validationError = null,
+                            syncProgress = null
+                        )
                     }
                 }
                 is ValidateAndAddProviderResult.Error -> {
@@ -477,6 +717,8 @@ class ProviderSetupViewModel @Inject constructor(
                     httpHeaders = httpHeaders,
                     epgSyncMode = _uiState.value.epgSyncMode,
                     m3uVodClassificationEnabled = _uiState.value.m3uVodClassificationEnabled,
+                    guideSourcePolicy = _uiState.value.guideSourcePolicy,
+                    channelLogoSourcePolicy = _uiState.value.channelLogoSourcePolicy,
                     existingProviderId = existingId
                 ),
                 onProgress = { msg -> _uiState.update { it.copy(syncProgress = msg) } }
@@ -541,6 +783,17 @@ class ProviderSetupViewModel @Inject constructor(
                         it.copy(isLoading = false, validationError = result.message, error = null, syncProgress = null)
                     }
                 }
+                is ValidateAndAddProviderResult.TransportConsentRequired,
+                is ValidateAndAddProviderResult.VerificationInconclusive -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = "A transport warning was returned for a non-Stalker provider.",
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
                 is ValidateAndAddProviderResult.Error -> {
                     _uiState.update {
                         it.copy(
@@ -555,13 +808,208 @@ class ProviderSetupViewModel @Inject constructor(
         }
     }
 
-    fun inspectBackup(uriString: String) {
+    fun loginJellyfin(
+        serverUrl: String,
+        username: String,
+        password: String,
+        name: String
+    ) {
+        _uiState.update {
+            it.copy(
+                validationError = null,
+                error = null,
+                completionWarning = null,
+                onboardingCompletion = OnboardingCompletion.NONE,
+                loginSuccess = false
+            )
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, validationError = null, syncProgress = "Connecting...") }
+            val existingId = if (_uiState.value.isEditing) _uiState.value.existingProviderId else null
+
+            when (val result = validateAndAddProvider.loginJellyfin(
+                JellyfinProviderSetupCommand(
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password,
+                    name = name,
+                    existingProviderId = existingId
+                ),
+                onProgress = { msg -> _uiState.update { it.copy(syncProgress = msg) } }
+            )) {
+                is ValidateAndAddProviderResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            loginSuccess = true,
+                            onboardingCompletion = OnboardingCompletion.READY,
+                            createdProviderId = result.provider.id,
+                            error = null,
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.SavedWithWarning -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            loginSuccess = false,
+                            onboardingCompletion = OnboardingCompletion.SAVED_RESUMING,
+                            createdProviderId = result.provider.id,
+                            error = null,
+                            validationError = null,
+                            completionWarning = result.warning,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.ValidationError -> {
+                    _uiState.update {
+                        it.copy(isLoading = false, validationError = result.message, error = null, syncProgress = null)
+                    }
+                }
+                is ValidateAndAddProviderResult.TransportConsentRequired,
+                is ValidateAndAddProviderResult.VerificationInconclusive -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = "A transport warning was returned for a non-Stalker provider.",
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = mapJellyfinLoginError(result),
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun loginJellyfinQuickConnect(
+        serverUrl: String,
+        name: String
+    ) {
+        _uiState.update {
+            it.copy(
+                validationError = null,
+                error = null,
+                completionWarning = null,
+                onboardingCompletion = OnboardingCompletion.NONE,
+                loginSuccess = false
+            )
+        }
+
+        jellyfinQuickConnectJob?.cancel()
+        jellyfinQuickConnectJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, validationError = null, syncProgress = "Connecting...") }
+            val existingId = if (_uiState.value.isEditing) _uiState.value.existingProviderId else null
+
+            when (val result = validateAndAddProvider.loginJellyfinQuickConnect(
+                JellyfinQuickConnectProviderSetupCommand(
+                    serverUrl = serverUrl,
+                    name = name,
+                    existingProviderId = existingId
+                ),
+                onCode = { code ->
+                    _uiState.update {
+                        it.copy(jellyfinQuickConnectCode = code, syncProgress = "Waiting for approval on your Jellyfin server...", isLoading = false)
+                    }
+                },
+                onProgress = { msg -> _uiState.update { it.copy(syncProgress = msg) } }
+            )) {
+                is ValidateAndAddProviderResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            loginSuccess = true,
+                            onboardingCompletion = OnboardingCompletion.READY,
+                            createdProviderId = result.provider.id,
+                            error = null,
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.SavedWithWarning -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            loginSuccess = false,
+                            onboardingCompletion = OnboardingCompletion.SAVED_RESUMING,
+                            createdProviderId = result.provider.id,
+                            error = null,
+                            validationError = null,
+                            completionWarning = result.warning,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.ValidationError -> {
+                    _uiState.update {
+                        it.copy(isLoading = false, validationError = result.message, error = null, syncProgress = null)
+                    }
+                }
+                is ValidateAndAddProviderResult.TransportConsentRequired,
+                is ValidateAndAddProviderResult.VerificationInconclusive -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = "A transport warning was returned for a non-Stalker provider.",
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+                is ValidateAndAddProviderResult.Error -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = mapJellyfinLoginError(result),
+                            validationError = null,
+                            syncProgress = null
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelJellyfinQuickConnect() {
+        jellyfinQuickConnectJob?.cancel()
+        jellyfinQuickConnectJob = null
+        _uiState.update {
+            it.copy(
+                syncProgress = null,
+                jellyfinQuickConnectCode = "",
+                isLoading = false,
+                error = null,
+                validationError = null
+            )
+        }
+    }
+
+    fun inspectBackup(uriString: String, preserveDriveCredentials: Boolean = false) {
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     syncProgress = "Reading backup...",
                     validationError = null,
-                    error = null
+                    error = null,
+                    pendingDriveCredentials = if (preserveDriveCredentials) {
+                        it.pendingDriveCredentials
+                    } else {
+                        null
+                    }
                 )
             }
             val result = importBackup.inspect(InspectBackupCommand(uriString))
@@ -569,6 +1017,7 @@ class ProviderSetupViewModel @Inject constructor(
                 when (result) {
                     is InspectBackupResult.Error -> state.copy(
                         syncProgress = null,
+                        pendingDriveCredentials = null,
                         error = "Import failed: ${result.message}"
                     )
 
@@ -588,7 +1037,8 @@ class ProviderSetupViewModel @Inject constructor(
             it.copy(
                 backupPreview = null,
                 pendingBackupUri = null,
-                backupImportPlan = BackupImportPlan()
+                backupImportPlan = BackupImportPlan(),
+                pendingDriveCredentials = null
             )
         }
     }
@@ -645,7 +1095,10 @@ class ProviderSetupViewModel @Inject constructor(
         val plan = capturedPlan ?: return
         viewModelScope.launch {
             val result = importBackup.confirm(ImportBackupCommand(uriString, plan))
-            if (result is ImportBackupResult.Success) {
+            val completed = (result as? ImportBackupResult.Success)
+                ?.result
+                ?.outcome == BackupRestoreOutcome.COMPLETE
+            if (completed) {
                 applyPendingDriveCredentials()
             }
             val hasProviders = if (result is ImportBackupResult.Success) {
@@ -657,9 +1110,9 @@ class ProviderSetupViewModel @Inject constructor(
                 state.copy(
                     isImportingBackup = false,
                     syncProgress = null,
-                    backupPreview = null,
-                    pendingBackupUri = null,
-                    backupImportPlan = BackupImportPlan(),
+                    backupPreview = if (completed) null else state.backupPreview,
+                    pendingBackupUri = if (completed) null else state.pendingBackupUri,
+                    backupImportPlan = if (completed) BackupImportPlan() else state.backupImportPlan,
                     backupImportSuccess = hasProviders,
                     error = if (result is ImportBackupResult.Error) {
                         "Import failed: ${result.message}"
@@ -825,6 +1278,32 @@ class ProviderSetupViewModel @Inject constructor(
     private inline fun <reified T : Throwable> Throwable?.hasCause(): Boolean =
         findCause<T>() != null
 
+    private fun mapJellyfinLoginError(result: ValidateAndAddProviderResult.Error): String {
+        val failure = result.exception
+        return when {
+            result.message.startsWith(PROVIDER_LOGIN_SYNC_FAILED_PREFIX, ignoreCase = true) ->
+                "Login succeeded, but the initial sync failed while loading the Jellyfin library"
+
+            failure.hasCause<CredentialDecryptionException>() ->
+                failure.findCause<CredentialDecryptionException>()?.message
+                    ?: CredentialDecryptionException.MESSAGE
+
+            failure.hasCause<SSLPeerUnverifiedException>() ||
+                failure.hasCause<CertificateException>() ||
+                failure.hasCause<SSLException>() ->
+                "Secure connection failed - the server's TLS certificate is not trusted on this device"
+
+            failure.hasCause<SocketTimeoutException>() ||
+                failure.hasCause<InterruptedIOException>() ||
+                failure.hasCause<UnknownHostException>() ||
+                failure.hasCause<ConnectException>() ||
+                failure.hasCause<NoRouteToHostException>() ->
+                "Cannot reach server - check your internet connection and server URL"
+
+            else -> result.message
+        }
+    }
+
     private companion object {
         private const val PROVIDER_LOGIN_SYNC_FAILED_PREFIX =
             "Provider login succeeded, but initial sync failed"
@@ -911,6 +1390,12 @@ data class ProviderSetupState(
     val stalkerDeviceId: String = "",
     val stalkerDeviceId2: String = "",
     val stalkerSignature: String = "",
+    val stalkerAdvancedOptionsJson: String = "",
+    val stalkerProtocolPreference: StalkerProtocolPreference = StalkerProtocolPreference.AUTO,
+    val stalkerTransportChallenge: StalkerTransportChallenge? = null,
+    val stalkerVerificationInconclusive: String? = null,
+    val stalkerRequestedProfileId: String = StalkerCompatibilityProfileIds.AUTO,
+    val jellyfinQuickConnectCode: String = "",
     val createdProviderId: Long? = null,
     val createdProviderName: String? = null,
     val pendingCombinedAttachProfileId: Long? = null,
@@ -921,8 +1406,12 @@ data class ProviderSetupState(
     val backupImportPlan: BackupImportPlan = BackupImportPlan(),
     val pendingDriveCredentials: List<ProviderCredentials>? = null,
     val driveSignedIn: Boolean = false,
+    val driveBackupOptions: List<DriveBackupSnapshot> = emptyList(),
     val epgSyncMode: ProviderEpgSyncMode = ProviderEpgSyncMode.BACKGROUND,
+    val stalkerCatalogMode: StalkerCatalogMode = StalkerCatalogMode.ON_DEMAND,
     val xtreamLiveSyncMode: ProviderXtreamLiveSyncMode = ProviderXtreamLiveSyncMode.AUTO,
+    val guideSourcePolicy: GuideSourcePolicy = GuideSourcePolicy.AUTO,
+    val channelLogoSourcePolicy: ChannelLogoSourcePolicy = ChannelLogoSourcePolicy.SUPPLIER_PREFERRED,
     val hasCustomizedEpgSyncMode: Boolean = false,
     val m3uVodClassificationEnabled: Boolean = false,
     val portals: List<com.streamvault.app.pairing.PortalInfo> = emptyList(),
@@ -932,5 +1421,6 @@ data class ProviderSetupState(
 private fun defaultEpgSyncModeFor(sourceType: ProviderSetupViewModel.SetupSourceType): ProviderEpgSyncMode = when (sourceType) {
     ProviderSetupViewModel.SetupSourceType.STALKER,
     ProviderSetupViewModel.SetupSourceType.XTREAM,
-    ProviderSetupViewModel.SetupSourceType.M3U -> ProviderEpgSyncMode.BACKGROUND
+    ProviderSetupViewModel.SetupSourceType.M3U,
+    ProviderSetupViewModel.SetupSourceType.JELLYFIN -> ProviderEpgSyncMode.BACKGROUND
 }

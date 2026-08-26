@@ -74,6 +74,9 @@ interface CatalogSyncDao {
     @Query("SELECT COUNT(*) FROM series_import_stage WHERE provider_id = :providerId AND session_id = :sessionId")
     suspend fun countSeriesStages(providerId: Long, sessionId: Long): Int
 
+    @Query("SELECT COUNT(*) FROM category_import_stage WHERE provider_id = :providerId AND session_id = :sessionId AND type = :type")
+    suspend fun countCategoryStages(providerId: Long, sessionId: Long, type: String): Int
+
     @Query(
       """
       SELECT
@@ -108,6 +111,14 @@ interface CatalogSyncDao {
             ),
             parent_id = (
                 SELECT stage.parent_id
+                FROM category_import_stage AS stage
+                WHERE stage.session_id = :sessionId
+                  AND stage.provider_id = :providerId
+                  AND stage.type = :type
+                  AND stage.category_id = categories.category_id
+            ),
+            provider_order = (
+                SELECT stage.provider_order
                 FROM category_import_stage AS stage
                 WHERE stage.session_id = :sessionId
                   AND stage.provider_id = :providerId
@@ -153,6 +164,7 @@ interface CatalogSyncDao {
             parent_id,
             type,
             provider_id,
+            provider_order,
             is_adult,
             is_user_protected,
             sync_fingerprint
@@ -163,6 +175,7 @@ interface CatalogSyncDao {
             stage.parent_id,
             stage.type,
             stage.provider_id,
+            stage.provider_order,
             stage.is_adult,
             0,
             stage.sync_fingerprint
@@ -358,7 +371,13 @@ interface CatalogSyncDao {
             stage.error_count,
             stage.provider_id,
             stage.is_adult,
-            0,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM categories AS category
+                WHERE category.provider_id = stage.provider_id
+                  AND category.category_id = stage.category_id
+                  AND category.type = 'LIVE'
+                  AND category.is_user_protected = 1
+            ) THEN 1 ELSE 0 END,
             stage.sync_fingerprint
         FROM channel_import_stage AS stage
         WHERE stage.session_id = :sessionId
@@ -600,7 +619,13 @@ interface CatalogSyncDao {
             0,
             0,
             stage.is_adult,
-            0,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM categories AS category
+                WHERE category.provider_id = stage.provider_id
+                  AND category.category_id = stage.category_id
+                  AND category.type IN ('MOVIE', 'VOD')
+                  AND category.is_user_protected = 1
+            ) THEN 1 ELSE 0 END,
             stage.sync_fingerprint,
             stage.added_at
         FROM movie_import_stage AS stage
@@ -818,7 +843,13 @@ interface CatalogSyncDao {
             stage.last_modified,
             stage.provider_id,
             stage.is_adult,
-            0,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM categories AS category
+                WHERE category.provider_id = stage.provider_id
+                  AND category.category_id = stage.category_id
+                  AND category.type = 'SERIES'
+                  AND category.is_user_protected = 1
+            ) THEN 1 ELSE 0 END,
             stage.sync_fingerprint
         FROM series_import_stage AS stage
         WHERE stage.session_id = :sessionId

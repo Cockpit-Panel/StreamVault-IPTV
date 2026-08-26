@@ -60,6 +60,10 @@ class SyncCatalogStoreTest {
         runBlocking {
             whenever(movieDao.getTmdbIdsByProvider(any())).thenReturn(emptyList())
             whenever(seriesDao.getTmdbIdsByProvider(any())).thenReturn(emptyList())
+            whenever(catalogSyncDao.countChannelStages(any(), any())).thenReturn(0)
+            whenever(catalogSyncDao.countMovieStages(any(), any())).thenReturn(0)
+            whenever(catalogSyncDao.countSeriesStages(any(), any())).thenReturn(0)
+            whenever(catalogSyncDao.countCategoryStages(any(), any(), any())).thenReturn(0)
         }
     }
 
@@ -72,6 +76,7 @@ class SyncCatalogStoreTest {
             name = "News",
             type = ContentType.LIVE,
             providerId = providerId,
+            providerOrder = 4,
             syncFingerprint = "old-category"
         )
         val currentChannel = ChannelEntity(
@@ -93,6 +98,7 @@ class SyncCatalogStoreTest {
                     categoryId = 101L,
                     name = "World News",
                     type = ContentType.LIVE,
+                    providerOrder = 9,
                     syncFingerprint = "new-category"
                 )
             )
@@ -109,6 +115,7 @@ class SyncCatalogStoreTest {
         assertThat(updatedCategories.firstValue.single()).isEqualTo(
             currentCategory.copy(
                 name = "World News",
+                providerOrder = 9,
                 syncFingerprint = "new-category"
             )
         )
@@ -147,7 +154,8 @@ class SyncCatalogStoreTest {
 
         store(transactionRunner = runner).applyStagedLiveCatalog(providerId = 7L, sessionId = 55L, categories = null)
 
-        assertThat(runner.calls).isEqualTo(1)
+        // One transaction applies the catalog and one atomically clears its staging session.
+        assertThat(runner.calls).isEqualTo(2)
         verify(catalogSyncDao).rebuildChannelFts()
     }
 
@@ -378,6 +386,93 @@ class SyncCatalogStoreTest {
     }
 
     @Test
+    fun `stageChannelBatch checks and inserts within one transaction`() = runTest {
+        val runner = TrackingTransactionRunner()
+        val providerId = 7L
+        val sessionId = 91L
+        whenever(catalogSyncDao.countChannelStages(providerId, sessionId)).thenAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            0
+        }
+        doAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            Unit
+        }.whenever(catalogSyncDao).insertChannelStages(any())
+
+        store(
+            sizeLimits = CatalogSizeLimits(maxChannelsPerProvider = 1),
+            transactionRunner = runner
+        ).stageChannelBatch(
+            providerId,
+            sessionId,
+            listOf(
+                ChannelEntity(
+                    streamId = 1L,
+                    name = "News",
+                    providerId = providerId,
+                    streamUrl = "https://stream.example.com/news.ts"
+                )
+            )
+        )
+
+        assertThat(runner.calls).isEqualTo(1)
+        verify(catalogSyncDao).insertChannelStages(any())
+    }
+
+    @Test
+    fun `stageCategories rejects a provider type beyond the shared limit`() = runTest {
+        val providerId = 7L
+        val sessionId = 92L
+        whenever(catalogSyncDao.countCategoryStages(providerId, sessionId, ContentType.LIVE.name)).thenReturn(1)
+
+        val failure = runCatching {
+            store(CatalogSizeLimits(maxM3uCategoriesPerType = 1)).stageCategories(
+                providerId,
+                sessionId,
+                listOf(
+                    CategoryEntity(
+                        categoryId = 2L,
+                        name = "Sports",
+                        type = ContentType.LIVE,
+                        providerId = providerId
+                    )
+                )
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CatalogAdmissionExceeded::class.java)
+        assertThat(failure).hasMessageThat().contains("live category limit exceeded")
+        verify(catalogSyncDao, never()).insertCategoryStages(any())
+    }
+
+    @Test
+    fun `discardStagedImport clears every stage table in one transaction`() = runTest {
+        val runner = TrackingTransactionRunner()
+        val providerId = 7L
+        val sessionId = 93L
+        doAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            Unit
+        }.whenever(catalogSyncDao).clearChannelStages(providerId, sessionId)
+        doAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            Unit
+        }.whenever(catalogSyncDao).clearMovieStages(providerId, sessionId)
+        doAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            Unit
+        }.whenever(catalogSyncDao).clearSeriesStages(providerId, sessionId)
+        doAnswer {
+            assertThat(runner.isInTransaction).isTrue()
+            Unit
+        }.whenever(catalogSyncDao).clearCategoryStages(providerId, sessionId)
+
+        store(transactionRunner = runner).discardStagedImport(providerId, sessionId)
+
+        assertThat(runner.calls).isEqualTo(1)
+    }
+
+    @Test
     fun `replaceCategories preserves user protection when provider renames category`() = runTest {
         val providerId = 7L
         val currentCategory = CategoryEntity(
@@ -551,6 +646,36 @@ class SyncCatalogStoreTest {
         verify(catalogSyncDao).rebuildChannelFts()
         verify(catalogSyncDao).rebuildMovieFts()
         verify(movieDao).restoreWatchProgress(7L)
+    }
+
+    @Test
+    fun `applyStagedJellyfinCatalog promotes movies and series in one transaction`() = runTest {
+        val runner = TrackingTransactionRunner()
+        whenever(categoryDao.getByProviderAndTypeSync(7L, ContentType.MOVIE.name)).thenReturn(emptyList())
+        whenever(categoryDao.getByProviderAndTypeSync(7L, ContentType.SERIES.name)).thenReturn(emptyList())
+        whenever(catalogSyncDao.getCategoryStages(7L, 101L, ContentType.MOVIE.name)).thenReturn(emptyList())
+        whenever(catalogSyncDao.getCategoryStages(7L, 202L, ContentType.SERIES.name)).thenReturn(emptyList())
+        doAnswer { assertThat(runner.isInTransaction).isTrue(); Unit }
+            .whenever(catalogSyncDao).rebuildMovieFts()
+        doAnswer { assertThat(runner.isInTransaction).isTrue(); Unit }
+            .whenever(catalogSyncDao).rebuildSeriesFts()
+        var callbackInTransaction = false
+
+        store(transactionRunner = runner).applyStagedJellyfinCatalog(
+            providerId = 7L,
+            movieSessionId = 101L,
+            seriesSessionId = 202L,
+            movieCategories = listOf(CategoryEntity(providerId = 7L, categoryId = 1L, name = "Movies", type = ContentType.MOVIE)),
+            seriesCategories = listOf(CategoryEntity(providerId = 7L, categoryId = 2L, name = "Series", type = ContentType.SERIES)),
+            afterCatalogApply = { callbackInTransaction = runner.isInTransaction }
+        )
+
+        assertThat(callbackInTransaction).isTrue()
+        verify(catalogSyncDao).rebuildMovieFts()
+        verify(catalogSyncDao).rebuildSeriesFts()
+        verify(movieDao).restoreWatchProgress(7L)
+        verify(catalogSyncDao).clearMovieStages(7L, 101L)
+        verify(catalogSyncDao).clearSeriesStages(7L, 202L)
     }
 
     private class TrackingTransactionRunner : DatabaseTransactionRunner {

@@ -22,10 +22,18 @@ internal fun shouldUseManagedCodecSelector(
 internal data class PlaybackRendererPlan(
     val useAudioVideoSyncSink: Boolean,
     val useVideoRendererWorkaround: Boolean,
-    val useManagedCodecSelector: Boolean,
-    val extensionRendererMode: PlaybackExtensionRendererMode,
+    val useAudioManagedCodecSelector: Boolean,
+    val useVideoManagedCodecSelector: Boolean,
+    val audioExtensionRendererMode: PlaybackExtensionRendererMode,
+    val videoExtensionRendererMode: PlaybackExtensionRendererMode,
     val renderPath: String
 ) {
+    val useManagedCodecSelector: Boolean
+        get() = useAudioManagedCodecSelector || useVideoManagedCodecSelector
+
+    val extensionRendererMode: PlaybackExtensionRendererMode
+        get() = videoExtensionRendererMode
+
     val useStockRenderersFactory: Boolean
         get() = !useAudioVideoSyncSink && !useVideoRendererWorkaround
 }
@@ -50,22 +58,51 @@ internal fun buildPlaybackRendererPlan(
     decoderPolicy: ActiveDecoderPolicy,
     useAudioVideoSyncSink: Boolean,
     useVideoRendererWorkaround: Boolean
+): PlaybackRendererPlan = buildPlaybackRendererPlan(
+    requestedAudioMode = requestedMode,
+    activeAudioDecoderMode = activeDecoderMode,
+    audioDecoderPolicy = decoderPolicy,
+    requestedVideoMode = requestedMode,
+    activeVideoDecoderMode = activeDecoderMode,
+    videoDecoderPolicy = decoderPolicy,
+    useAudioVideoSyncSink = useAudioVideoSyncSink,
+    useVideoRendererWorkaround = useVideoRendererWorkaround
+)
+
+internal fun buildPlaybackRendererPlan(
+    requestedAudioMode: DecoderMode,
+    activeAudioDecoderMode: DecoderMode,
+    audioDecoderPolicy: ActiveDecoderPolicy,
+    requestedVideoMode: DecoderMode,
+    activeVideoDecoderMode: DecoderMode,
+    videoDecoderPolicy: ActiveDecoderPolicy,
+    useAudioVideoSyncSink: Boolean,
+    useVideoRendererWorkaround: Boolean
 ): PlaybackRendererPlan {
-    val useManagedCodecSelector = shouldUseManagedCodecSelector(requestedMode, decoderPolicy)
-    val extensionRendererMode = extensionRendererModeFor(activeDecoderMode)
+    val useAudioManagedCodecSelector = shouldUseManagedCodecSelector(requestedAudioMode, audioDecoderPolicy)
+    val useVideoManagedCodecSelector = shouldUseManagedCodecSelector(requestedVideoMode, videoDecoderPolicy)
+    val useExplicitVideoRendererWorkaround = useVideoRendererWorkaround && requestedVideoMode != DecoderMode.AUTO
+    val audioExtensionRendererMode = extensionRendererModeFor(activeAudioDecoderMode)
+    val videoExtensionRendererMode = extensionRendererModeFor(activeVideoDecoderMode)
     val renderPath = buildList {
         if (useAudioVideoSyncSink) add("av-sync-sink")
-        if (useVideoRendererWorkaround) add("decoder-reuse-workaround")
-        if (useManagedCodecSelector) add("managed-codec-selector")
-        if (extensionRendererMode == PlaybackExtensionRendererMode.PLATFORM_FIRST) {
+        if (useExplicitVideoRendererWorkaround) add("decoder-reuse-workaround")
+        when {
+            useAudioManagedCodecSelector && useVideoManagedCodecSelector -> add("managed-codec-selector")
+            useAudioManagedCodecSelector -> add("audio-managed-codec-selector")
+            useVideoManagedCodecSelector -> add("video-managed-codec-selector")
+        }
+        if (audioExtensionRendererMode == PlaybackExtensionRendererMode.PLATFORM_FIRST) {
             add("platform-first-extension-audio-fallback")
         }
     }.ifEmpty { listOf("stock-media3") }.joinToString("+")
     return PlaybackRendererPlan(
         useAudioVideoSyncSink = useAudioVideoSyncSink,
-        useVideoRendererWorkaround = useVideoRendererWorkaround,
-        useManagedCodecSelector = useManagedCodecSelector,
-        extensionRendererMode = extensionRendererMode,
+        useVideoRendererWorkaround = useExplicitVideoRendererWorkaround,
+        useAudioManagedCodecSelector = useAudioManagedCodecSelector,
+        useVideoManagedCodecSelector = useVideoManagedCodecSelector,
+        audioExtensionRendererMode = audioExtensionRendererMode,
+        videoExtensionRendererMode = videoExtensionRendererMode,
         renderPath = renderPath
     )
 }

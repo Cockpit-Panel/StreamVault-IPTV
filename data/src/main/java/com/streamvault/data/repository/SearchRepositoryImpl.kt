@@ -3,11 +3,17 @@ package com.streamvault.data.repository
 import android.database.sqlite.SQLiteException
 import android.util.Log
 import com.streamvault.data.local.dao.SearchDao
+import com.streamvault.data.local.dao.ProviderDao
+import com.streamvault.data.local.dao.StalkerIndexJobDao
 import com.streamvault.data.local.dao.SearchHitEntity
 import com.streamvault.data.util.toFtsPrefixQuery
 import com.streamvault.domain.model.Channel
+import com.streamvault.domain.model.CatalogCompleteness
+import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.Series
+import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.StalkerIndexState
 import com.streamvault.domain.repository.ChannelRepository
 import com.streamvault.domain.repository.MovieRepository
 import com.streamvault.domain.repository.SearchRepository
@@ -30,7 +36,9 @@ class SearchRepositoryImpl @Inject constructor(
     private val searchDao: SearchDao,
     private val channelRepository: ChannelRepository,
     private val movieRepository: MovieRepository,
-    private val seriesRepository: SeriesRepository
+    private val seriesRepository: SeriesRepository,
+    private val providerDao: ProviderDao,
+    private val stalkerIndexJobDao: StalkerIndexJobDao
 ) : SearchRepository {
     override fun searchContent(
         providerId: Long,
@@ -134,6 +142,37 @@ class SearchRepositoryImpl @Inject constructor(
                     }
                 }
             }
+            .map { result ->
+                result.copy(
+                    catalogCompleteness = catalogCompleteness(
+                        providerId = providerId,
+                        includeMovies = includeMovies,
+                        includeSeries = includeSeries
+                    )
+                )
+            }
+    }
+
+    private suspend fun catalogCompleteness(
+        providerId: Long,
+        includeMovies: Boolean,
+        includeSeries: Boolean
+    ): CatalogCompleteness {
+        if (!includeMovies && !includeSeries) return CatalogCompleteness.COMPLETE
+        val provider = providerDao.getById(providerId) ?: return CatalogCompleteness.PARTIAL
+        if (provider.type != ProviderType.STALKER_PORTAL) return CatalogCompleteness.COMPLETE
+        val sections = buildList {
+            if (includeMovies) add(ContentType.MOVIE)
+            if (includeSeries) add(ContentType.SERIES)
+        }
+        val states = sections.map { section -> stalkerIndexJobDao.get(providerId, section.name)?.state }
+        return when {
+            states.any { it == StalkerIndexState.TRUNCATED } -> CatalogCompleteness.TRUNCATED
+            states.any { it in setOf(StalkerIndexState.QUEUED, StalkerIndexState.RUNNING, StalkerIndexState.RETRY_WAIT) } ->
+                CatalogCompleteness.INDEXING
+            states.isNotEmpty() && states.all { it == StalkerIndexState.COMPLETE } -> CatalogCompleteness.COMPLETE
+            else -> CatalogCompleteness.PARTIAL
+        }
     }
 
     override fun searchChannels(providerId: Long, query: String): Flow<List<Channel>> =

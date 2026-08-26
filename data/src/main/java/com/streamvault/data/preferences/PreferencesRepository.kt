@@ -7,13 +7,16 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.preferencesDataStoreFile
 import com.streamvault.data.local.dao.ChannelPreferenceDao
 import com.streamvault.data.local.dao.SearchHistoryDao
 import com.streamvault.domain.model.GroupedChannelLabelMode
@@ -23,19 +26,26 @@ import com.streamvault.domain.model.CategorySortMode
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.DecoderMode
 import com.streamvault.domain.model.ActiveLiveSource
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.AppLandingDestination
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveChannelObservedQuality
 import com.streamvault.domain.model.LiveStreamFormatMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.AppTopLevelDestination
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 import com.streamvault.domain.model.VodHttpProtocolMode
+import com.streamvault.domain.model.VodVariantObservation
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.model.PlayerSurfaceMode
 import com.streamvault.domain.model.RemoteColorButton
 import com.streamvault.domain.model.RemoteShortcutPreferences
 import com.streamvault.domain.model.RemoteShortcutProfile
 import com.streamvault.domain.model.RemoteShortcutSelection
 import com.streamvault.domain.model.SearchHistoryScope
+import com.streamvault.domain.model.TimeshiftBackendPreference
 import com.streamvault.domain.manager.ParentalPinVerifier
 import com.streamvault.domain.manager.ParentalControlSessionState
 import com.streamvault.domain.manager.ParentalControlSessionStore
@@ -51,9 +61,64 @@ import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
+import java.util.concurrent.atomic.AtomicLong
+
+private const val PREFERENCES_DATASTORE_NAME = "user_preferences"
 
 @Singleton
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "user_preferences")
+class PreferencesCorruptionRecovery @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
+    private companion object {
+        const val MAX_SNAPSHOT_BYTES = 4L * 1024L * 1024L
+        const val MAX_SNAPSHOTS = 3
+    }
+
+    private val lastRecoveryAt = AtomicLong(0L)
+
+    fun recover(
+        cause: Throwable,
+        dataStoreName: String = PREFERENCES_DATASTORE_NAME
+    ): Preferences {
+        val recoveredAt = System.currentTimeMillis()
+        lastRecoveryAt.set(recoveredAt)
+        val directory = File(context.filesDir, "preference-recovery").apply { mkdirs() }
+        runCatching {
+            val source = context.preferencesDataStoreFile(dataStoreName)
+            if (!source.isFile) return@runCatching
+            val snapshot = File(directory, "$dataStoreName.corrupt-$recoveredAt")
+            source.inputStream().use { input ->
+                snapshot.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var remaining = MAX_SNAPSHOT_BYTES
+                    while (remaining > 0L) {
+                        val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        remaining -= read
+                    }
+                }
+            }
+            directory.listFiles { _, name ->
+                name.startsWith("$dataStoreName.corrupt-")
+            }?.sortedByDescending(File::lastModified)
+                ?.drop(MAX_SNAPSHOTS)
+                ?.forEach(File::delete)
+        }
+        runCatching {
+            File(directory, "$dataStoreName.recovery").writeText(
+                "timestamp=$recoveredAt\n" +
+                    "type=${cause::class.java.name}\n" +
+                    "message=${cause.message.orEmpty().take(512)}\n"
+            )
+        }
+        Log.e("PreferencesRecovery", "Preferences DataStore was corrupt; defaults restored", cause)
+        return emptyPreferences()
+    }
+
+    fun lastRecoveryTimestamp(): Long = lastRecoveryAt.get()
+}
 
 private fun sanitizePlaybackTimerMinutes(minutes: Int): Int = when (minutes) {
     0, 15, 30, 45, 60, 90, 120 -> minutes
@@ -66,12 +131,37 @@ private fun sanitizePlaybackTimerMinutes(minutes: Int): Int = when (minutes) {
     else -> 120
 }
 
+internal fun parsePlaybackBufferModePreference(saved: String?): PlaybackBufferMode =
+    saved?.let { value -> PlaybackBufferMode.entries.firstOrNull { it.name == value } }
+        ?: PlaybackBufferMode.AUTO
+
+internal fun parseDecoderModePreference(saved: String?, legacySaved: String? = null): DecoderMode =
+    saved?.let { value -> DecoderMode.entries.firstOrNull { it.name == value } }
+        ?: legacySaved?.let { value -> DecoderMode.entries.firstOrNull { it.name == value } }
+        ?: DecoderMode.AUTO
+
+internal fun parseTimeshiftBackendPreference(saved: String?): TimeshiftBackendPreference =
+    saved?.let { value -> TimeshiftBackendPreference.entries.firstOrNull { it.name == value } }
+        ?: TimeshiftBackendPreference.AUTOMATIC
+
 @Singleton
 class PreferencesRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val channelPreferenceDao: ChannelPreferenceDao,
-    private val searchHistoryDao: SearchHistoryDao
+    private val searchHistoryDao: SearchHistoryDao,
+    private val corruptionRecovery: PreferencesCorruptionRecovery
 ) : ParentalControlSessionStore, ParentalPinVerifier {
+    private val preferencesDataStore: DataStore<Preferences> by lazy {
+        PreferenceDataStoreFactory.create(
+            corruptionHandler = ReplaceFileCorruptionHandler { cause ->
+                corruptionRecovery.recover(cause)
+            },
+            produceFile = { context.preferencesDataStoreFile(PREFERENCES_DATASTORE_NAME) }
+        )
+    }
+
+    private val Context.dataStore: DataStore<Preferences>
+        get() = preferencesDataStore
     companion object {
         private const val AUDIO_VIDEO_OFFSET_MIN_MS = -2_000
         private const val AUDIO_VIDEO_OFFSET_MAX_MS = 2_000
@@ -96,13 +186,17 @@ class PreferencesRepository @Inject constructor(
         val DEFAULT_CATEGORY_ID = longPreferencesKey("default_category_id")
         val APP_LANGUAGE = stringPreferencesKey("app_language")
         val APP_LANDING_DESTINATION = stringPreferencesKey("app_landing_destination")
+        val APP_TOP_LEVEL_DESTINATIONS = stringPreferencesKey("app_top_level_destinations")
+        val APP_HOME_DASHBOARD_SHELVES = stringPreferencesKey("app_home_dashboard_shelves")
         val APP_TIME_FORMAT = stringPreferencesKey("app_time_format")
         val LIVE_TV_CHANNEL_MODE = stringPreferencesKey("live_tv_channel_mode")
         val SHOW_LIVE_SOURCE_SWITCHER = booleanPreferencesKey("show_live_source_switcher")
+        val SHOW_FAVORITES_CATEGORY = booleanPreferencesKey("show_favorites_category")
         val SHOW_ALL_CHANNELS_CATEGORY = booleanPreferencesKey("show_all_channels_category")
         val SHOW_RECENT_CHANNELS_CATEGORY = booleanPreferencesKey("show_recent_channels_category")
         val LIVE_TV_CATEGORY_FILTERS = stringPreferencesKey("live_tv_category_filters")
         val LIVE_TV_QUICK_FILTER_VISIBILITY = stringPreferencesKey("live_tv_quick_filter_visibility")
+        val HIDE_DECORATIVE_LIVE_ROWS = booleanPreferencesKey("hide_decorative_live_rows")
         val LIVE_CHANNEL_NUMBERING_MODE = stringPreferencesKey("live_channel_numbering_mode")
         val LIVE_CHANNEL_GROUPING_MODE = stringPreferencesKey("live_channel_grouping_mode")
         val GROUPED_CHANNEL_LABEL_MODE = stringPreferencesKey("grouped_channel_label_mode")
@@ -111,6 +205,11 @@ class PreferencesRepository @Inject constructor(
         val LIVE_VARIANT_OBSERVATIONS = stringPreferencesKey("live_variant_observations")
         val VOD_VIEW_MODE = stringPreferencesKey("vod_view_mode")
         val VOD_INFINITE_SCROLL = booleanPreferencesKey("vod_infinite_scroll")
+        val VOD_CATEGORY_LOAD_MODE = stringPreferencesKey("vod_category_load_mode")
+        val VOD_DUPLICATE_HANDLING_MODE = stringPreferencesKey("vod_duplicate_handling_mode")
+        val VOD_VARIANT_PREFERENCE_MODE = stringPreferencesKey("vod_variant_preference_mode")
+        val VOD_VARIANT_SELECTIONS = stringPreferencesKey("vod_variant_selections")
+        val VOD_VARIANT_OBSERVATIONS = stringPreferencesKey("vod_variant_observations")
         val GUIDE_DENSITY = stringPreferencesKey("guide_density")
         val GUIDE_CHANNEL_MODE = stringPreferencesKey("guide_channel_mode")
         val GUIDE_DEFAULT_CATEGORY_ID = longPreferencesKey("guide_default_category_id")
@@ -131,6 +230,9 @@ class PreferencesRepository @Inject constructor(
         val PLAYER_FAST_RETRY_ON_TRANSIENT_FAILURES =
             booleanPreferencesKey("player_fast_retry_on_transient_failures")
         val PLAYER_DECODER_MODE = stringPreferencesKey("player_decoder_mode")
+        val PLAYER_AUDIO_DECODER_MODE = stringPreferencesKey("player_audio_decoder_mode")
+        val PLAYER_VIDEO_DECODER_MODE = stringPreferencesKey("player_video_decoder_mode")
+        val PLAYER_PLAYBACK_BUFFER_MODE = stringPreferencesKey("player_playback_buffer_mode")
         val PLAYER_LIVE_STREAM_FORMAT_MODE = stringPreferencesKey("player_live_stream_format_mode")
         val PLAYER_VOD_HTTP_PROTOCOL_MODE = stringPreferencesKey("player_vod_http_protocol_mode")
         val LEGACY_PLAYER_MOVIE_HTTP_PROTOCOL_MODE = stringPreferencesKey("player_movie_http_protocol_mode")
@@ -155,6 +257,7 @@ class PreferencesRepository @Inject constructor(
         val PLAYER_ETHERNET_MAX_VIDEO_HEIGHT = intPreferencesKey("player_ethernet_max_video_height")
         val PLAYER_TIMESHIFT_ENABLED = booleanPreferencesKey("player_timeshift_enabled")
         val PLAYER_TIMESHIFT_DEPTH_MINUTES = intPreferencesKey("player_timeshift_depth_minutes")
+        val PLAYER_TIMESHIFT_BACKEND = stringPreferencesKey("player_timeshift_backend")
         val DEFAULT_STOP_PLAYBACK_TIMER_MINUTES = intPreferencesKey("default_stop_playback_timer_minutes")
         val DEFAULT_IDLE_STANDBY_TIMER_MINUTES = intPreferencesKey("default_idle_standby_timer_minutes")
         val LAST_SPEED_TEST_MEGABITS = stringPreferencesKey("last_speed_test_megabits")
@@ -178,6 +281,9 @@ class PreferencesRepository @Inject constructor(
         val DOWNLOAD_TREE_URI = stringPreferencesKey("download_tree_uri")
         val MAX_CONCURRENT_STREAMS = intPreferencesKey("max_concurrent_streams")
         val LAST_APP_UPDATE_CHECK_TIMESTAMP = longPreferencesKey("last_app_update_check_timestamp")
+        val LAST_APP_UPDATE_ATTEMPT_TIMESTAMP = longPreferencesKey("last_app_update_attempt_timestamp")
+        val LAST_APP_UPDATE_FAILURE_TIMESTAMP = longPreferencesKey("last_app_update_failure_timestamp")
+        val LAST_APP_UPDATE_OUTCOME = stringPreferencesKey("last_app_update_outcome")
         val APP_UPDATE_DOWNLOAD_ID = longPreferencesKey("app_update_download_id")
         val APP_UPDATE_DOWNLOAD_VERSION_NAME = stringPreferencesKey("app_update_download_version_name")
         val APP_UPDATE_DOWNLOADED_VERSION_NAME = stringPreferencesKey("app_update_downloaded_version_name")
@@ -185,6 +291,7 @@ class PreferencesRepository @Inject constructor(
         val APP_UPDATE_LATEST_VERSION_CODE = intPreferencesKey("app_update_latest_version_code")
         val APP_UPDATE_RELEASE_URL = stringPreferencesKey("app_update_release_url")
         val APP_UPDATE_DOWNLOAD_URL = stringPreferencesKey("app_update_download_url")
+        val APP_UPDATE_DOWNLOAD_SHA256 = stringPreferencesKey("app_update_download_sha256")
         val APP_UPDATE_RELEASE_NOTES = stringPreferencesKey("app_update_release_notes")
         val APP_UPDATE_PUBLISHED_AT = stringPreferencesKey("app_update_published_at")
         val LAST_MAINTENANCE_AT = longPreferencesKey("last_maintenance_at")
@@ -290,10 +397,22 @@ class PreferencesRepository @Inject constructor(
         preferences[PreferencesKeys.PLAYER_FAST_RETRY_ON_TRANSIENT_FAILURES] ?: false
     }
 
-    val playerDecoderMode: Flow<DecoderMode> = context.dataStore.data.map { preferences ->
-        preferences[PreferencesKeys.PLAYER_DECODER_MODE]
-            ?.let { saved -> DecoderMode.entries.firstOrNull { it.name == saved } }
-            ?: DecoderMode.AUTO
+    val playerAudioDecoderMode: Flow<DecoderMode> = context.dataStore.data.map { preferences ->
+        parseDecoderModePreference(
+            saved = preferences[PreferencesKeys.PLAYER_AUDIO_DECODER_MODE],
+            legacySaved = preferences[PreferencesKeys.PLAYER_DECODER_MODE]
+        )
+    }
+
+    val playerVideoDecoderMode: Flow<DecoderMode> = context.dataStore.data.map { preferences ->
+        parseDecoderModePreference(
+            saved = preferences[PreferencesKeys.PLAYER_VIDEO_DECODER_MODE],
+            legacySaved = preferences[PreferencesKeys.PLAYER_DECODER_MODE]
+        )
+    }
+
+    val playerPlaybackBufferMode: Flow<PlaybackBufferMode> = context.dataStore.data.map { preferences ->
+        parsePlaybackBufferModePreference(preferences[PreferencesKeys.PLAYER_PLAYBACK_BUFFER_MODE])
     }
 
     val playerSurfaceMode: Flow<PlayerSurfaceMode> = context.dataStore.data.map { preferences ->
@@ -417,6 +536,10 @@ class PreferencesRepository @Inject constructor(
             in 23..45 -> 30
             else -> 60
         }
+    }
+
+    val playerTimeshiftBackend: Flow<TimeshiftBackendPreference> = context.dataStore.data.map { preferences ->
+        parseTimeshiftBackendPreference(preferences[PreferencesKeys.PLAYER_TIMESHIFT_BACKEND])
     }
 
     val defaultStopPlaybackTimerMinutes: Flow<Int> = context.dataStore.data.map { preferences ->
@@ -567,6 +690,18 @@ class PreferencesRepository @Inject constructor(
         preferences[PreferencesKeys.LAST_APP_UPDATE_CHECK_TIMESTAMP]?.takeIf { it > 0L }
     }
 
+    val lastAppUpdateAttemptTimestamp: Flow<Long?> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LAST_APP_UPDATE_ATTEMPT_TIMESTAMP]?.takeIf { it > 0L }
+    }
+
+    val lastAppUpdateFailureTimestamp: Flow<Long?> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LAST_APP_UPDATE_FAILURE_TIMESTAMP]?.takeIf { it > 0L }
+    }
+
+    val lastAppUpdateOutcome: Flow<String?> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LAST_APP_UPDATE_OUTCOME]?.takeIf { it.isNotBlank() }
+    }
+
     val appUpdateDownloadId: Flow<Long?> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.APP_UPDATE_DOWNLOAD_ID]?.takeIf { it > 0L }
     }
@@ -593,6 +728,10 @@ class PreferencesRepository @Inject constructor(
 
     val cachedAppUpdateDownloadUrl: Flow<String?> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.APP_UPDATE_DOWNLOAD_URL]?.takeIf { it.isNotBlank() }
+    }
+
+    val cachedAppUpdateDownloadSha256: Flow<String?> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.APP_UPDATE_DOWNLOAD_SHA256]?.takeIf { it.isNotBlank() }
     }
 
     val cachedAppUpdateReleaseNotes: Flow<String> = context.dataStore.data.map { preferences ->
@@ -727,6 +866,36 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
+    suspend fun setLastAppUpdateFailureTimestamp(timestampMs: Long?) {
+        context.dataStore.edit { preferences ->
+            if (timestampMs == null || timestampMs <= 0L) {
+                preferences.remove(PreferencesKeys.LAST_APP_UPDATE_FAILURE_TIMESTAMP)
+            } else {
+                preferences[PreferencesKeys.LAST_APP_UPDATE_FAILURE_TIMESTAMP] = timestampMs
+            }
+        }
+    }
+
+    suspend fun setLastAppUpdateAttemptTimestamp(timestampMs: Long?) {
+        context.dataStore.edit { preferences ->
+            if (timestampMs == null || timestampMs <= 0L) {
+                preferences.remove(PreferencesKeys.LAST_APP_UPDATE_ATTEMPT_TIMESTAMP)
+            } else {
+                preferences[PreferencesKeys.LAST_APP_UPDATE_ATTEMPT_TIMESTAMP] = timestampMs
+            }
+        }
+    }
+
+    suspend fun setLastAppUpdateOutcome(outcome: String?) {
+        context.dataStore.edit { preferences ->
+            if (outcome.isNullOrBlank()) {
+                preferences.remove(PreferencesKeys.LAST_APP_UPDATE_OUTCOME)
+            } else {
+                preferences[PreferencesKeys.LAST_APP_UPDATE_OUTCOME] = outcome.take(256)
+            }
+        }
+    }
+
     suspend fun setAppUpdateDownloadId(downloadId: Long?) {
         context.dataStore.edit { preferences ->
             if (downloadId == null || downloadId <= 0L) {
@@ -762,6 +931,7 @@ class PreferencesRepository @Inject constructor(
         versionCode: Int?,
         releaseUrl: String?,
         downloadUrl: String?,
+        downloadSha256: String?,
         releaseNotes: String?,
         publishedAt: String?
     ) {
@@ -771,6 +941,7 @@ class PreferencesRepository @Inject constructor(
                 preferences.remove(PreferencesKeys.APP_UPDATE_LATEST_VERSION_CODE)
                 preferences.remove(PreferencesKeys.APP_UPDATE_RELEASE_URL)
                 preferences.remove(PreferencesKeys.APP_UPDATE_DOWNLOAD_URL)
+                preferences.remove(PreferencesKeys.APP_UPDATE_DOWNLOAD_SHA256)
                 preferences.remove(PreferencesKeys.APP_UPDATE_RELEASE_NOTES)
                 preferences.remove(PreferencesKeys.APP_UPDATE_PUBLISHED_AT)
             } else {
@@ -785,6 +956,11 @@ class PreferencesRepository @Inject constructor(
                     preferences.remove(PreferencesKeys.APP_UPDATE_DOWNLOAD_URL)
                 } else {
                     preferences[PreferencesKeys.APP_UPDATE_DOWNLOAD_URL] = downloadUrl
+                }
+                if (downloadSha256.isNullOrBlank()) {
+                    preferences.remove(PreferencesKeys.APP_UPDATE_DOWNLOAD_SHA256)
+                } else {
+                    preferences[PreferencesKeys.APP_UPDATE_DOWNLOAD_SHA256] = downloadSha256
                 }
                 if (releaseNotes.isNullOrBlank()) {
                     preferences.remove(PreferencesKeys.APP_UPDATE_RELEASE_NOTES)
@@ -860,9 +1036,21 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
-    suspend fun setPlayerDecoderMode(mode: DecoderMode) {
+    suspend fun setPlayerAudioDecoderMode(mode: DecoderMode) {
         context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.PLAYER_DECODER_MODE] = mode.name
+            preferences[PreferencesKeys.PLAYER_AUDIO_DECODER_MODE] = mode.name
+        }
+    }
+
+    suspend fun setPlayerVideoDecoderMode(mode: DecoderMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_VIDEO_DECODER_MODE] = mode.name
+        }
+    }
+
+    suspend fun setPlayerPlaybackBufferMode(mode: PlaybackBufferMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_PLAYBACK_BUFFER_MODE] = mode.name
         }
     }
 
@@ -1030,6 +1218,12 @@ class PreferencesRepository @Inject constructor(
                 in 23..45 -> 30
                 else -> 60
             }
+        }
+    }
+
+    suspend fun setPlayerTimeshiftBackend(preference: TimeshiftBackendPreference) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.PLAYER_TIMESHIFT_BACKEND] = preference.name
         }
     }
 
@@ -1241,6 +1435,24 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
+    fun getLastSplitCatalogType(providerId: Long): Flow<ContentType> {
+        val key = stringPreferencesKey("last_split_catalog_type_$providerId")
+        return context.dataStore.data.map { preferences ->
+            when (preferences[key]) {
+                ContentType.SERIES.name -> ContentType.SERIES
+                else -> ContentType.MOVIE
+            }
+        }
+    }
+
+    suspend fun setLastSplitCatalogType(providerId: Long, type: ContentType) {
+        require(type == ContentType.MOVIE || type == ContentType.SERIES)
+        val key = stringPreferencesKey("last_split_catalog_type_$providerId")
+        context.dataStore.edit { preferences ->
+            preferences[key] = type.name
+        }
+    }
+
     val appLanguage: Flow<String> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.APP_LANGUAGE] ?: "system"
     }
@@ -1277,9 +1489,31 @@ class PreferencesRepository @Inject constructor(
         AppLandingDestination.fromStorage(preferences[PreferencesKeys.APP_LANDING_DESTINATION])
     }
 
+    val appTopLevelDestinations: Flow<List<AppTopLevelDestination>> = context.dataStore.data.map { preferences ->
+        decodeAppTopLevelDestinations(preferences[PreferencesKeys.APP_TOP_LEVEL_DESTINATIONS])
+    }
+
+    val appHomeDashboardShelves: Flow<List<AppHomeDashboardShelf>> = context.dataStore.data.map { preferences ->
+        decodeAppHomeDashboardShelves(preferences[PreferencesKeys.APP_HOME_DASHBOARD_SHELVES])
+    }
+
     suspend fun setAppLandingDestination(destination: AppLandingDestination) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.APP_LANDING_DESTINATION] = destination.storageValue
+        }
+    }
+
+    suspend fun setAppTopLevelDestinations(destinations: List<AppTopLevelDestination>) {
+        val normalized = AppTopLevelDestination.normalizeForStorage(destinations)
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.APP_TOP_LEVEL_DESTINATIONS] = encodeAppTopLevelDestinations(normalized)
+        }
+    }
+
+    suspend fun setAppHomeDashboardShelves(shelves: List<AppHomeDashboardShelf>) {
+        val normalized = AppHomeDashboardShelf.normalizeForStorage(shelves)
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.APP_HOME_DASHBOARD_SHELVES] = encodeAppHomeDashboardShelves(normalized)
         }
     }
 
@@ -1310,6 +1544,16 @@ class PreferencesRepository @Inject constructor(
     suspend fun setShowLiveSourceSwitcher(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.SHOW_LIVE_SOURCE_SWITCHER] = enabled
+        }
+    }
+
+    val showFavoritesCategory: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.SHOW_FAVORITES_CATEGORY] ?: true
+    }
+
+    suspend fun setShowFavoritesCategory(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SHOW_FAVORITES_CATEGORY] = enabled
         }
     }
 
@@ -1382,6 +1626,16 @@ class PreferencesRepository @Inject constructor(
         return true
     }
 
+    val hideDecorativeLiveRows: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.HIDE_DECORATIVE_LIVE_ROWS] ?: true
+    }
+
+    suspend fun setHideDecorativeLiveRows(hide: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.HIDE_DECORATIVE_LIVE_ROWS] = hide
+        }
+    }
+
     val liveChannelNumberingMode: Flow<ChannelNumberingMode> = context.dataStore.data.map { preferences ->
         ChannelNumberingMode.fromStorage(preferences[PreferencesKeys.LIVE_CHANNEL_NUMBERING_MODE])
     }
@@ -1448,6 +1702,16 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
+    suspend fun clearPreferredLiveVariants(providerId: Long) {
+        if (providerId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeLiveVariantSelections(preferences[PreferencesKeys.LIVE_VARIANT_SELECTIONS])
+                .filterKeys { !it.startsWith("$providerId|") }
+            if (updated.isEmpty()) preferences.remove(PreferencesKeys.LIVE_VARIANT_SELECTIONS)
+            else preferences[PreferencesKeys.LIVE_VARIANT_SELECTIONS] = encodeLiveVariantSelections(updated)
+        }
+    }
+
     val liveVariantObservations: Flow<Map<Long, LiveChannelObservedQuality>> = context.dataStore.data.map { preferences ->
         decodeLiveVariantObservations(preferences[PreferencesKeys.LIVE_VARIANT_OBSERVATIONS])
     }
@@ -1458,6 +1722,75 @@ class PreferencesRepository @Inject constructor(
             val updated = decodeLiveVariantObservations(preferences[PreferencesKeys.LIVE_VARIANT_OBSERVATIONS]).toMutableMap()
             updated[rawChannelId] = observedQuality
             preferences[PreferencesKeys.LIVE_VARIANT_OBSERVATIONS] = encodeLiveVariantObservations(updated)
+        }
+    }
+
+    val vodDuplicateHandlingMode: Flow<VodDuplicateHandlingMode> = context.dataStore.data.map { preferences ->
+        VodDuplicateHandlingMode.fromStorage(preferences[PreferencesKeys.VOD_DUPLICATE_HANDLING_MODE])
+    }
+
+    suspend fun setVodDuplicateHandlingMode(mode: VodDuplicateHandlingMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.VOD_DUPLICATE_HANDLING_MODE] = mode.storageValue
+        }
+    }
+
+    val vodVariantPreferenceMode: Flow<VodVariantPreferenceMode> = context.dataStore.data.map { preferences ->
+        VodVariantPreferenceMode.fromStorage(preferences[PreferencesKeys.VOD_VARIANT_PREFERENCE_MODE])
+    }
+
+    suspend fun setVodVariantPreferenceMode(mode: VodVariantPreferenceMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.VOD_VARIANT_PREFERENCE_MODE] = mode.storageValue
+        }
+    }
+
+    val vodVariantSelections: Flow<Map<String, Long>> = context.dataStore.data.map { preferences ->
+        decodeVodVariantSelections(preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS])
+    }
+
+    suspend fun setPreferredVodVariant(providerId: Long, logicalGroupId: String, rawItemId: Long) {
+        if (providerId <= 0L || logicalGroupId.isBlank() || rawItemId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeVodVariantSelections(preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS]).toMutableMap()
+            updated[vodVariantSelectionKey(providerId, logicalGroupId)] = rawItemId
+            preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS] = encodeVodVariantSelections(updated)
+        }
+    }
+
+    suspend fun clearPreferredVodVariant(providerId: Long, logicalGroupId: String) {
+        if (providerId <= 0L || logicalGroupId.isBlank()) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeVodVariantSelections(preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS]).toMutableMap()
+            updated.remove(vodVariantSelectionKey(providerId, logicalGroupId))
+            if (updated.isEmpty()) {
+                preferences.remove(PreferencesKeys.VOD_VARIANT_SELECTIONS)
+            } else {
+                preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS] = encodeVodVariantSelections(updated)
+            }
+        }
+    }
+
+    suspend fun clearPreferredVodVariants(providerId: Long) {
+        if (providerId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeVodVariantSelections(preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS])
+                .filterKeys { !it.startsWith("$providerId|") }
+            if (updated.isEmpty()) preferences.remove(PreferencesKeys.VOD_VARIANT_SELECTIONS)
+            else preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS] = encodeVodVariantSelections(updated)
+        }
+    }
+
+    val vodVariantObservations: Flow<Map<Long, VodVariantObservation>> = context.dataStore.data.map { preferences ->
+        decodeVodVariantObservations(preferences[PreferencesKeys.VOD_VARIANT_OBSERVATIONS])
+    }
+
+    suspend fun recordVodVariantObservation(rawItemId: Long, observation: VodVariantObservation) {
+        if (rawItemId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeVodVariantObservations(preferences[PreferencesKeys.VOD_VARIANT_OBSERVATIONS]).toMutableMap()
+            updated[rawItemId] = observation
+            preferences[PreferencesKeys.VOD_VARIANT_OBSERVATIONS] = encodeVodVariantObservations(updated)
         }
     }
 
@@ -1478,6 +1811,19 @@ class PreferencesRepository @Inject constructor(
     suspend fun setVodInfiniteScroll(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.VOD_INFINITE_SCROLL] = enabled
+        }
+    }
+
+    val vodCategoryLoadMode: Flow<com.streamvault.domain.model.VodCategoryLoadMode> =
+        context.dataStore.data.map { preferences ->
+            com.streamvault.domain.model.VodCategoryLoadMode.fromStorage(
+                preferences[PreferencesKeys.VOD_CATEGORY_LOAD_MODE]
+            )
+        }
+
+    suspend fun setVodCategoryLoadMode(mode: com.streamvault.domain.model.VodCategoryLoadMode) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.VOD_CATEGORY_LOAD_MODE] = mode.storageValue
         }
     }
 
@@ -1511,6 +1857,12 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
+    suspend fun clearGuideDefaultCategoryId() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(PreferencesKeys.GUIDE_DEFAULT_CATEGORY_ID)
+        }
+    }
+
     val guideFavoritesOnly: Flow<Boolean> = context.dataStore.data.map { preferences ->
         (preferences[PreferencesKeys.GUIDE_FAVORITES_ONLY] ?: 0) == 1
     }
@@ -1538,6 +1890,12 @@ class PreferencesRepository @Inject constructor(
     suspend fun setGuideAnchorTime(anchorTimeMs: Long) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.GUIDE_ANCHOR_TIME] = anchorTimeMs
+        }
+    }
+
+    suspend fun clearGuideAnchorTime() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(PreferencesKeys.GUIDE_ANCHOR_TIME)
         }
     }
 
@@ -1737,6 +2095,67 @@ class PreferencesRepository @Inject constructor(
         }
     }
 
+    suspend fun replacePreferredVodVariants(
+        providerId: Long,
+        selections: Map<String, Long>
+    ) {
+        if (providerId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeVodVariantSelections(preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS])
+                .toMutableMap()
+            val providerPrefix = "$providerId|"
+            updated.keys.removeAll { it.startsWith(providerPrefix) }
+            selections.forEach { (logicalGroupId, rawItemId) ->
+                if (logicalGroupId.isNotBlank() && rawItemId > 0L) {
+                    updated[vodVariantSelectionKey(providerId, logicalGroupId)] = rawItemId
+                }
+            }
+            if (updated.isEmpty()) {
+                preferences.remove(PreferencesKeys.VOD_VARIANT_SELECTIONS)
+            } else {
+                preferences[PreferencesKeys.VOD_VARIANT_SELECTIONS] = encodeVodVariantSelections(updated)
+            }
+        }
+    }
+
+    suspend fun replacePreferredLiveVariants(
+        providerId: Long,
+        selections: Map<String, Long>
+    ) {
+        if (providerId <= 0L) return
+        context.dataStore.edit { preferences ->
+            val updated = decodeLiveVariantSelections(preferences[PreferencesKeys.LIVE_VARIANT_SELECTIONS])
+                .toMutableMap()
+            val providerPrefix = "$providerId|"
+            updated.keys.removeAll { it.startsWith(providerPrefix) }
+            selections.forEach { (logicalGroupId, rawChannelId) ->
+                if (logicalGroupId.isNotBlank() && rawChannelId > 0L) {
+                    updated[liveVariantSelectionKey(providerId, logicalGroupId)] = rawChannelId
+                }
+            }
+            if (updated.isEmpty()) {
+                preferences.remove(PreferencesKeys.LIVE_VARIANT_SELECTIONS)
+            } else {
+                preferences[PreferencesKeys.LIVE_VARIANT_SELECTIONS] = encodeLiveVariantSelections(updated)
+            }
+        }
+    }
+
+    suspend fun setPinnedCategoryIds(
+        providerId: Long,
+        type: ContentType,
+        categoryIds: Set<Long>
+    ) {
+        val key = stringPreferencesKey(pinnedCategoriesKey(providerId, type))
+        context.dataStore.edit { preferences ->
+            if (categoryIds.isEmpty()) {
+                preferences.remove(key)
+            } else {
+                preferences[key] = categoryIds.sorted().joinToString(",")
+            }
+        }
+    }
+
     fun getCategorySortMode(providerId: Long, type: ContentType): Flow<CategorySortMode> {
         val key = stringPreferencesKey(categorySortModeKey(providerId, type))
         return context.dataStore.data.map { preferences ->
@@ -1886,10 +2305,54 @@ class PreferencesRepository @Inject constructor(
     private fun liveVariantSelectionKey(providerId: Long, logicalGroupId: String): String =
         "${providerId}|${logicalGroupId.trim()}"
 
+    private fun vodVariantSelectionKey(providerId: Long, logicalGroupId: String): String =
+        "${providerId}|${logicalGroupId.trim()}"
+
     private fun encodeLiveVariantSelections(values: Map<String, Long>): String =
         values.entries
             .sortedBy { it.key }
             .joinToString("\n") { (key, rawChannelId) -> "$key=$rawChannelId" }
+
+    private fun encodeAppTopLevelDestinations(destinations: List<AppTopLevelDestination>): String =
+        AppTopLevelDestination.normalizeForStorage(destinations)
+            .joinToString(",") { it.storageValue }
+
+    private fun decodeAppTopLevelDestinations(encoded: String?): List<AppTopLevelDestination> {
+        val decoded = encoded
+            .orEmpty()
+            .split(',')
+            .asSequence()
+            .mapNotNull { token -> AppTopLevelDestination.fromStorage(token.trim()) }
+            .toList()
+        return if (decoded.isEmpty()) {
+            AppTopLevelDestination.defaultOrder
+        } else {
+            AppTopLevelDestination.normalizeForStorage(decoded)
+        }
+    }
+
+    private fun encodeAppHomeDashboardShelves(shelves: List<AppHomeDashboardShelf>): String =
+        AppHomeDashboardShelf.normalizeForStorage(shelves)
+            .joinToString(",") { it.storageValue }
+
+    private fun decodeAppHomeDashboardShelves(encoded: String?): List<AppHomeDashboardShelf> {
+        if (encoded == null) {
+            return AppHomeDashboardShelf.defaultOrder
+        }
+        if (encoded.isBlank()) {
+            return emptyList()
+        }
+        val decoded = encoded
+            .split(',')
+            .asSequence()
+            .mapNotNull { token -> AppHomeDashboardShelf.fromStorage(token.trim()) }
+            .toList()
+        return if (decoded.isEmpty()) {
+            AppHomeDashboardShelf.defaultOrder
+        } else {
+            AppHomeDashboardShelf.normalizeForStorage(decoded)
+        }
+    }
 
     private fun decodeLiveVariantSelections(encoded: String?): Map<String, Long> =
         encoded
@@ -1935,6 +2398,55 @@ class PreferencesRepository @Inject constructor(
                     lastObservedFrameRate = parts[4].toFloatOrNull() ?: 0f,
                     successCount = parts[5].toIntOrNull() ?: 0,
                     lastSuccessfulAt = parts[6].toLongOrNull() ?: 0L
+                )
+            }
+            .toMap()
+
+    private fun encodeVodVariantSelections(values: Map<String, Long>): String =
+        values.entries
+            .sortedBy { it.key }
+            .joinToString("\n") { (key, rawItemId) -> "$key=$rawItemId" }
+
+    private fun decodeVodVariantSelections(encoded: String?): Map<String, Long> =
+        encoded
+            .orEmpty()
+            .lineSequence()
+            .mapNotNull { line ->
+                val separator = line.indexOf('=')
+                if (separator <= 0) return@mapNotNull null
+                val key = line.substring(0, separator).trim()
+                val rawItemId = line.substring(separator + 1).trim().toLongOrNull() ?: return@mapNotNull null
+                key.takeIf { it.isNotBlank() }?.let { it to rawItemId }
+            }
+            .toMap()
+
+    private fun encodeVodVariantObservations(values: Map<Long, VodVariantObservation>): String =
+        values.entries
+            .sortedByDescending { maxOf(it.value.lastSuccessfulAt, it.value.lastFailedAt) }
+            .take(500)
+            .joinToString("\n") { (rawItemId, observation) ->
+                listOf(
+                    rawItemId,
+                    observation.successCount,
+                    observation.failureCount,
+                    observation.lastSuccessfulAt,
+                    observation.lastFailedAt
+                ).joinToString("|")
+            }
+
+    private fun decodeVodVariantObservations(encoded: String?): Map<Long, VodVariantObservation> =
+        encoded
+            .orEmpty()
+            .lineSequence()
+            .mapNotNull { line ->
+                val parts = line.split('|')
+                if (parts.size != 5) return@mapNotNull null
+                val rawItemId = parts[0].toLongOrNull() ?: return@mapNotNull null
+                rawItemId to VodVariantObservation(
+                    successCount = parts[1].toIntOrNull() ?: 0,
+                    failureCount = parts[2].toIntOrNull() ?: 0,
+                    lastSuccessfulAt = parts[3].toLongOrNull() ?: 0L,
+                    lastFailedAt = parts[4].toLongOrNull() ?: 0L
                 )
             }
             .toMap()

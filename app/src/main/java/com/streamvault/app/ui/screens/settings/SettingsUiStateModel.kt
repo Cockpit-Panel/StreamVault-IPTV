@@ -5,12 +5,18 @@ import com.streamvault.app.ui.model.LiveTvQuickFilterVisibilityMode
 import com.streamvault.app.ui.model.VodViewMode
 import com.streamvault.domain.manager.BackupImportPlan
 import com.streamvault.domain.manager.BackupPreview
+import com.streamvault.domain.manager.BackupProviderReference
+import com.streamvault.domain.manager.BackupRestoreJobStatus
 import com.streamvault.domain.manager.DriveAuthState
+import com.streamvault.domain.manager.DriveBackupSnapshot
 import com.streamvault.domain.manager.DriveSignInRequest
 import com.streamvault.domain.manager.DriveSyncStatus
 import com.streamvault.domain.manager.ProviderCredentials
 import com.streamvault.domain.model.ActiveLiveSource
+import com.streamvault.domain.model.VodCategoryLoadMode
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.AppLandingDestination
+import com.streamvault.domain.model.AppTopLevelDestination
 import com.streamvault.domain.model.AppTimeFormat
 import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.Category
@@ -23,13 +29,17 @@ import com.streamvault.domain.model.EpgResolutionSummary
 import com.streamvault.domain.model.GroupedChannelLabelMode
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 import com.streamvault.domain.model.VodHttpProtocolMode
 import com.streamvault.domain.model.ExternalPlaybackMode
 import com.streamvault.domain.model.PlayerSurfaceMode
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.RecordingItem
 import com.streamvault.domain.model.RecordingStorageState
 import com.streamvault.domain.model.RemoteShortcutPreferences
+import com.streamvault.domain.model.TimeshiftBackendPreference
+import com.streamvault.domain.model.VodVariantPreferenceMode
 
 data class CrashReportUiModel(
     val timestamp: String = "",
@@ -50,6 +60,9 @@ data class SettingsUiState(
     val isSyncing: Boolean = false,
     val syncProgress: String? = null,
     val syncingProviderName: String? = null,
+    val syncStartedAt: Long = 0L,
+    val syncSectionLabel: String? = null,
+    val syncCanCancel: Boolean = false,
     val userMessage: String? = null,
     val syncWarningsByProvider: Map<Long, List<String>> = emptyMap(),
     val xtreamLiveOnboardingPhaseByProvider: Map<Long, String> = emptyMap(),
@@ -61,11 +74,15 @@ data class SettingsUiState(
     val hasParentalPin: Boolean = false,
     val appLanguage: String = "system",
     val appLandingDestination: AppLandingDestination = AppLandingDestination.HOME,
+    val appTopLevelDestinations: List<AppTopLevelDestination> = AppTopLevelDestination.defaultOrder,
+    val appHomeDashboardShelves: List<AppHomeDashboardShelf> = AppHomeDashboardShelf.defaultOrder,
     val appTimeFormat: AppTimeFormat = AppTimeFormat.SYSTEM,
     val preferredAudioLanguage: String = "auto",
     val playerMediaSessionEnabled: Boolean = true,
     val playerFastRetryOnTransientFailures: Boolean = false,
-    val playerDecoderMode: DecoderMode = DecoderMode.AUTO,
+    val playerAudioDecoderMode: DecoderMode = DecoderMode.AUTO,
+    val playerVideoDecoderMode: DecoderMode = DecoderMode.AUTO,
+    val playerPlaybackBufferMode: PlaybackBufferMode = PlaybackBufferMode.AUTO,
     val playerAudioOutputPreference: AudioOutputPreference = AudioOutputPreference.AUTO,
     val playerCompatibilityMemoryEnabled: Boolean = true,
     val playerSurfaceMode: PlayerSurfaceMode = PlayerSurfaceMode.AUTO,
@@ -89,15 +106,22 @@ data class SettingsUiState(
     val ethernetMaxVideoHeight: Int? = null,
     val playerTimeshiftEnabled: Boolean = false,
     val playerTimeshiftDepthMinutes: Int = 30,
+    val playerTimeshiftBackend: TimeshiftBackendPreference = TimeshiftBackendPreference.AUTOMATIC,
     val defaultStopPlaybackTimerMinutes: Int = 0,
     val defaultIdleStandbyTimerMinutes: Int = 0,
     val lastSpeedTest: InternetSpeedTestUiModel? = null,
     val isRunningInternetSpeedTest: Boolean = false,
     val isDeletingProvider: Boolean = false,
+    val deleteProviderProgressMessage: String? = null,
+    val deleteProviderProgressFraction: Float? = null,
     val isImportingBackup: Boolean = false,
     val backupPreview: BackupPreview? = null,
     val pendingBackupUri: String? = null,
     val backupImportPlan: BackupImportPlan = BackupImportPlan(),
+    val pendingRestoreJobId: String? = null,
+    val pendingRestoreProviders: List<BackupProviderReference> = emptyList(),
+    val selectedRestoreProviderIndices: Set<Int> = emptySet(),
+    val backupRestoreJobs: List<BackupRestoreJobStatus> = emptyList(),
     // --- Drive sync (M2) ---
     val driveAuthState: DriveAuthState = DriveAuthState.SignedOut,
     val driveSyncStatus: DriveSyncStatus = DriveSyncStatus(),
@@ -105,6 +129,10 @@ data class SettingsUiState(
     val driveLastPullAt: Long? = null,
     val drivePendingSignIn: DriveSignInRequest? = null,
     val driveIsBusy: Boolean = false,
+    /** Drive snapshots waiting for the user to choose one before preview/import. */
+    val driveBackupOptions: List<DriveBackupSnapshot> = emptyList(),
+    /** Drive snapshots shown in the explicit manage/delete screen. */
+    val driveBackupManagementOptions: List<DriveBackupSnapshot> = emptyList(),
     // M3 — credentials downloaded by pullBackup, waiting to be applied
     // to providers once the import confirm completes.
     val pendingDriveCredentials: List<ProviderCredentials>? = null,
@@ -118,17 +146,22 @@ data class SettingsUiState(
     val xtreamBase64TextCompatibility: Boolean = false,
     val liveTvChannelMode: LiveTvChannelMode = LiveTvChannelMode.PRO,
     val showLiveSourceSwitcher: Boolean = false,
+    val showFavoritesCategory: Boolean = true,
     val showAllChannelsCategory: Boolean = true,
     val showRecentChannelsCategory: Boolean = true,
     val remoteShortcutPreferences: RemoteShortcutPreferences = RemoteShortcutPreferences(),
     val liveTvCategoryFilters: List<String> = emptyList(),
     val liveTvQuickFilterVisibilityMode: LiveTvQuickFilterVisibilityMode = LiveTvQuickFilterVisibilityMode.ALWAYS_VISIBLE,
+    val hideDecorativeLiveRows: Boolean = true,
     val liveChannelNumberingMode: ChannelNumberingMode = ChannelNumberingMode.GROUP,
     val liveChannelGroupingMode: LiveChannelGroupingMode = LiveChannelGroupingMode.RAW_VARIANTS,
     val groupedChannelLabelMode: GroupedChannelLabelMode = GroupedChannelLabelMode.HYBRID,
     val liveVariantPreferenceMode: LiveVariantPreferenceMode = LiveVariantPreferenceMode.BALANCED,
     val vodViewMode: VodViewMode = VodViewMode.MODERN,
+    val vodCategoryLoadMode: VodCategoryLoadMode = VodCategoryLoadMode.PAGED,
     val vodInfiniteScroll: Boolean = true,
+    val vodDuplicateHandlingMode: VodDuplicateHandlingMode = VodDuplicateHandlingMode.SHOW_ALL,
+    val vodVariantPreferenceMode: VodVariantPreferenceMode = VodVariantPreferenceMode.BALANCED,
     val guideDefaultCategoryId: Long = com.streamvault.domain.model.VirtualCategoryIds.FAVORITES,
     val guideDefaultCategoryOptions: List<Category> = emptyList(),
     val preventStandbyDuringPlayback: Boolean = true,

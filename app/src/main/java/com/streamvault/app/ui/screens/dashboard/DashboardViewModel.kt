@@ -2,19 +2,22 @@ package com.streamvault.app.ui.screens.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.streamvault.app.BuildConfig
 import com.streamvault.app.ui.model.orderedByRequestedRawIds
 import com.streamvault.data.preferences.PreferencesRepository
-import com.streamvault.data.sync.SyncManager
+import com.streamvault.data.sync.ProviderSyncStateSource
+import com.streamvault.app.update.AppUpdateActionState
 import com.streamvault.app.update.AppUpdateInstaller
+import com.streamvault.app.update.isRemoteVersionNewer
+import com.streamvault.app.update.latestAppUpdateAction
 import com.streamvault.domain.model.ActiveLiveSource
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.Category
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.Favorite
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.PlaybackHistory
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.Series
@@ -71,7 +74,7 @@ class DashboardViewModel @Inject constructor(
     private val preferencesRepository: PreferencesRepository,
     private val getContinueWatching: GetContinueWatching,
     private val getCustomCategories: GetCustomCategories,
-    private val syncManager: SyncManager,
+    private val syncManager: ProviderSyncStateSource,
     private val appUpdateInstaller: AppUpdateInstaller,
     private val recordingManager: RecordingManager
 ) : ViewModel() {
@@ -171,6 +174,22 @@ class DashboardViewModel @Inject constructor(
                 .filter { !shouldHideVodFromHome(it, level) }
                 .take(MOVIE_SHELF_LIMIT)
         }
+        val topRatedMovieShelf = combine(
+            movieRepository.getTopRatedPreview(provider.id, MOVIE_SHELF_LIMIT),
+            preferencesRepository.parentalControlLevel
+        ) { movies, level ->
+            movies
+                .filter { !shouldHideVodFromHome(it, level) }
+                .take(MOVIE_SHELF_LIMIT)
+        }
+        val recommendedMovieShelf = combine(
+            movieRepository.getRecommendations(provider.id, MOVIE_SHELF_LIMIT),
+            preferencesRepository.parentalControlLevel
+        ) { movies, level ->
+            movies
+                .filter { !shouldHideVodFromHome(it, level) }
+                .take(MOVIE_SHELF_LIMIT)
+        }
         val seriesShelf = combine(
             seriesRepository.getFreshPreview(provider.id, SERIES_SHELF_LIMIT),
             preferencesRepository.parentalControlLevel
@@ -179,7 +198,7 @@ class DashboardViewModel @Inject constructor(
                 .filter { !shouldHideVodFromHome(it, level) }
                 .take(SERIES_SHELF_LIMIT)
         }
-        val contentShelves = combine(
+        val baseContentShelves = combine(
             observeFavoriteChannels(liveProviderIds).onStart { emit(emptyList()) },
             observeRecentChannels(liveProviderIds).onStart { emit(emptyList()) },
             observeContinueWatching(liveProviderIds.toSet()).onStart { emit(ContinueWatchingShelf()) },
@@ -190,13 +209,37 @@ class DashboardViewModel @Inject constructor(
                 favoriteChannels = favoriteChannels,
                 recentChannels = recentChannels,
                 continueWatching = continueWatchingShelf.items,
+                continueWatchingSeries = continueWatchingShelf.series,
                 continueWatchingDegraded = continueWatchingShelf.isDegraded,
                 recentMovies = recentMovies,
                 recentSeries = recentSeries
             )
         }
+        val contentShelvesWithFavorites = combine(
+            baseContentShelves,
+            observeFavoriteMovies(liveProviderIds).onStart { emit(emptyList()) },
+            observeFavoriteSeries(liveProviderIds).onStart { emit(emptyList()) },
+            observeContinueWatchingByScope(liveProviderIds.toSet(), ContinueWatchingScope.MOVIES).onStart { emit(emptyList()) },
+            observeContinueWatchingByScope(liveProviderIds.toSet(), ContinueWatchingScope.SERIES).onStart { emit(emptyList()) }
+        ) { shelves, favoriteMovies, favoriteSeries, continueWatchingMovies, continueWatchingSeriesItems ->
+            shelves.copy(
+                favoriteMovies = favoriteMovies,
+                favoriteSeries = favoriteSeries,
+                continueWatchingMovies = continueWatchingMovies,
+                continueWatchingSeriesItems = continueWatchingSeriesItems
+            )
+        }
+        val contentShelves = contentShelvesWithFavorites
+            .combine(topRatedMovieShelf.onStart { emit(emptyList()) }) { shelves, topRatedMovies ->
+                shelves.copy(topRatedMovies = topRatedMovies)
+            }
+            .combine(recommendedMovieShelf.onStart { emit(emptyList()) }) { shelves, recommendedMovies ->
+            shelves.copy(
+                recommendedMovies = recommendedMovies
+            )
+        }
 
-        return combine(
+        val baseSnapshot = combine(
             contentShelves,
             buildLiveContext(
                 providerIds = liveProviderIds,
@@ -214,19 +257,34 @@ class DashboardViewModel @Inject constructor(
                 liveChannelCount = liveChannelCount,
                 movieCount = movieCount,
                 seriesCount = seriesCount,
+                homeDashboardShelves = AppHomeDashboardShelf.defaultOrder,
                 updateNotice = null
             )
+        }
+
+        return baseSnapshot.combine(
+            preferencesRepository.appHomeDashboardShelves.onStart { emit(AppHomeDashboardShelf.defaultOrder) }
+        ) { snapshot, homeDashboardShelves ->
+            snapshot.copy(homeDashboardShelves = homeDashboardShelves)
         }.combine(observeUpdateNotice().onStart { emit(null) }) { snapshot, updateNotice ->
             snapshot.copy(updateNotice = updateNotice)
         }.combine(syncManager.syncStateForProvider(provider.id).onStart { emit(SyncState.Idle) }) { snapshot, syncState ->
             DashboardUiState(
                 provider = provider,
+                homeDashboardShelves = snapshot.homeDashboardShelves,
                 favoriteChannels = snapshot.shelves.favoriteChannels,
                 recentChannels = snapshot.shelves.recentChannels,
                 continueWatching = snapshot.shelves.continueWatching,
+                continueWatchingSeries = snapshot.shelves.continueWatchingSeries,
+                continueWatchingMovies = snapshot.shelves.continueWatchingMovies,
+                continueWatchingSeriesItems = snapshot.shelves.continueWatchingSeriesItems,
                 continueWatchingDegraded = snapshot.shelves.continueWatchingDegraded,
+                favoriteMovies = snapshot.shelves.favoriteMovies,
+                favoriteSeries = snapshot.shelves.favoriteSeries,
                 recentMovies = snapshot.shelves.recentMovies,
                 recentSeries = snapshot.shelves.recentSeries,
+                topRatedMovies = snapshot.shelves.topRatedMovies,
+                recommendedMovies = snapshot.shelves.recommendedMovies,
                 lastLiveCategory = snapshot.liveContext.lastVisitedCategory,
                 liveShortcuts = snapshot.liveContext.shortcuts,
                 currentCombinedProfileId = combinedProfileId,
@@ -275,6 +333,38 @@ class DashboardViewModel @Inject constructor(
             }
             .flatMapLatest(::loadChannelsByOrderedIds)
 
+    private fun observeFavoriteMovies(providerIds: List<Long>): Flow<List<Movie>> =
+        observeFavorites(providerIds, ContentType.MOVIE)
+            .map { favorites ->
+                favorites
+                    .filter { it.groupId == null }
+                    .sortedBy { it.position }
+                    .map { it.contentId }
+                    .take(MOVIE_SHELF_LIMIT)
+            }
+            .flatMapLatest(::loadMoviesByOrderedIds)
+            .combine(preferencesRepository.parentalControlLevel) { movies, level ->
+                movies
+                    .filter { !shouldHideVodFromHome(it, level) }
+                    .take(MOVIE_SHELF_LIMIT)
+            }
+
+    private fun observeFavoriteSeries(providerIds: List<Long>): Flow<List<Series>> =
+        observeFavorites(providerIds, ContentType.SERIES)
+            .map { favorites ->
+                favorites
+                    .filter { it.groupId == null }
+                    .sortedBy { it.position }
+                    .map { it.contentId }
+                    .take(SERIES_SHELF_LIMIT)
+            }
+            .flatMapLatest(::loadSeriesByOrderedIds)
+            .combine(preferencesRepository.parentalControlLevel) { series, level ->
+                series
+                    .filter { !shouldHideVodFromHome(it, level) }
+                    .take(SERIES_SHELF_LIMIT)
+            }
+
     private fun observeRecentChannels(providerIds: List<Long>): Flow<List<Channel>> =
         combine(
             preferencesRepository.showRecentChannelsCategory.flatMapLatest { show ->
@@ -294,10 +384,44 @@ class DashboardViewModel @Inject constructor(
             providerIds = providerIds,
             limit = CONTINUE_WATCHING_LIMIT,
             scope = ContinueWatchingScope.ALL_VOD
+        ).flatMapLatest { result ->
+            when (result) {
+                is ContinueWatchingResult.Items -> {
+                    val seriesIds = result.items
+                        .asSequence()
+                        .filter { history ->
+                            history.contentType == ContentType.SERIES || history.contentType == ContentType.SERIES_EPISODE
+                        }
+                        .map { history -> history.seriesId ?: history.contentId }
+                        .distinct()
+                        .toList()
+                    if (seriesIds.isEmpty()) {
+                        flowOf(ContinueWatchingShelf(items = result.items))
+                    } else {
+                        seriesRepository.getSeriesByIds(seriesIds).map { series ->
+                            ContinueWatchingShelf(
+                                items = result.items,
+                                series = series.orderedByRequestedSeriesIds(seriesIds)
+                            )
+                        }
+                    }
+                }
+                ContinueWatchingResult.Degraded -> flowOf(ContinueWatchingShelf(isDegraded = true))
+            }
+        }
+
+    private fun observeContinueWatchingByScope(
+        providerIds: Set<Long>,
+        scope: ContinueWatchingScope
+    ): Flow<List<PlaybackHistory>> =
+        getContinueWatching(
+            providerIds = providerIds,
+            limit = CONTINUE_WATCHING_LIMIT,
+            scope = scope
         ).map { result ->
             when (result) {
-                is ContinueWatchingResult.Items -> ContinueWatchingShelf(items = result.items)
-                ContinueWatchingResult.Degraded -> ContinueWatchingShelf(isDegraded = true)
+                is ContinueWatchingResult.Items -> result.items
+                ContinueWatchingResult.Degraded -> emptyList()
             }
         }
 
@@ -380,6 +504,12 @@ class DashboardViewModel @Inject constructor(
         else -> favoriteRepository.getFavorites(providerIds, ContentType.LIVE)
     }
 
+    private fun observeFavorites(providerIds: List<Long>, contentType: ContentType): Flow<List<Favorite>> = when (providerIds.size) {
+        0 -> flowOf(emptyList())
+        1 -> favoriteRepository.getFavorites(providerIds.first(), contentType)
+        else -> favoriteRepository.getFavorites(providerIds, contentType)
+    }
+
     private fun observeRecentLiveIds(providerIds: List<Long>, limit: Int): Flow<List<Long>> = when (providerIds.size) {
         0 -> flowOf(emptyList())
         1 -> playbackHistoryRepository.getRecentlyWatchedByProvider(providerIds.first(), limit)
@@ -414,29 +544,95 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    private fun observeUpdateNotice(): Flow<DashboardUpdateNotice?> = combine(
-        preferencesRepository.cachedAppUpdateVersionName,
-        preferencesRepository.cachedAppUpdateVersionCode,
-        preferencesRepository.downloadedAppUpdateVersionName
-    ) { latestVersionName, latestVersionCode, downloadedVersionName ->
-        if (latestVersionName.isNullOrBlank()) {
-            return@combine null
+    private fun loadMoviesByOrderedIds(ids: List<Long>): Flow<List<Movie>> {
+        if (ids.isEmpty()) return flowOf(emptyList())
+
+        return movieRepository.getMoviesByIds(ids).map { movies ->
+            movies.orderedByRequestedMovieIds(ids)
+        }
+    }
+
+    private fun loadSeriesByOrderedIds(ids: List<Long>): Flow<List<Series>> {
+        if (ids.isEmpty()) return flowOf(emptyList())
+
+        return seriesRepository.getSeriesByIds(ids).map { series ->
+            series.orderedByRequestedSeriesIds(ids)
+        }
+    }
+
+    private fun List<Movie>.orderedByRequestedMovieIds(requestedIds: List<Long>): List<Movie> {
+        if (requestedIds.isEmpty()) return emptyList()
+        val movieByRequestedId = buildMap<Long, Movie> {
+            this@orderedByRequestedMovieIds.forEach { movie ->
+                movie.rawMovieIdsForDashboard().forEach { rawMovieId ->
+                    putIfAbsent(rawMovieId, movie)
+                }
+            }
+        }
+        return requestedIds.mapNotNull(movieByRequestedId::get).distinctBy { it.id }
+    }
+
+    private fun List<Series>.orderedByRequestedSeriesIds(requestedIds: List<Long>): List<Series> {
+        if (requestedIds.isEmpty()) return emptyList()
+        val seriesByRequestedId = buildMap<Long, Series> {
+            this@orderedByRequestedSeriesIds.forEach { series ->
+                series.rawSeriesIdsForDashboard().forEach { rawSeriesId ->
+                    putIfAbsent(rawSeriesId, series)
+                }
+            }
+        }
+        return requestedIds.mapNotNull(seriesByRequestedId::get).distinctBy { it.id }
+    }
+
+    private fun Series.rawSeriesIdsForDashboard(): List<Long> =
+        variants.map { it.rawSeriesId }.ifEmpty { listOf(selectedVariantId ?: id) }
+
+    private fun Movie.rawMovieIdsForDashboard(): List<Long> =
+        variants.map { it.rawMovieId }.ifEmpty { listOf(id) }
+
+    private fun observeUpdateNotice(): Flow<DashboardUpdateNotice?> {
+        val cachedRelease = combine(
+            preferencesRepository.cachedAppUpdateVersionName,
+            preferencesRepository.cachedAppUpdateVersionCode,
+            preferencesRepository.cachedAppUpdatePublishedAt,
+            preferencesRepository.cachedAppUpdateDownloadUrl,
+            preferencesRepository.cachedAppUpdateDownloadSha256
+        ) { latestVersionName, latestVersionCode, publishedAt, downloadUrl, downloadSha256 ->
+            DashboardCachedUpdateRelease(
+                latestVersionName = latestVersionName,
+                latestVersionCode = latestVersionCode,
+                publishedAt = publishedAt,
+                downloadUrl = downloadUrl,
+                downloadSha256 = downloadSha256
+            )
         }
 
-        val updateAvailable = if (latestVersionCode != null && latestVersionCode > BuildConfig.VERSION_CODE) {
-            true
-        } else {
-            compareVersionNames(latestVersionName, BuildConfig.VERSION_NAME) > 0
-        }
+        return cachedRelease.combine(appUpdateInstaller.downloadState) { release, downloadState ->
+            val latestVersionName = release.latestVersionName
+            if (latestVersionName.isNullOrBlank()) {
+                return@combine null
+            }
 
-        if (!updateAvailable) {
-            return@combine null
-        }
+            val updateAvailable = isRemoteVersionNewer(
+                release.latestVersionCode,
+                latestVersionName,
+                release.publishedAt
+            )
+            if (!updateAvailable) {
+                return@combine null
+            }
 
-        DashboardUpdateNotice(
-            latestVersionName = latestVersionName,
-            installReady = downloadedVersionName == latestVersionName
-        )
+            DashboardUpdateNotice(
+                latestVersionName = latestVersionName,
+                downloadSha256 = release.downloadSha256,
+                actionState = latestAppUpdateAction(
+                    latestVersionName = latestVersionName,
+                    downloadUrl = release.downloadUrl,
+                    isUpdateAvailable = updateAvailable,
+                    downloadState = downloadState
+                )
+            )
+        }
     }
 
     private fun buildFeature(
@@ -461,7 +657,8 @@ class DashboardViewModel @Inject constructor(
         val resumeItem = continueWatching.firstOrNull()
         if (resumeItem != null) {
             val detail = when (resumeItem.contentType) {
-                ContentType.MOVIE -> appContext.getString(R.string.dashboard_resume_movie)
+                ContentType.MOVIE,
+                ContentType.VOD -> appContext.getString(R.string.dashboard_resume_movie)
                 ContentType.SERIES -> appContext.getString(R.string.dashboard_resume_series)
                 ContentType.SERIES_EPISODE -> {
                     if (resumeItem.seasonNumber != null && resumeItem.episodeNumber != null) {
@@ -562,23 +759,24 @@ class DashboardViewModel @Inject constructor(
             }.getOrNull()
     }
 
-    private fun compareVersionNames(left: String, right: String): Int {
-        val leftParts = left.removePrefix("v").split('.')
-        val rightParts = right.removePrefix("v").split('.')
-        val length = maxOf(leftParts.size, rightParts.size)
-        for (index in 0 until length) {
-            val leftValue = leftParts.getOrNull(index)?.toIntOrNull() ?: 0
-            val rightValue = rightParts.getOrNull(index)?.toIntOrNull() ?: 0
-            if (leftValue != rightValue) {
-                return leftValue.compareTo(rightValue)
-            }
+    fun setHomeDashboardShelves(shelves: List<AppHomeDashboardShelf>) {
+        viewModelScope.launch {
+            preferencesRepository.setAppHomeDashboardShelves(
+                AppHomeDashboardShelf.normalizeForStorage(shelves)
+            )
         }
-        return 0
+    }
+
+    fun resetHomeDashboardShelves() {
+        viewModelScope.launch {
+            preferencesRepository.setAppHomeDashboardShelves(AppHomeDashboardShelf.defaultOrder)
+        }
     }
 
     fun installDownloadedUpdate() {
         viewModelScope.launch {
-            when (val result = appUpdateInstaller.installDownloadedUpdate()) {
+            val expectedSha256 = _uiState.value.updateNotice?.downloadSha256
+            when (val result = appUpdateInstaller.installDownloadedUpdate(expectedSha256)) {
                 is com.streamvault.domain.model.Result.Error -> {
                     _uiState.value = _uiState.value.copy(userMessage = result.message)
                 }
@@ -610,6 +808,7 @@ private data class DashboardLiveContext(
 
 private data class ContinueWatchingShelf(
     val items: List<PlaybackHistory> = emptyList(),
+    val series: List<Series> = emptyList(),
     val isDegraded: Boolean = false
 )
 
@@ -617,9 +816,16 @@ private data class DashboardContentShelves(
     val favoriteChannels: List<Channel>,
     val recentChannels: List<Channel>,
     val continueWatching: List<PlaybackHistory>,
+    val continueWatchingSeries: List<Series> = emptyList(),
+    val continueWatchingMovies: List<PlaybackHistory> = emptyList(),
+    val continueWatchingSeriesItems: List<PlaybackHistory> = emptyList(),
     val continueWatchingDegraded: Boolean = false,
+    val favoriteMovies: List<Movie> = emptyList(),
+    val favoriteSeries: List<Series> = emptyList(),
     val recentMovies: List<Movie>,
-    val recentSeries: List<Series>
+    val recentSeries: List<Series>,
+    val topRatedMovies: List<Movie> = emptyList(),
+    val recommendedMovies: List<Movie> = emptyList()
 )
 
 private data class DashboardSnapshot(
@@ -628,17 +834,34 @@ private data class DashboardSnapshot(
     val liveChannelCount: Int,
     val movieCount: Int,
     val seriesCount: Int,
+    val homeDashboardShelves: List<AppHomeDashboardShelf>,
     val updateNotice: DashboardUpdateNotice?
+)
+
+private data class DashboardCachedUpdateRelease(
+    val latestVersionName: String?,
+    val latestVersionCode: Int?,
+    val publishedAt: String?,
+    val downloadUrl: String?,
+    val downloadSha256: String?
 )
 
 data class DashboardUiState(
     val provider: Provider? = null,
+    val homeDashboardShelves: List<AppHomeDashboardShelf> = AppHomeDashboardShelf.defaultOrder,
     val favoriteChannels: List<Channel> = emptyList(),
     val recentChannels: List<Channel> = emptyList(),
     val continueWatching: List<PlaybackHistory> = emptyList(),
+    val continueWatchingSeries: List<Series> = emptyList(),
+    val continueWatchingMovies: List<PlaybackHistory> = emptyList(),
+    val continueWatchingSeriesItems: List<PlaybackHistory> = emptyList(),
     val continueWatchingDegraded: Boolean = false,
+    val favoriteMovies: List<Movie> = emptyList(),
+    val favoriteSeries: List<Series> = emptyList(),
     val recentMovies: List<Movie> = emptyList(),
     val recentSeries: List<Series> = emptyList(),
+    val topRatedMovies: List<Movie> = emptyList(),
+    val recommendedMovies: List<Movie> = emptyList(),
     val lastLiveCategory: Category? = null,
     val liveShortcuts: List<DashboardLiveShortcut> = emptyList(),
     val feature: DashboardFeature = DashboardFeature(),
@@ -653,8 +876,15 @@ data class DashboardUiState(
 
 data class DashboardUpdateNotice(
     val latestVersionName: String,
+    val downloadSha256: String?,
+    val actionState: AppUpdateActionState
+) {
     val installReady: Boolean
-)
+        get() = actionState == AppUpdateActionState.InstallLatest
+
+    val installPermissionRequired: Boolean
+        get() = actionState == AppUpdateActionState.InstallPermissionRequired
+}
 
 data class DashboardProviderHealth(
     val status: ProviderStatus = ProviderStatus.UNKNOWN,

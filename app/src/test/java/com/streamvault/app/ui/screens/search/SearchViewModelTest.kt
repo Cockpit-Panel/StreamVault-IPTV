@@ -3,7 +3,7 @@ package com.streamvault.app.ui.screens.search
 import com.google.common.truth.Truth.assertThat
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Movie
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import com.streamvault.domain.model.SearchHistoryScope
 import com.streamvault.domain.model.Series

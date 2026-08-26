@@ -22,7 +22,7 @@ import com.streamvault.app.ui.theme.OnSurfaceDim
 import com.streamvault.app.ui.theme.Primary
 import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createDateTimeFormat
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.ProviderType
 import java.text.DateFormat
 import java.util.Locale
@@ -60,6 +60,81 @@ internal fun ProviderDiagnosticsPanel(
             style = MaterialTheme.typography.bodySmall,
             color = OnSurfaceDim
         )
+        if (provider.type == ProviderType.STALKER_PORTAL) {
+            Text(
+                text = buildString {
+                    append("Protocol: ")
+                    append(provider.stalkerProtocolFamily.name.replace('_', ' '))
+                    append(" • Requested: ")
+                    append(provider.stalkerRequestedProfileId)
+                    append(" • Winner: ")
+                    append(provider.stalkerLearnedProfileId.ifBlank { "not validated" })
+                    append(" • Endpoint: ")
+                    append(provider.stalkerEndpointPreference.name.replace('_', ' '))
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = OnSurface
+            )
+            Text(
+                text = buildString {
+                    append("Catalog: ")
+                    append(if (provider.stalkerLearnedProfileId.isBlank()) "not validated" else "validated")
+                    append(" • Identity: ")
+                    append(
+                        if (provider.stalkerSerialNumber.isNotBlank() || provider.stalkerDeviceId.isNotBlank()) {
+                            "manual fields"
+                        } else {
+                            "MAC first"
+                        }
+                    )
+                    append(" • Verification: ")
+                    append(provider.stalkerProfileVerification.name)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = OnSurfaceDim
+            )
+            Text(
+                text = buildString {
+                    append("Transport: ")
+                    append(provider.stalkerTransportMode.name.replace('_', ' '))
+                    provider.stalkerTransportOrigin.takeIf(String::isNotBlank)?.let { origin ->
+                        append(" • Origin: ")
+                        append(origin)
+                    }
+                    if (provider.stalkerTransportConsentAt > 0L) {
+                        append(" • User approved")
+                    }
+                    append(" • Generation: ")
+                    append(provider.stalkerConfigurationGeneration)
+                    if (provider.lastSyncedAt > 0L) {
+                        append(" | Last verification: ")
+                        append(
+                            DateFormat.getDateTimeInstance(
+                                DateFormat.MEDIUM,
+                                DateFormat.SHORT,
+                                Locale.getDefault()
+                            ).format(java.util.Date(provider.lastSyncedAt))
+                        )
+                    }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = OnSurfaceDim
+            )
+            provider.stalkerCapabilitiesJson.takeIf(String::isNotBlank)?.let { states ->
+                Text(
+                    text = "Capabilities: $states",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceDim
+                )
+            }
+            provider.stalkerDiscoverySummary.takeIf(String::isNotBlank)?.let { summary ->
+                Text(
+                    text = "Last discovery: $summary",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceDim
+                )
+            }
+        }
         Text(
             text = stringResource(R.string.settings_diagnostic_status, diagnostics.lastSyncStatus),
             style = MaterialTheme.typography.labelSmall,

@@ -6,7 +6,10 @@ import com.streamvault.data.local.dao.ChannelDao
 import com.streamvault.data.local.dao.ProviderDao
 import com.streamvault.data.local.dao.XtreamLiveOnboardingDao
 import com.streamvault.data.local.entity.CategoryEntity
+import com.streamvault.data.local.entity.ProviderConfigRevisionEntity
+import com.streamvault.data.local.entity.ProviderConfigRevisionState
 import com.streamvault.data.local.entity.ProviderEntity
+import com.streamvault.data.local.entity.XtreamIndexJobEntity
 import com.streamvault.data.local.entity.XtreamLiveOnboardingStateEntity
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.ProviderStatus
@@ -37,6 +40,150 @@ class ProviderSyncWorkerTest {
     init {
         runBlocking {
             whenever(categoryDao.getByProviderAndTypeSync(any(), any())).thenReturn(emptyList())
+        }
+    }
+
+    @Test
+    fun `stale config work is a no-op after revision supersession or provider deletion`() {
+        val base = ProviderConfigRevisionEntity(
+            providerId = 7L,
+            revision = 1L,
+            configJson = "{}",
+            state = ProviderConfigRevisionState.SYNCING,
+            createdAt = 1L,
+            updatedAt = 1L
+        )
+
+        assertThat(isObsoleteProviderConfigRevision(null, providerExists = false)).isTrue()
+        assertThat(isObsoleteProviderConfigRevision(base, providerExists = false)).isTrue()
+        assertThat(
+            isObsoleteProviderConfigRevision(
+                base.copy(state = ProviderConfigRevisionState.SUPERSEDED),
+                providerExists = true
+            )
+        ).isTrue()
+        assertThat(
+            isObsoleteProviderConfigRevision(
+                base.copy(state = ProviderConfigRevisionState.COMMITTED),
+                providerExists = true
+            )
+        ).isTrue()
+        assertThat(isObsoleteProviderConfigRevision(base, providerExists = true)).isFalse()
+    }
+
+    @Test
+    fun `future running index job timestamp is not fresh`() {
+        assertThat(
+            isFreshRunningIndexJob(
+                updatedAt = 1_001L,
+                now = 1_000L,
+                staleAfterMillis = 15 * 60 * 1_000L
+            )
+        ).isFalse()
+    }
+
+    @Test
+    fun `recent running index job timestamp is fresh`() {
+        assertThat(
+            isFreshRunningIndexJob(
+                updatedAt = 1_000L,
+                now = 1_001L,
+                staleAfterMillis = 15 * 60 * 1_000L
+            )
+        ).isTrue()
+    }
+
+    @Test
+    fun `process death orphan is recoverable even when prior success is fresh`() {
+        val persistedAfterProcessDeath = XtreamIndexJobEntity(
+            providerId = 7L,
+            section = ContentType.MOVIE.name,
+            state = "RUNNING",
+            lastSuccessAt = 9_999L,
+            updatedAt = 1_000L
+        )
+
+        assertThat(
+            shouldRunPersistedIndexJob(
+                job = persistedAfterProcessDeath,
+                now = 10_000L,
+                staleRunningAfterMillis = 1_000L,
+                successTtlMillis = 24 * 60 * 60 * 1_000L
+            )
+        ).isTrue()
+    }
+
+    @Test
+    fun `backward clock jump makes persisted running owner recoverable`() {
+        val running = XtreamIndexJobEntity(
+            providerId = 7L,
+            section = ContentType.SERIES.name,
+            state = "RUNNING",
+            updatedAt = 10_001L
+        )
+
+        assertThat(
+            shouldRunPersistedIndexJob(running, 10_000L, 1_000L, 86_400_000L)
+        ).isTrue()
+    }
+
+    @Test
+    fun `forward clock jump makes persisted running owner recoverable`() {
+        val running = XtreamIndexJobEntity(
+            providerId = 7L,
+            section = ContentType.SERIES.name,
+            state = "RUNNING",
+            updatedAt = 10_000L
+        )
+
+        assertThat(
+            shouldRunPersistedIndexJob(running, 20_000L, 1_000L, 86_400_000L)
+        ).isTrue()
+    }
+
+    @Test
+    fun `running owner is stale at exact threshold`() {
+        val running = XtreamIndexJobEntity(
+            providerId = 7L,
+            section = ContentType.MOVIE.name,
+            state = "RUNNING",
+            updatedAt = 10_000L
+        )
+
+        assertThat(
+            shouldRunPersistedIndexJob(running, 11_000L, 1_000L, 86_400_000L)
+        ).isTrue()
+    }
+
+    @Test
+    fun `zero and negative running timestamps are recoverable`() {
+        listOf(0L, -1L).forEach { invalidTimestamp ->
+            val running = XtreamIndexJobEntity(
+                providerId = 7L,
+                section = ContentType.MOVIE.name,
+                state = "RUNNING",
+                updatedAt = invalidTimestamp
+            )
+
+            assertThat(
+                shouldRunPersistedIndexJob(running, 10_000L, 1_000L, 86_400_000L)
+            ).isTrue()
+        }
+    }
+
+    @Test
+    fun `fresh persisted running owner does not admit duplicate recovery`() {
+        val running = XtreamIndexJobEntity(
+            providerId = 7L,
+            section = ContentType.MOVIE.name,
+            state = "RUNNING",
+            updatedAt = 10_000L
+        )
+
+        repeat(32) {
+            assertThat(
+                shouldRunPersistedIndexJob(running, 10_999L, 1_000L, 86_400_000L)
+            ).isFalse()
         }
     }
 

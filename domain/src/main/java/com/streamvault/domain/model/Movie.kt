@@ -27,7 +27,12 @@ data class Movie(
     val isAdult: Boolean = false,
     val isUserProtected: Boolean = false,
     val streamId: Long = 0L,
-    val addedAt: Long = 0L
+    val addedAt: Long = 0L,
+    val logicalGroupId: String? = null,
+    val selectedVariantId: Long? = null,
+    val variants: List<VodMovieVariant> = emptyList(),
+    val duplicateConfidence: VodDuplicateConfidence = VodDuplicateConfidence.NONE,
+    val variantLabel: String? = null
 ) {
     init {
         require(durationSeconds >= 0) { "durationSeconds must be non-negative" }

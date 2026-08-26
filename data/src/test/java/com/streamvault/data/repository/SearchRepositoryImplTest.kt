@@ -32,7 +32,9 @@ class SearchRepositoryImplTest {
         searchDao = searchDao,
         channelRepository = channelRepository,
         movieRepository = movieRepository,
-        seriesRepository = seriesRepository
+        seriesRepository = seriesRepository,
+        providerDao = mock(),
+        stalkerIndexJobDao = mock()
     )
 
     @Test

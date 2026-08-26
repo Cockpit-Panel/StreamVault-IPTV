@@ -2,6 +2,8 @@ package com.streamvault.app.cast
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.mediarouter.media.MediaRouteSelector
 import com.google.android.gms.cast.CastMediaControlIntent
@@ -13,8 +15,11 @@ import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.SessionManagerListener
 import com.streamvault.app.plugins.StreamVaultPluginManager
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,9 +33,13 @@ class CastManager @Inject constructor(
     private val _connectionState = MutableStateFlow(CastConnectionState.UNAVAILABLE)
     val connectionState: StateFlow<CastConnectionState> = _connectionState.asStateFlow()
 
+    private val _playbackEvents = MutableSharedFlow<CastPlaybackEvent>(extraBufferCapacity = 8)
+    val playbackEvents: SharedFlow<CastPlaybackEvent> = _playbackEvents.asSharedFlow()
+
     private var castContext: CastContext? = null
     private var initialized = false
     private var pendingRequest: CastMediaRequest? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val sessionManagerListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) {
@@ -44,6 +53,11 @@ class CastManager @Inject constructor(
 
         override fun onSessionStartFailed(session: CastSession, error: Int) {
             _connectionState.value = CastConnectionState.DISCONNECTED
+            val request = pendingRequest
+            pendingRequest = null
+            if (request != null) {
+                _playbackEvents.tryEmit(CastPlaybackEvent.SessionStartFailed(error))
+            }
             Log.w(TAG, "Cast session failed to start: $error")
         }
 
@@ -53,6 +67,7 @@ class CastManager @Inject constructor(
 
         override fun onSessionEnded(session: CastSession, error: Int) {
             _connectionState.value = CastConnectionState.DISCONNECTED
+            pendingRequest = null
         }
 
         override fun onSessionResuming(session: CastSession, sessionId: String) {
@@ -66,6 +81,11 @@ class CastManager @Inject constructor(
 
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
             _connectionState.value = CastConnectionState.DISCONNECTED
+            val request = pendingRequest
+            pendingRequest = null
+            if (request != null) {
+                _playbackEvents.tryEmit(CastPlaybackEvent.SessionStartFailed(error))
+            }
         }
 
         override fun onSessionSuspended(session: CastSession, reason: Int) {
@@ -102,13 +122,20 @@ class CastManager @Inject constructor(
         if (!isRequestSupported(request)) {
             return CastStartResult.UNSUPPORTED
         }
-        val rewrittenUrl = pluginManager.rewriteCastUrl(request.url) ?: return CastStartResult.UNSUPPORTED
+        val rewrittenUrl = pluginManager.rewriteCastUrl(request) ?: return CastStartResult.UNSUPPORTED
+        if (request.requiresCastRewrite && rewrittenUrl.trim() == request.url.trim()) {
+            Log.w(TAG, "Cast request requires URL rewrite but no receiver-safe URL was returned")
+            return CastStartResult.UNSUPPORTED
+        }
         val resolvedRequest = request.copy(url = rewrittenUrl)
 
         pendingRequest = resolvedRequest
         val activeSession = resolvedContext.sessionManager.currentCastSession
         return if (activeSession?.isConnected == true) {
-            loadMedia(activeSession, resolvedRequest)
+            if (!loadMedia(activeSession, resolvedRequest)) {
+                pendingRequest = null
+                return CastStartResult.UNAVAILABLE
+            }
             pendingRequest = null
             CastStartResult.STARTED
         } else {
@@ -123,14 +150,27 @@ class CastManager @Inject constructor(
         _connectionState.value = CastConnectionState.DISCONNECTED
     }
 
+    fun onRouteChooserClosed() {
+        val request = pendingRequest ?: return
+        mainHandler.postDelayed({
+            if (pendingRequest == request && _connectionState.value == CastConnectionState.DISCONNECTED) {
+                pendingRequest = null
+                _playbackEvents.tryEmit(CastPlaybackEvent.RouteSelectionCancelled)
+            }
+        }, ROUTE_SELECTION_CANCEL_CHECK_DELAY_MS)
+    }
+
     private fun loadPendingRequest(session: CastSession) {
         val request = pendingRequest ?: return
         loadMedia(session, request)
         pendingRequest = null
     }
 
-    private fun loadMedia(session: CastSession, request: CastMediaRequest) {
-        val remoteMediaClient = session.remoteMediaClient ?: return
+    private fun loadMedia(session: CastSession, request: CastMediaRequest): Boolean {
+        val remoteMediaClient = session.remoteMediaClient ?: run {
+            _playbackEvents.tryEmit(CastPlaybackEvent.ReceiverUnavailable(request.title))
+            return false
+        }
         val metadataType = if (request.isLive) MediaMetadata.MEDIA_TYPE_TV_SHOW else MediaMetadata.MEDIA_TYPE_MOVIE
         val metadata = MediaMetadata(metadataType).apply {
             putString(MediaMetadata.KEY_TITLE, request.title)
@@ -154,7 +194,20 @@ class CastManager @Inject constructor(
                 .setAutoplay(true)
                 .setCurrentTime(request.startPositionMs)
                 .build()
-        )
+        ).setResultCallback { result ->
+            if (result.status.isSuccess) {
+                _playbackEvents.tryEmit(CastPlaybackEvent.MediaLoadSucceeded(request.title))
+            } else {
+                Log.w(TAG, "Cast media load failed: ${result.status.statusCode}")
+                _playbackEvents.tryEmit(
+                    CastPlaybackEvent.MediaLoadFailed(
+                        title = request.title,
+                        statusCode = result.status.statusCode
+                    )
+                )
+            }
+        }
+        return true
     }
 
     private fun currentConnectionState(castContext: CastContext): CastConnectionState {
@@ -183,5 +236,6 @@ class CastManager @Inject constructor(
     private companion object {
         const val TAG = "CastManager"
         const val DEFAULT_CONTENT_TYPE = "application/x-mpegURL"
+        const val ROUTE_SELECTION_CANCEL_CHECK_DELAY_MS = 1_000L
     }
 }

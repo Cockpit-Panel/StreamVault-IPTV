@@ -1,153 +1,140 @@
-name: Sync Upstream and Release
+name: Upstream Sync and Cockpit Release
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Daily at midnight
+    - cron: '41 4 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: streamvault-upstream-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: Davidona/StreamVault-IPTV
+      UPSTREAM_REF: master
+      TARGET_BRANCH: master
     steps:
-      - name: Checkout master
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
-      - name: Configure Git
+      - name: Configure and fetch repositories
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch origin "$TARGET_BRANCH"
+          git fetch upstream "$UPSTREAM_REF"
 
-      - name: Add and fetch upstream
-        run: |
-          git remote add upstream https://github.com/Davidona/StreamVault-IPTV.git
-          git fetch upstream master
-
-      - name: Check for updates and merge
-        id: merge_check
-        run: |
-          BEHIND_COUNT=$(git rev-list --count HEAD..upstream/master)
-          echo "Upstream is ahead by $BEHIND_COUNT commits"
-          
-          if [ "$BEHIND_COUNT" -gt 0 ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "updates_found=true" >> "$GITHUB_OUTPUT"
-            if [ "$BEHIND_COUNT" -gt 0 ]; then
-              echo "Merging upstream changes..."
-              git merge upstream/master -m "Merge upstream changes automatically" --no-edit
-              git push origin master
-            fi
-          else
-            echo "updates_found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Read app version
-        if: steps.merge_check.outputs.updates_found == 'true'
-        id: app_version
+      - name: Rebuild upstream and overlay Cockpit modifications
+        id: overlay
         shell: bash
         run: |
-          VERSION_NAME=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts | head -n 1)
-          VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)
-          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
-            echo "Failed to read app version from app/build.gradle.kts"
-            exit 1
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+          old_head="$(git rev-parse HEAD)"
+          old_base="$(git merge-base HEAD "upstream/$UPSTREAM_REF")"
+          new_upstream="$(git rev-parse "upstream/$UPSTREAM_REF")"
+          if [ "$old_base" = "$new_upstream" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "release_tag=v$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "apk_name=StreamVault-$VERSION_NAME.apk" >> "$GITHUB_OUTPUT"
+          patch="$RUNNER_TEMP/cockpit-overlay.patch"
+          git diff --binary "$old_base..$old_head" > "$patch"
+          test -s "$patch"
+          git reset --hard "upstream/$UPSTREAM_REF"
+          git apply --3way --index "$patch" || {
+            git diff --name-only --diff-filter=U
+            echo "Cockpit overlay conflicts require review; refusing to publish a partial build." >&2
+            exit 1
+          }
+          ! git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ':!*.md'
+          git commit -m "chore: sync upstream and reapply Cockpit overlay"
+          echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
 
-      - name: Set up JDK 17
-        if: steps.merge_check.outputs.updates_found == 'true'
+      - name: Set up Java
+        if: steps.overlay.outputs.no_changes != 'true'
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: '21'
           cache: gradle
 
-      - name: Set up Gradle
-        if: steps.merge_check.outputs.updates_found == 'true'
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Android SDK
+        if: steps.overlay.outputs.no_changes != 'true'
+        uses: android-actions/setup-android@v3
 
-      - name: Prepare optional signing files
-        if: steps.merge_check.outputs.updates_found == 'true'
-        shell: bash
+      - name: Prepare optional signing
+        if: steps.overlay.outputs.no_changes != 'true'
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
             mkdir -p keystore
             echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > keystore/release.jks
-            printf '%s\n' \
-              'storeFile=keystore/release.jks' \
-              "storePassword=$RELEASE_STORE_PASSWORD" \
-              "keyAlias=$RELEASE_KEY_ALIAS" \
-              "keyPassword=$RELEASE_KEY_PASSWORD" \
-              > keystore.properties
+            printf '%s\n' 'storeFile=keystore/release.jks' "storePassword=$RELEASE_STORE_PASSWORD" "keyAlias=$RELEASE_KEY_ALIAS" "keyPassword=$RELEASE_KEY_PASSWORD" > keystore.properties
           fi
 
-      - name: Grant execute permission for gradlew
-        if: steps.merge_check.outputs.updates_found == 'true'
-        run: chmod +x gradlew
+      - name: Verify Cockpit overlay
+        if: steps.overlay.outputs.no_changes != 'true'
+        run: |
+          grep -q 'demo.cockpit.lol/api/streamvault' app/src/main/java/com/PanelURL.kt
+          grep -q 'PanelURL.URL + "api.php"' app/src/main/java/com/streamvault/app/ui/screens/provider/ProviderSetupViewModel.kt
+          grep -q 'PanelURL.URL + "update.php"' app/src/main/java/com/streamvault/app/update/GitHubReleaseChecker.kt
+          grep -q 'portalId' app/src/main/java/com/streamvault/app/pairing/ProviderQrPairingManager.kt
 
-      - name: Run unit tests and coverage
-        if: steps.merge_check.outputs.updates_found == 'true'
-        run: ./gradlew --console=plain testDebugUnitTest koverXmlReportCi koverHtmlReportCi
+      - name: Test and build release APK
+        if: steps.overlay.outputs.no_changes != 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest :app:assembleRelease --no-daemon --console=plain
 
-      - name: Build release APK
-        if: steps.merge_check.outputs.updates_found == 'true'
-        run: ./gradlew --console=plain :app:assembleRelease
-
-      - name: Prepare release artifact
-        if: steps.merge_check.outputs.updates_found == 'true'
+      - name: Collect APK
+        if: steps.overlay.outputs.no_changes != 'true'
+        id: release
         shell: bash
         run: |
-          mkdir -p dist
-          APK_PATH=$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "No release APK produced."
-            exit 1
-          fi
-          cp "$APK_PATH" "dist/${{ steps.app_version.outputs.apk_name }}"
-          cp "$APK_PATH" dist/StreamVault.apk
+          version="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts | head -1)"
+          short_sha="$(git rev-parse --short=8 HEAD)"
+          apk="$(find app/build/outputs/apk/release -name '*.apk' | head -1)"
+          test -n "$version" && test -n "$apk"
+          mkdir -p release-artifacts
+          cp "$apk" "release-artifacts/StreamVault-$version-$short_sha.apk"
+          sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=cockpit-v$version-$short_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Extract changelog entry
-        if: steps.merge_check.outputs.updates_found == 'true'
-        id: changelog
-        shell: bash
-        run: |
-          VERSION="${{ steps.app_version.outputs.version_name }}"
-          echo "Extracting notes for version $VERSION"
-          {
-            echo "notes<<EOF"
-            awk -v ver="$VERSION" '
-              $0 ~ ("^## \\[" ver "\\]") || $0 ~ ("^## " ver " ") { p=1; next }
-              $0 ~ "^## " && p { p=0 }
-              p { print }
-            ' docs/CHANGELOG.md
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Release
-        if: steps.merge_check.outputs.updates_found == 'true'
-        uses: softprops/action-gh-release@v2
+      - name: Upload verified APK
+        if: steps.overlay.outputs.no_changes != 'true'
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.app_version.outputs.release_tag }}
-          name: StreamVault ${{ steps.app_version.outputs.version_name }}
-          body: |
-            ${{ steps.changelog.outputs.notes }}
-            
-            ---
-            Automatically synced with upstream and built from `${{ github.sha }}`.
-          files: |
-            dist/${{ steps.app_version.outputs.apk_name }}
-            dist/StreamVault.apk
-          make_latest: true
-          generate_release_notes: false
+          name: StreamVault-${{ steps.release.outputs.version }}-${{ steps.release.outputs.short_sha }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Push verified sync
+        if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push --force-with-lease="refs/heads/$TARGET_BRANCH:${{ steps.overlay.outputs.old_head }}" origin "HEAD:$TARGET_BRANCH"
+
+      - name: Publish GitHub release
+        if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN }}
+        run: gh release create "${{ steps.release.outputs.tag }}" release-artifacts/* --target "${{ steps.release.outputs.sha }}" --title "StreamVault ${{ steps.release.outputs.version }} Cockpit" --generate-notes --latest

@@ -9,7 +9,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 
 @Composable
 internal fun SettingsContentPane(
@@ -25,6 +25,7 @@ internal fun SettingsContentPane(
     onChooseRecordingFolder: () -> Unit,
     onUseUsbRecordingStorage: (() -> Unit)?,
     onCreateBackup: () -> Unit,
+    onManageLocalBackups: () -> Unit,
     onCreateBackupUsb: (() -> Unit)?,
     onRestoreBackupUsb: (() -> Unit)?,
     onShareBackup: () -> Unit,
@@ -61,7 +62,10 @@ internal fun SettingsContentPane(
                 uiState = uiState,
                 viewModel = viewModel,
                 timeshiftDepthLabel = screenLabels.timeshiftDepthLabel,
-                decoderModeLabel = screenLabels.decoderModeLabel,
+                timeshiftBackendLabel = screenLabels.timeshiftBackendLabel,
+                audioDecoderModeLabel = screenLabels.audioDecoderModeLabel,
+                videoDecoderModeLabel = screenLabels.videoDecoderModeLabel,
+                playbackBufferModeLabel = screenLabels.playbackBufferModeLabel,
                 audioOutputPreferenceLabel = screenLabels.audioOutputPreferenceLabel,
                 externalPlaybackModeLabel = screenLabels.externalPlaybackModeLabel,
                 surfaceModeLabel = screenLabels.surfaceModeLabel,
@@ -85,7 +89,10 @@ internal fun SettingsContentPane(
                 lastSpeedTestSummary = screenLabels.lastSpeedTestSummary,
                 speedTestRecommendationLabel = screenLabels.speedTestRecommendationLabel,
                 onShowTimeshiftDepthDialogChange = { dialogState.showTimeshiftDepthDialog = it },
-                onShowDecoderModeDialogChange = { dialogState.showDecoderModeDialog = it },
+                onShowTimeshiftBackendDialogChange = { dialogState.showTimeshiftBackendDialog = it },
+                onShowAudioDecoderModeDialogChange = { dialogState.showAudioDecoderModeDialog = it },
+                onShowVideoDecoderModeDialogChange = { dialogState.showVideoDecoderModeDialog = it },
+                onShowPlaybackBufferModeDialogChange = { dialogState.showPlaybackBufferModeDialog = it },
                 onShowAudioOutputPreferenceDialogChange = { dialogState.showAudioOutputPreferenceDialog = it },
                 onShowExternalPlaybackModeDialogChange = { dialogState.showExternalPlaybackModeDialog = it },
                 onShowSurfaceModeDialogChange = { dialogState.showSurfaceModeDialog = it },
@@ -112,6 +119,8 @@ internal fun SettingsContentPane(
         viewModel = viewModel,
         context = context,
         appLandingDestinationLabel = screenLabels.appLandingDestinationLabel,
+        topNavigationSummaryLabel = screenLabels.topNavigationSummaryLabel,
+        homeDashboardSummaryLabel = screenLabels.homeDashboardSummaryLabel,
         guideDefaultCategoryLabel = screenLabels.guideDefaultCategoryLabel,
         timeFormatLabel = screenLabels.timeFormatLabel,
         appLanguageLabel = screenLabels.appLanguageLabel,
@@ -122,10 +131,14 @@ internal fun SettingsContentPane(
         onShowLiveChannelGroupingDialogChange = { dialogState.showLiveChannelGroupingDialog = it },
         onShowGroupedChannelLabelDialogChange = { dialogState.showGroupedChannelLabelDialog = it },
         onShowLiveVariantPreferenceDialogChange = { dialogState.showLiveVariantPreferenceDialog = it },
+        onShowTopNavigationDialogChange = { dialogState.showTopNavigationDialog = it },
+        onShowHomeDashboardDialogChange = { dialogState.showHomeDashboardDialog = it },
         onShowLandingScreenDialogChange = { dialogState.showLandingScreenDialog = it },
         onShowGuideDefaultCategoryDialogChange = { dialogState.showGuideDefaultCategoryDialog = it },
         onShowTimeFormatDialogChange = { dialogState.showTimeFormatDialog = it },
                 onShowVodViewModeDialogChange = { dialogState.showVodViewModeDialog = it },
+                onShowVodDuplicateHandlingDialogChange = { dialogState.showVodDuplicateHandlingDialog = it },
+                onShowVodVariantPreferenceDialogChange = { dialogState.showVodVariantPreferenceDialog = it },
                 onCategorySortDialogTypeChange = { dialogState.categorySortDialogType = it },
                 onShowLanguageDialogChange = { dialogState.showLanguageDialog = it },
                 onRemoteShortcutDialogTargetChange = {
@@ -156,7 +169,10 @@ internal fun SettingsContentPane(
             )
         } else if (dialogState.selectedCategory == 5) {
             settingsBackupSection(
+                uiState = uiState,
+                viewModel = viewModel,
                 onCreateBackup = onCreateBackup,
+                onManageLocalBackups = onManageLocalBackups,
                 onShareBackup = onShareBackup,
                 onRestoreBackup = onRestoreBackup,
                 onCreateBackupUsb = onCreateBackupUsb,

@@ -8,39 +8,6 @@ Rules:
 - For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
 - After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
 
-## StreamVault emulator orientation
-
-When starting the emulator with StreamVault, always ensure the visible device frame
-and the app orientation are aligned before playback debugging. The known-good
-orientation from the debugging session is the emulator in landscape with the app
-upright at Android `ROTATION_270`.
-
-Use:
-
-```bash
-adb shell cmd window set-ignore-orientation-request true
-adb shell cmd window user-rotation lock 3
-```
-
-Verify with:
-
-```bash
-adb shell dumpsys window displays | rg "cur=|mRotation=|mUserRotationMode|mUserRotation=|mCurrentRotation|mDisplayRotation|ignoreOrientationRequest"
-```
-
-Expected state:
-- `cur=2340x1080 app=2340x1080`
-- `mDisplayRotation=ROTATION_270`
-- `mRotation=3`
-- `mUserRotationMode=USER_ROTATION_LOCKED`
-- `mUserRotation=ROTATION_270`
-- `ignoreOrientationRequest=true`
-
-Do not treat `cur=2340x1080 app=2340x1080` alone as sufficient; the app can
-still be sideways or upside down if the emulator frame and Android rotation are
-not aligned. If the phone frame is portrait while the app is upright, rotate the
-emulator frame with `adb emu rotate`, then reapply the `ROTATION_270` lock above.
-
 ## Live TV playback validation
 
 For live TV playback bugs, do not validate with a single screenshot, a short

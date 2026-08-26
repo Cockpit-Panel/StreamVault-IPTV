@@ -1,9 +1,11 @@
 package com.streamvault.data.parser
 
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.nio.charset.Charset
 import java.util.zip.GZIPOutputStream
 
 /**
@@ -197,7 +199,7 @@ class M3uParserTest {
     }
 
     @Test
-    fun `parse_headerWithMultipleEpgUrls_usesFirstUrl`() {
+    fun `parse_headerWithMultipleEpgUrls_retainsDistinctUrlsInOrder`() {
         val result = parser.parse(
             """
             #EXTM3U x-tvg-url="https://epg.example.com/guide.xml.gz, https://backup.example.com/guide.xml"
@@ -206,7 +208,164 @@ class M3uParserTest {
             """.trimIndent().byteInputStream()
         )
 
-        assertThat(result.header.tvgUrl).isEqualTo("https://epg.example.com/guide.xml.gz")
+        assertThat(result.header.tvgUrls).containsExactly(
+            "https://epg.example.com/guide.xml.gz",
+            "https://backup.example.com/guide.xml"
+        ).inOrder()
+    }
+
+    @Test
+    fun `parseStreaming_reportsMalformedCandidate`() = runBlocking {
+        var invalidEntries = 0
+
+        parser.parseStreaming(
+            inputStream = """
+                #EXTM3U
+                #EXTINF:-1,Missing URL
+                not-a-stream-url
+            """.trimIndent().byteInputStream(),
+            onEntry = { error("Expected malformed entry to be rejected") },
+            onInvalidEntry = { invalidEntries++ }
+        )
+
+        assertThat(invalidEntries).isEqualTo(1)
+    }
+
+    @Test
+    fun `parseStreaming_reportsReplacedAndUnterminatedCandidates`() = runBlocking {
+        val entries = mutableListOf<M3uParser.M3uEntry>()
+        var invalidEntries = 0
+
+        parser.parseStreaming(
+            inputStream = """
+                #EXTM3U
+                #EXTINF:-1,Replaced candidate
+                #EXTINF:-1,Valid candidate
+                https://stream.example.com/valid.ts
+                #EXTINF:-1,Unterminated candidate
+            """.trimIndent().byteInputStream(),
+            onEntry = entries::add,
+            onInvalidEntry = { invalidEntries++ }
+        )
+
+        assertThat(entries.map { it.name }).containsExactly("Valid candidate")
+        assertThat(invalidEntries).isEqualTo(2)
+    }
+
+    @Test
+    fun `parse_utf16Bom_decodesPlaylist`() {
+        val playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"cafe\" group-title=\"Café\",Café\nhttps://stream.example.com/cafe.m3u8\n"
+        val utf16 = byteArrayOf(0xFF.toByte(), 0xFE.toByte()) + playlist.toByteArray(Charsets.UTF_16LE)
+
+        val result = parser.parse(utf16.inputStream())
+
+        assertThat(result.entries.single().name).isEqualTo("Café")
+        assertThat(result.entries.single().groupTitle).isEqualTo("Café")
+    }
+
+    @Test
+    fun `parse_utf16BigEndianBom_decodesPlaylist`() {
+        val playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"cafe\" group-title=\"Café\",Café\nhttps://stream.example.com/cafe.m3u8\n"
+        val utf16 = byteArrayOf(0xFE.toByte(), 0xFF.toByte()) + playlist.toByteArray(Charsets.UTF_16BE)
+
+        val result = parser.parse(utf16.inputStream())
+
+        assertThat(result.entries.single().name).isEqualTo("Café")
+        assertThat(result.entries.single().groupTitle).isEqualTo("Café")
+    }
+
+    @Test
+    fun `parse_windows1252WithoutCharset_usesLegacyFallback`() {
+        val windows1252 = Charset.forName("windows-1252")
+        val playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"café-tv\" group-title=\"Ciné – FR\",Café Télévision\nhttps://stream.example.com/cafe.ts\n"
+
+        val result = parser.parse(playlist.toByteArray(windows1252).inputStream())
+
+        val entry = result.entries.single()
+        assertThat(entry.name).isEqualTo("Café Télévision")
+        assertThat(entry.groupTitle).isEqualTo("Ciné – FR")
+        assertThat(entry.tvgId).isEqualTo("café-tv")
+    }
+
+    @Test
+    fun `parse_honorsValidatedIso88591Charset`() {
+        val iso88591 = Charsets.ISO_8859_1
+        val playlist = "#EXTM3U\n#EXTINF:-1 group-title=\"Télévision\",Café\nhttps://stream.example.com/cafe.ts\n"
+
+        val result = parser.parse(
+            playlist.toByteArray(iso88591).inputStream(),
+            declaredCharset = iso88591
+        )
+
+        assertThat(result.entries.single().name).isEqualTo("Café")
+        assertThat(result.entries.single().groupTitle).isEqualTo("Télévision")
+    }
+
+    @Test
+    fun `parse_bomTakesPrecedenceOverDeclaredCharset`() {
+        val playlist = "#EXTM3U\n#EXTINF:-1,Café\nhttps://stream.example.com/cafe.ts\n"
+        val utf8WithBom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) +
+            playlist.toByteArray(Charsets.UTF_8)
+
+        val result = parser.parse(
+            utf8WithBom.inputStream(),
+            declaredCharset = Charset.forName("windows-1252")
+        )
+
+        assertThat(result.entries.single().name).isEqualTo("Café")
+    }
+
+    @Test
+    fun `parse_ignoresUnsupportedDeclaredCharsetAndUsesUtf8Policy`() {
+        val playlist = "#EXTM3U\n#EXTINF:-1,Chaîne Été\nhttps://stream.example.com/ete.ts\n"
+
+        val result = parser.parse(
+            playlist.toByteArray(Charsets.UTF_8).inputStream(),
+            declaredCharset = Charset.forName("UTF-32BE")
+        )
+
+        assertThat(result.entries.single().name).isEqualTo("Chaîne Été")
+    }
+
+    @Test
+    fun `parse_invalidUtf8Sequence_fallsBackWithoutReplacementCharacters`() {
+        val prefix = "#EXTM3U\n#EXTINF:-1 group-title=\"Legacy\",".toByteArray()
+        val malformedName = byteArrayOf(0xC3.toByte(), 0x28)
+        val suffix = "\nhttps://stream.example.com/legacy.ts\n".toByteArray()
+
+        val result = parser.parse((prefix + malformedName + suffix).inputStream())
+
+        assertThat(result.entries.single().name).isEqualTo("Ã(")
+        assertThat(result.entries.single().name).doesNotContain("�")
+    }
+
+    @Test
+    fun `parseStreaming_windows1252Fallback_preservesAccentedEpgIdentity`() = runBlocking {
+        val entries = mutableListOf<M3uParser.M3uEntry>()
+        val playlist = "#EXTM3U\n#EXTINF:-1 tvg-id=\"chaîne-é\" group-title=\"Télé\",Chaîne Été\nhttps://stream.example.com/ete.ts\n"
+
+        parser.parseStreaming(
+            inputStream = playlist.toByteArray(Charset.forName("windows-1252")).inputStream(),
+            onEntry = entries::add
+        )
+
+        assertThat(entries.single().tvgId).isEqualTo("chaîne-é")
+        assertThat(entries.single().name).isEqualTo("Chaîne Été")
+    }
+
+    @Test
+    fun `parse_headerGuideUrls_deduplicatesAndCapsAtEightInSourceOrder`() {
+        val urls = (1..10).map { "https://epg.example.com/$it.xml" }
+        val headerUrls = (urls.take(2) + urls[0] + urls.drop(2)).joinToString(", ")
+        val result = parser.parse(
+            """
+                #EXTM3U x-tvg-url="$headerUrls"
+                #EXTINF:-1,News
+                https://stream.example.com/news.ts
+            """.trimIndent().byteInputStream()
+        )
+
+        assertThat(result.header.tvgUrls).containsExactlyElementsIn(urls.take(8)).inOrder()
     }
 
     @Test
@@ -323,8 +482,6 @@ class M3uParserTest {
 
     @Test
     fun `isVodEntry_movieExtension_returnsTrue`() {
-        // Create a throwaway SyncManager reference to access the internal helper
-        // We test via the M3uParser-level behaviour: parse a playlist and verify isVod logic
         val entries = parseEntries(buildPlaylist(
             "http://vod.example.com/avatar.mp4" to "Movies",
             "http://vod.example.com/inception.mkv" to "VOD",
@@ -332,15 +489,7 @@ class M3uParserTest {
         ))
 
         assertThat(entries).hasSize(3)
-        // All three entries should be classified as VOD by SyncManager
-        entries.forEach { entry ->
-            val url = entry.url.lowercase()
-            val group = entry.groupTitle.lowercase()
-            val isVod = url.endsWith(".mp4") || url.endsWith(".mkv") || url.endsWith(".avi") ||
-                    url.contains("/movie/") || group.contains("movie") ||
-                    group.contains("vod") || group.contains("film")
-            assertThat(isVod).isTrue()
-        }
+        entries.forEach { entry -> assertThat(M3uParser.isVodEntry(entry)).isTrue() }
     }
 
     @Test
@@ -351,14 +500,7 @@ class M3uParserTest {
         ))
 
         assertThat(entries).hasSize(2)
-        entries.forEach { entry ->
-            val url = entry.url.lowercase()
-            val group = entry.groupTitle.lowercase()
-            val isVod = url.endsWith(".mp4") || url.endsWith(".mkv") || url.endsWith(".avi") ||
-                    url.contains("/movie/") || group.contains("movie") ||
-                    group.contains("vod") || group.contains("film")
-            assertThat(isVod).isFalse()
-        }
+        entries.forEach { entry -> assertThat(M3uParser.isVodEntry(entry)).isFalse() }
     }
 
     // ── Helpers ────────────────────────────────────────────────────

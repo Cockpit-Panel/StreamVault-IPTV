@@ -80,11 +80,11 @@ internal fun PlayerViewModel.applyDefaultPlaybackTimersIfNeeded() {
     sleepTimerExitEmitted = false
     viewModelScope.launch {
         val stopMinutes = sanitizePlaybackTimerMinutes(
-            preferencesRepository.defaultStopPlaybackTimerMinutes.first(),
+            playerPreferencesCoordinator.defaultStopPlaybackTimerMinutes.first(),
             PlayerViewModel.PLAYBACK_TIMER_PRESETS_MINUTES
         )
         val idleMinutes = sanitizePlaybackTimerMinutes(
-            preferencesRepository.defaultIdleStandbyTimerMinutes.first(),
+            playerPreferencesCoordinator.defaultIdleStandbyTimerMinutes.first(),
             PlayerViewModel.PLAYBACK_TIMER_PRESETS_MINUTES
         )
         if (!playbackTimerDefaultsApplied || _sleepTimerUiState.value.stopTimerActive || _sleepTimerUiState.value.idleTimerActive) {

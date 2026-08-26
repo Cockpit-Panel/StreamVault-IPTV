@@ -22,24 +22,6 @@ internal data class LiveRecoveryCandidate(
     val variant: LiveChannelVariant? = null
 )
 
-internal fun buildPlayerRecoveryActions(
-    hasAlternateStream: Boolean,
-    hasLastChannel: Boolean,
-    shouldOfferGuide: Boolean
-): List<PlayerNoticeAction> {
-    val actions = mutableListOf(PlayerNoticeAction.RETRY)
-    if (hasAlternateStream) {
-        actions += PlayerNoticeAction.ALTERNATE_STREAM
-    }
-    if (hasLastChannel) {
-        actions += PlayerNoticeAction.LAST_CHANNEL
-    }
-    if (shouldOfferGuide) {
-        actions += PlayerNoticeAction.OPEN_GUIDE
-    }
-    return actions
-}
-
 internal fun selectNextAlternateUrl(
     candidateUrls: List<String>,
     currentStreamUrl: String,

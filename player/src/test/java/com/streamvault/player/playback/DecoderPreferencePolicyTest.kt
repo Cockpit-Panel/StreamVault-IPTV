@@ -50,4 +50,42 @@ class DecoderPreferencePolicyTest {
         assertThat(policy.onDecoderInitFailure(DecoderMode.SOFTWARE, mediaId)).isNull()
         assertThat(policy.onDecoderInitFailure(DecoderMode.COMPATIBILITY, mediaId)).isNull()
     }
+
+    @Test
+    fun `ambiguous decoder fallback forces software when either axis can retry software`() {
+        assertThat(
+            shouldForceSoftwareForAmbiguousDecoderFallback(
+                audioFallbackMode = DecoderMode.SOFTWARE,
+                videoFallbackMode = null
+            )
+        ).isTrue()
+        assertThat(
+            shouldForceSoftwareForAmbiguousDecoderFallback(
+                audioFallbackMode = null,
+                videoFallbackMode = DecoderMode.SOFTWARE
+            )
+        ).isTrue()
+        assertThat(
+            shouldForceSoftwareForAmbiguousDecoderFallback(
+                audioFallbackMode = DecoderMode.SOFTWARE,
+                videoFallbackMode = DecoderMode.SOFTWARE
+            )
+        ).isTrue()
+    }
+
+    @Test
+    fun `ambiguous decoder fallback does not force software without a software retry`() {
+        assertThat(
+            shouldForceSoftwareForAmbiguousDecoderFallback(
+                audioFallbackMode = null,
+                videoFallbackMode = null
+            )
+        ).isFalse()
+        assertThat(
+            shouldForceSoftwareForAmbiguousDecoderFallback(
+                audioFallbackMode = DecoderMode.HARDWARE,
+                videoFallbackMode = null
+            )
+        ).isFalse()
+    }
 }

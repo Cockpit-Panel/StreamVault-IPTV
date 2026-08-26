@@ -129,21 +129,45 @@ Notes:
 
 ## Privacy notes
 
-- The backup payload reuses the existing `BackupManager` JSON v5 export. Provider
-  passwords are already stripped (`BackupManagerImpl.exportConfig`, see the
-  `password = ""` line).
+- New pushes use timestamped v2 artifacts named like
+  `streamvault_backup_bundle_20260814_120000_123_a1b2c3d4.json`. Each contains the
+  exact current `BackupManager` JSON export text and the matching
+  provider-credentials snapshot. The app keeps the ten newest timestamped
+  bundles and lets the user choose a snapshot before preview/import. Pull also
+  accepts the original fixed-name v2 bundle, existing v1 bundles, and older
+  standalone backup/credentials files as read-only migration fallbacks.
+  Preserving the exported text keeps checksum verification compatible with
+  backups produced by older release builds. New local and Drive exports carry
+  the matching credentials field so a restored provider can sync immediately;
+  older backups without that field still require password re-entry.
 - Auth tokens fetched via `GoogleAuthUtil.getToken` are never logged.
 - The scope `drive.appdata` cannot read files outside the app's private folder.
 
+## Managing saved Drive backups
+
+Open **Settings → Backup & Restore → Manage Drive backups** to see the saved
+snapshots in newest-first order. The app asks for confirmation before deleting
+one. It validates the selected snapshot against the current `appDataFolder`
+listing, then refreshes the list after deletion. This prevents a stale screen
+from deleting an unrelated Drive file.
+
+For older installations that have a legacy standalone
+`streamvault_backup.json`, deleting that backup also attempts to remove its
+legacy `streamvault_credentials.json` companion. Current timestamped v2 bundles
+are self-contained, so only the selected bundle is deleted.
+
 ## Credentials storage (fork extension, M3)
 
-`drive-backup.json` carries the configuration *minus* passwords. The fork
-ships a **second sibling file** in the same `appDataFolder`:
+Each timestamped `streamvault_backup_bundle_*.json` carries the configuration plus
+its matching credentials snapshot in one versioned artifact. The current bundle
+stores the backup JSON text unchanged so the main backup checksum remains
+verifiable after Drive round-tripping. Older installations may still
+have a **second sibling file** in the same `appDataFolder`:
 
 - **`streamvault_credentials.json`** — `[{serverUrl, username, password}]`,
   cleartext.
 
-Why cleartext on Drive:
+Why cleartext in the bundle on Drive:
 
 - The file is invisible to the OS and to the standard Drive UI (the
   `drive.appdata` scope is the only path that can read it).
@@ -158,16 +182,16 @@ Why cleartext on Drive:
   model above.
 
 The local DB still stores credentials encrypted via
-`AndroidKeystoreCredentialCrypto`. Cleartext only exists inside the
-Drive `appDataFolder` and inside the in-memory pull result up to the
-moment of import confirm.
+`AndroidKeystoreCredentialCrypto`. Cleartext also exists in new local backup
+files and in the Drive `appDataFolder`; during import it is applied to the
+restored provider and then kept only in the encrypted local DB.
 
-Matching at pull time is by `(serverUrl, username)` so the provider
-ids reshuffled by the SAF import do not break the restore. Providers
-present locally but absent from the credentials file are left
-untouched.
+Matching is by `(serverUrl, username)` so provider IDs reshuffled by the SAF
+import do not break the restore. Providers present locally but absent from a
+credential snapshot are left untouched.
 
-Pre-M3 backups (no `streamvault_credentials.json` in `appDataFolder`)
-are handled gracefully: `pullCredentials` returns an empty list and
-the import path falls back to the master behavior (providers
-restored without passwords, user must re-enter them manually).
+Pre-bundle backups (no v2 bundle in `appDataFolder`) are handled gracefully: the
+pull path lists and falls back to the legacy standalone backup file;
+`pullCredentials` returns an empty list when no legacy credentials file exists, and
+the import path restores providers without passwords so the user can re-enter them
+manually.

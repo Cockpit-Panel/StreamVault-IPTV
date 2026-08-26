@@ -22,6 +22,7 @@ data class GitHubReleaseInfo(
     val versionCode: Int?,
     val releaseUrl: String,
     val downloadUrl: String?,
+    val downloadSha256: String?,
     val releaseNotes: String,
     val publishedAt: String?
 )
@@ -78,14 +79,15 @@ class GitHubReleaseChecker @Inject constructor(
                 if (releaseUrl.isBlank()) {
                     return@withContext Result.error("Update check failed: latest release URL is not HTTPS")
                 }
-                val downloadUrl = findApkAssetUrl(assets, updateChannel)
+                val downloadAsset = findApkAsset(assets, updateChannel)
 
                 return@withContext Result.success(
                     GitHubReleaseInfo(
                         versionName = parsedTag.versionName,
                         versionCode = parsedTag.versionCode,
                         releaseUrl = releaseUrl,
-                        downloadUrl = downloadUrl,
+                        downloadUrl = downloadAsset?.downloadUrl,
+                        downloadSha256 = downloadAsset?.sha256,
                         releaseNotes = notes,
                         publishedAt = json.optString("published_at").takeIf { it.isNotBlank() }
                     )
@@ -100,25 +102,27 @@ class GitHubReleaseChecker @Inject constructor(
 
     private fun selectReleaseJson(body: String, updateChannel: AppUpdateChannel): JSONObject? {
         val trimmed = body.trim()
-        if (trimmed.startsWith("[")) {
-            val releases = org.json.JSONArray(trimmed)
-            if (updateChannel == AppUpdateChannel.Stable) {
-                return if (releases.length() > 0) releases.optJSONObject(0) else null
-            }
-            for (index in 0 until releases.length()) {
-                val release = releases.optJSONObject(index) ?: continue
-                if (release.optBoolean("draft")) continue
-                if (!release.optBoolean("prerelease")) continue
-                val tagName = release.optString("tag_name")
-                if (!tagName.contains("-beta", ignoreCase = true)) continue
-                val downloadUrl = findApkAssetUrl(release.optJSONArray("assets"), updateChannel)
-                if (downloadUrl != null) {
-                    return release
-                }
-            }
+        if (!trimmed.startsWith("[")) return JSONObject(trimmed)
+        val releases = org.json.JSONArray(trimmed)
+        if (updateChannel == AppUpdateChannel.Stable) {
             return if (releases.length() > 0) releases.optJSONObject(0) else null
-        } else {
-            return JSONObject(trimmed)
+        }
+        return when (updateChannel) {
+            AppUpdateChannel.Stable -> null
+            AppUpdateChannel.Beta -> {
+                for (index in 0 until releases.length()) {
+                    val release = releases.optJSONObject(index) ?: continue
+                    if (release.optBoolean("draft")) continue
+                    if (!release.optBoolean("prerelease")) continue
+                    val tagName = release.optString("tag_name")
+                    if (!tagName.contains("-beta", ignoreCase = true)) continue
+                    val downloadAsset = findApkAsset(release.optJSONArray("assets"), updateChannel)
+                    if (downloadAsset != null) {
+                        return release
+                    }
+                }
+                if (releases.length() > 0) releases.optJSONObject(0) else null
+            }
         }
     }
 
@@ -150,41 +154,46 @@ class GitHubReleaseChecker @Inject constructor(
         return Result.success(output.toString(charset.name()))
     }
 
-    private fun findApkAssetUrl(assets: org.json.JSONArray?, updateChannel: AppUpdateChannel): String? {
+    private fun findApkAsset(assets: org.json.JSONArray?, updateChannel: AppUpdateChannel): ReleaseApkAsset? {
         if (assets == null) return null
-        var fallback: String? = null
+        var fallback: ReleaseApkAsset? = null
         for (index in 0 until assets.length()) {
             val asset = assets.optJSONObject(index) ?: continue
             val name = asset.optString("name")
             val url = asset.optString("browser_download_url").takeIf { it.isNotBlank() } ?: continue
             if (!isHttpsUrl(url)) continue
+            val releaseAsset = ReleaseApkAsset(
+                downloadUrl = url,
+                sha256 = parseReleaseAssetSha256Digest(asset.optString("digest"))
+            )
             when (updateChannel) {
                 AppUpdateChannel.Stable -> {
                     if (name.equals("StreamVault.apk", ignoreCase = true)) {
-                        return url
+                        return releaseAsset
                     }
                     if (fallback == null &&
                         name.endsWith(".apk", ignoreCase = true) &&
                         !name.contains("beta", ignoreCase = true)
                     ) {
-                        fallback = url
+                        fallback = releaseAsset
                     }
                 }
                 AppUpdateChannel.Beta -> {
                     if (name.equals("StreamVault-beta.apk", ignoreCase = true)) {
-                        return url
+                        return releaseAsset
                     }
                     if (fallback == null &&
                         name.endsWith(".apk", ignoreCase = true) &&
                         name.contains("beta", ignoreCase = true)
                     ) {
-                        fallback = url
+                        fallback = releaseAsset
                     }
                 }
             }
         }
         return fallback
     }
+
 
     private fun parseTagVersionInfo(rawTagName: String): ParsedTagVersion {
         val normalizedTag = rawTagName.trim()
@@ -211,6 +220,20 @@ class GitHubReleaseChecker @Inject constructor(
         }.getOrDefault(false)
     }
 }
+
+internal fun parseReleaseAssetSha256Digest(rawDigest: String): String? {
+    val value = rawDigest.trim()
+    if (!value.startsWith("sha256:", ignoreCase = true)) return null
+    val hex = value.substringAfter(':')
+    return hex.takeIf { SHA256_HEX_REGEX.matches(it) }?.lowercase()
+}
+
+private val SHA256_HEX_REGEX = Regex("""^[a-fA-F0-9]{64}$""")
+
+private data class ReleaseApkAsset(
+    val downloadUrl: String,
+    val sha256: String?
+)
 
 enum class AppUpdateChannel(val id: String, val releaseApiUrl: String) {
     Stable(id = "stable", releaseApiUrl = GITHUB_RELEASES_LATEST_URL),

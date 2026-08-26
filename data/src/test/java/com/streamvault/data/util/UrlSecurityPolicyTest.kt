@@ -92,4 +92,26 @@ class UrlSecurityPolicyTest {
         assertThat(UrlSecurityPolicy.sanitizeImportedAssetUrl("https://example.com/logo.png"))
             .isEqualTo("https://example.com/logo.png")
     }
+
+    @Test
+    fun `validateXtreamServerUrl accepts bare hostname without scheme`() {
+        assertThat(UrlSecurityPolicy.validateXtreamServerUrl("provider.example.com")).isNull()
+        assertThat(UrlSecurityPolicy.validateXtreamServerUrl("provider.example.com:8080")).isNull()
+    }
+
+    @Test
+    fun `validatePlaylistSourceUrl accepts bare hostname without scheme`() {
+        assertThat(UrlSecurityPolicy.validatePlaylistSourceUrl("example.com/playlist.m3u")).isNull()
+    }
+
+    @Test
+    fun `validateOptionalEpgUrl accepts bare hostname without scheme`() {
+        assertThat(UrlSecurityPolicy.validateOptionalEpgUrl("epg.example.com/guide.xml")).isNull()
+    }
+
+    @Test
+    fun `bare hostname with embedded credentials is still rejected`() {
+        assertThat(UrlSecurityPolicy.validateXtreamServerUrl("user@example.com"))
+            .isEqualTo("Xtream server URLs must not include embedded credentials.")
+    }
 }

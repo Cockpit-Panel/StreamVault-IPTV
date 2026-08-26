@@ -6,7 +6,11 @@ import androidx.room.RoomDatabase
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import com.streamvault.app.BuildConfig
 import com.streamvault.data.local.StreamVaultDatabase
+import com.streamvault.data.local.StreamVaultDatabaseMigrationRegistry
 import com.streamvault.data.local.dao.*
+import com.streamvault.data.remote.jellyfin.JellyfinProvider
+import com.google.gson.Gson
+import okhttp3.OkHttpClient
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -38,72 +42,16 @@ object DatabaseModule {
                     FrameworkSQLiteOpenHelperFactory()
                 }
             )
-            .addMigrations(
-                StreamVaultDatabase.MIGRATION_1_2,
-                StreamVaultDatabase.MIGRATION_2_3,
-                StreamVaultDatabase.MIGRATION_3_4,
-                StreamVaultDatabase.MIGRATION_4_5,
-                StreamVaultDatabase.MIGRATION_5_6,
-                StreamVaultDatabase.MIGRATION_6_7,
-                StreamVaultDatabase.MIGRATION_7_8,
-                StreamVaultDatabase.MIGRATION_8_9,
-                StreamVaultDatabase.MIGRATION_9_10,
-                StreamVaultDatabase.MIGRATION_10_11,
-                StreamVaultDatabase.MIGRATION_11_12,
-                StreamVaultDatabase.MIGRATION_12_13,
-                StreamVaultDatabase.MIGRATION_13_14,
-                StreamVaultDatabase.MIGRATION_14_15,
-                StreamVaultDatabase.MIGRATION_15_16,
-                StreamVaultDatabase.MIGRATION_16_17,
-                StreamVaultDatabase.MIGRATION_17_18,
-                StreamVaultDatabase.MIGRATION_18_19,
-                StreamVaultDatabase.MIGRATION_19_20,
-                StreamVaultDatabase.MIGRATION_20_21,
-                StreamVaultDatabase.MIGRATION_21_22,
-                StreamVaultDatabase.MIGRATION_22_23,
-                StreamVaultDatabase.MIGRATION_23_24,
-                StreamVaultDatabase.MIGRATION_24_25,
-                StreamVaultDatabase.MIGRATION_25_26,
-                StreamVaultDatabase.MIGRATION_26_27,
-                StreamVaultDatabase.MIGRATION_27_28,
-                StreamVaultDatabase.MIGRATION_28_29,
-                StreamVaultDatabase.MIGRATION_29_30,
-                StreamVaultDatabase.MIGRATION_30_31,
-                StreamVaultDatabase.MIGRATION_31_32,
-                StreamVaultDatabase.MIGRATION_32_33,
-                StreamVaultDatabase.MIGRATION_33_34,
-                StreamVaultDatabase.MIGRATION_34_35,
-                StreamVaultDatabase.MIGRATION_35_36,
-                StreamVaultDatabase.MIGRATION_36_37,
-                StreamVaultDatabase.MIGRATION_37_38,
-                StreamVaultDatabase.MIGRATION_38_39,
-                StreamVaultDatabase.MIGRATION_39_40,
-                StreamVaultDatabase.MIGRATION_40_41,
-                StreamVaultDatabase.MIGRATION_41_42,
-                StreamVaultDatabase.MIGRATION_42_43,
-                StreamVaultDatabase.MIGRATION_43_44,
-                StreamVaultDatabase.MIGRATION_44_45,
-                StreamVaultDatabase.MIGRATION_45_46,
-                StreamVaultDatabase.MIGRATION_46_47,
-                StreamVaultDatabase.MIGRATION_47_48,
-                StreamVaultDatabase.MIGRATION_48_49,
-                StreamVaultDatabase.MIGRATION_49_50,
-                StreamVaultDatabase.MIGRATION_50_51,
-                StreamVaultDatabase.MIGRATION_51_52,
-                StreamVaultDatabase.MIGRATION_52_53,
-                StreamVaultDatabase.MIGRATION_53_54,
-                StreamVaultDatabase.MIGRATION_54_55,
-                StreamVaultDatabase.MIGRATION_55_56,
-                StreamVaultDatabase.MIGRATION_56_57,
-                StreamVaultDatabase.MIGRATION_57_58,
-                StreamVaultDatabase.MIGRATION_58_59,
-                StreamVaultDatabase.MIGRATION_59_60
-            )
+            .addMigrations(*StreamVaultDatabaseMigrationRegistry.all.toTypedArray())
             // NOTE: fallbackToDestructiveMigration() intentionally removed.
             // All future schema changes MUST add a corresponding Migration in StreamVaultDatabase.
             .build()
 
+    @Provides @Singleton
+    fun provideJellyfinProvider(okHttpClient: OkHttpClient, gson: Gson): JellyfinProvider = JellyfinProvider(okHttpClient, gson)
+
     @Provides fun provideProviderDao(db: StreamVaultDatabase): ProviderDao = db.providerDao()
+    @Provides fun provideProviderSnapshotDao(db: StreamVaultDatabase): ProviderSnapshotDao = db.providerSnapshotDao()
     @Provides fun provideChannelDao(db: StreamVaultDatabase): ChannelDao = db.channelDao()
     @Provides fun provideChannelPreferenceDao(db: StreamVaultDatabase): ChannelPreferenceDao = db.channelPreferenceDao()
     @Provides fun provideMovieDao(db: StreamVaultDatabase): MovieDao = db.movieDao()
@@ -121,6 +69,8 @@ object DatabaseModule {
     @Provides fun provideSyncMetadataDao(db: StreamVaultDatabase): SyncMetadataDao = db.syncMetadataDao()
     @Provides fun provideMovieCategoryHydrationDao(db: StreamVaultDatabase): MovieCategoryHydrationDao = db.movieCategoryHydrationDao()
     @Provides fun provideSeriesCategoryHydrationDao(db: StreamVaultDatabase): SeriesCategoryHydrationDao = db.seriesCategoryHydrationDao()
+    @Provides fun provideVodCategoryHydrationDao(db: StreamVaultDatabase): VodCategoryHydrationDao = db.vodCategoryHydrationDao()
+    @Provides fun provideVodCatalogEntryDao(db: StreamVaultDatabase): VodCatalogEntryDao = db.vodCatalogEntryDao()
     @Provides fun provideEpgSourceDao(db: StreamVaultDatabase): EpgSourceDao = db.epgSourceDao()
     @Provides fun provideProviderEpgSourceDao(db: StreamVaultDatabase): ProviderEpgSourceDao = db.providerEpgSourceDao()
     @Provides fun provideEpgChannelDao(db: StreamVaultDatabase): EpgChannelDao = db.epgChannelDao()
@@ -136,5 +86,16 @@ object DatabaseModule {
     @Provides fun provideXtreamContentIndexDao(db: StreamVaultDatabase): XtreamContentIndexDao = db.xtreamContentIndexDao()
     @Provides fun provideXtreamIndexJobDao(db: StreamVaultDatabase): XtreamIndexJobDao = db.xtreamIndexJobDao()
     @Provides fun provideXtreamLiveOnboardingDao(db: StreamVaultDatabase): XtreamLiveOnboardingDao = db.xtreamLiveOnboardingDao()
+    @Provides fun provideStalkerIndexJobDao(db: StreamVaultDatabase): StalkerIndexJobDao = db.stalkerIndexJobDao()
+    @Provides fun provideStalkerPortalStateDao(db: StreamVaultDatabase): StalkerPortalStateDao = db.stalkerPortalStateDao()
+    @Provides fun provideStalkerRemoteIdentityDao(db: StreamVaultDatabase): StalkerRemoteIdentityDao = db.stalkerRemoteIdentityDao()
+    @Provides fun provideStalkerDiscoveryStageDao(db: StreamVaultDatabase): StalkerDiscoveryStageDao = db.stalkerDiscoveryStageDao()
     @Provides fun provideDownloadDao(db: StreamVaultDatabase): DownloadDao = db.downloadDao()
+    @Provides fun provideProviderDeletionCleanupDao(db: StreamVaultDatabase): ProviderDeletionCleanupDao = db.providerDeletionCleanupDao()
+    @Provides fun provideProviderConfigRevisionDao(db: StreamVaultDatabase): ProviderConfigRevisionDao = db.providerConfigRevisionDao()
+    @Provides fun provideBackupRestoreCheckpointDao(db: StreamVaultDatabase): BackupRestoreCheckpointDao = db.backupRestoreCheckpointDao()
+    @Provides fun provideBackupRestoreLedgerDao(db: StreamVaultDatabase): BackupRestoreLedgerDao = db.backupRestoreLedgerDao()
+    @Provides fun provideProviderWorkflowDao(db: StreamVaultDatabase): ProviderWorkflowDao = db.providerWorkflowDao()
+    @Provides fun provideM3uClassificationDao(db: StreamVaultDatabase): M3uClassificationDao = db.m3uClassificationDao()
+    @Provides fun providePluginProviderOwnershipDao(db: StreamVaultDatabase): PluginProviderOwnershipDao = db.pluginProviderOwnershipDao()
 }

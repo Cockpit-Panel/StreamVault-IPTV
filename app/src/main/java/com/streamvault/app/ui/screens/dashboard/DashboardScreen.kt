@@ -23,12 +23,14 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,6 +75,7 @@ import com.streamvault.app.ui.design.AppColors.TextPrimary as OnBackground
 import com.streamvault.app.ui.design.AppColors.TextPrimary as TextPrimary
 import com.streamvault.app.ui.design.AppColors.TextTertiary as OnSurfaceDim
 import com.streamvault.app.ui.design.AppColors.TextTertiary as TextTertiary
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Movie
 import com.streamvault.domain.model.PlaybackHistory
@@ -103,6 +106,7 @@ fun DashboardScreen(
     val scheduledChannelIds by viewModel.scheduledChannelIds.collectAsStateWithLifecycle()
     val provider = uiState.provider
     val snackbarHostState = remember { SnackbarHostState() }
+    var showHomeCustomizationDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.userMessage) {
         uiState.userMessage?.let { message ->
@@ -129,6 +133,24 @@ fun DashboardScreen(
                 return@AppScreenScaffold
             }
             val orderedSections = rememberDashboardSections(uiState)
+            val onContinueWatchingItemClick: (PlaybackHistory) -> Unit = { history ->
+                val rawSeriesId = history.seriesId ?: history.contentId
+                val presentedSeries = if (
+                    history.contentType == com.streamvault.domain.model.ContentType.SERIES ||
+                    history.contentType == com.streamvault.domain.model.ContentType.SERIES_EPISODE
+                ) {
+                    uiState.continueWatchingSeries.firstOrNull { series ->
+                        series.rawSeriesIdsForNavigation().contains(rawSeriesId)
+                    }
+                } else {
+                    null
+                }
+                if (presentedSeries != null) {
+                    onSeriesClick(presentedSeries)
+                } else {
+                    onPlaybackHistoryClick(history)
+                }
+            }
 
             androidx.compose.foundation.lazy.LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -163,9 +185,9 @@ fun DashboardScreen(
                         )
                     }
                 }
-                items(orderedSections, key = { it.name }) { section ->
+                items(orderedSections, key = { it.storageValue }) { section ->
                     when (section) {
-                    DashboardHomeSection.LIVE_SHORTCUTS -> DashboardShortcutRow(
+                    AppHomeDashboardShelf.LIVE_SHORTCUTS -> DashboardShortcutRow(
                         title = stringResource(R.string.dashboard_live_shortcuts),
                         subtitle = stringResource(R.string.dashboard_live_shortcuts_subtitle),
                         shortcuts = uiState.liveShortcuts,
@@ -176,7 +198,7 @@ fun DashboardScreen(
                         }
                     )
 
-                    DashboardHomeSection.FAVORITE_CHANNELS -> FavoriteChannelsRow(
+                    AppHomeDashboardShelf.FAVORITE_CHANNELS -> FavoriteChannelsRow(
                         title = stringResource(R.string.dashboard_favorite_channels),
                         channels = uiState.favoriteChannels,
                         onSeeAll = { onNavigate(Routes.liveTv(com.streamvault.domain.model.VirtualCategoryIds.FAVORITES)) },
@@ -185,7 +207,7 @@ fun DashboardScreen(
                         }
                     )
 
-                    DashboardHomeSection.RECENT_CHANNELS -> CategoryRow(
+                    AppHomeDashboardShelf.RECENT_CHANNELS -> CategoryRow(
                         title = stringResource(R.string.dashboard_recent_channels),
                         items = uiState.recentChannels,
                         keySelector = { it.id },
@@ -199,13 +221,12 @@ fun DashboardScreen(
                         )
                     }
 
-                    DashboardHomeSection.CONTINUE_WATCHING -> ContinueWatchingRow(
+                    AppHomeDashboardShelf.CONTINUE_WATCHING -> ContinueWatchingRow(
                         items = uiState.continueWatching,
-                        onItemClick = onPlaybackHistoryClick,
-                        onClear = { viewModel.clearContinueWatching() }
+                        onItemClick = onContinueWatchingItemClick
                     )
 
-                    DashboardHomeSection.RECENT_MOVIES -> CategoryRow(
+                    AppHomeDashboardShelf.RECENT_MOVIES -> CategoryRow(
                         title = stringResource(R.string.dashboard_recent_movies),
                         items = uiState.recentMovies,
                         keySelector = { it.id },
@@ -217,7 +238,7 @@ fun DashboardScreen(
                         )
                     }
 
-                    DashboardHomeSection.RECENT_SERIES -> CategoryRow(
+                    AppHomeDashboardShelf.RECENT_SERIES -> CategoryRow(
                         title = stringResource(R.string.dashboard_recent_series),
                         items = uiState.recentSeries,
                         keySelector = { it.id },
@@ -229,6 +250,58 @@ fun DashboardScreen(
                             onClick = { onSeriesClick(series) }
                         )
                     }
+
+                    AppHomeDashboardShelf.FAVORITE_MOVIES -> CategoryRow(
+                        title = stringResource(R.string.dashboard_favorite_movies),
+                        items = uiState.favoriteMovies,
+                        keySelector = { it.id },
+                        onSeeAll = { onNavigate(Routes.MOVIES) }
+                    ) { movie ->
+                        MovieCard(movie = movie, onClick = { onMovieClick(movie) })
+                    }
+
+                    AppHomeDashboardShelf.FAVORITE_SERIES -> CategoryRow(
+                        title = stringResource(R.string.dashboard_favorite_series),
+                        items = uiState.favoriteSeries,
+                        keySelector = { it.id },
+                        onSeeAll = { onNavigate(Routes.SERIES) }
+                    ) { series ->
+                        SeriesCard(
+                            series = series,
+                            subtitle = series.releaseDate ?: stringResource(R.string.dashboard_updated_series_badge),
+                            onClick = { onSeriesClick(series) }
+                        )
+                    }
+
+                    AppHomeDashboardShelf.CONTINUE_WATCHING_MOVIES -> ContinueWatchingRow(
+                        title = stringResource(R.string.dashboard_continue_watching_movies),
+                        items = uiState.continueWatchingMovies,
+                        onItemClick = onPlaybackHistoryClick
+                    )
+
+                    AppHomeDashboardShelf.CONTINUE_WATCHING_SERIES -> ContinueWatchingRow(
+                        title = stringResource(R.string.dashboard_continue_watching_series),
+                        items = uiState.continueWatchingSeriesItems,
+                        onItemClick = onContinueWatchingItemClick
+                    )
+
+                    AppHomeDashboardShelf.TOP_RATED_MOVIES -> CategoryRow(
+                        title = stringResource(R.string.dashboard_top_rated_movies),
+                        items = uiState.topRatedMovies,
+                        keySelector = { it.id },
+                        onSeeAll = { onNavigate(Routes.MOVIES) }
+                    ) { movie ->
+                        MovieCard(movie = movie, onClick = { onMovieClick(movie) })
+                    }
+
+                    AppHomeDashboardShelf.RECOMMENDED_MOVIES -> CategoryRow(
+                        title = stringResource(R.string.dashboard_recommended_movies),
+                        items = uiState.recommendedMovies,
+                        keySelector = { it.id },
+                        onSeeAll = { onNavigate(Routes.MOVIES) }
+                    ) { movie ->
+                        MovieCard(movie = movie, onClick = { onMovieClick(movie) })
+                    }
                 }
             }
             }
@@ -239,6 +312,17 @@ fun DashboardScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 16.dp)
+        )
+    }
+
+    if (showHomeCustomizationDialog) {
+        DashboardShelfCustomizationDialog(
+            currentShelves = uiState.homeDashboardShelves,
+            onDismiss = { showHomeCustomizationDialog = false },
+            onSave = { shelves ->
+                viewModel.setHomeDashboardShelves(shelves)
+                showHomeCustomizationDialog = false
+            }
         )
     }
 }
@@ -325,6 +409,9 @@ private fun DashboardHero(
         )
     }
 }
+
+private fun Series.rawSeriesIdsForNavigation(): List<Long> =
+    variants.map { it.rawSeriesId }.ifEmpty { listOf(selectedVariantId ?: id) }
 
 @Composable
 private fun DashboardStatRow(
@@ -526,6 +613,7 @@ private fun DashboardProviderHealthCard(
         com.streamvault.domain.model.ProviderType.XTREAM_CODES -> stringResource(R.string.dashboard_provider_xtream)
         com.streamvault.domain.model.ProviderType.M3U -> stringResource(R.string.dashboard_provider_m3u)
         com.streamvault.domain.model.ProviderType.STALKER_PORTAL -> "Stalker/MAG Portal"
+        com.streamvault.domain.model.ProviderType.JELLYFIN -> "Jellyfin"
     }
 
     Surface(
@@ -686,7 +774,9 @@ private fun DashboardUpdateCard(
             )
             Text(
                 text = stringResource(
-                    if (notice.installReady) {
+                    if (notice.installPermissionRequired) {
+                        R.string.dashboard_update_install_permission_required
+                    } else if (notice.installReady) {
                         R.string.dashboard_update_install_ready
                     } else {
                         R.string.dashboard_update_available
@@ -698,14 +788,16 @@ private fun DashboardUpdateCard(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 DashboardActionButton(
                     label = stringResource(
-                        if (notice.installReady) {
+                        if (notice.installPermissionRequired) {
+                            R.string.dashboard_update_allow_installs
+                        } else if (notice.installReady) {
                             R.string.dashboard_update_open_installer
                         } else {
                             R.string.dashboard_update_open_settings
                         }
                     ),
                     onClick = {
-                        if (notice.installReady) {
+                        if (notice.installReady || notice.installPermissionRequired) {
                             onInstallUpdate()
                         } else {
                             onOpenSettings()
@@ -780,45 +872,24 @@ private fun EmptyDashboard(
 @Composable
 private fun rememberDashboardSections(
     uiState: DashboardUiState
-): List<DashboardHomeSection> {
+): List<AppHomeDashboardShelf> {
     return remember(
-        uiState.feature.actionType,
+        uiState.homeDashboardShelves,
         uiState.liveShortcuts,
         uiState.favoriteChannels,
         uiState.recentChannels,
         uiState.continueWatching,
+        uiState.continueWatchingMovies,
+        uiState.continueWatchingSeriesItems,
+        uiState.favoriteMovies,
+        uiState.favoriteSeries,
         uiState.recentMovies,
-        uiState.recentSeries
+        uiState.recentSeries,
+        uiState.topRatedMovies,
+        uiState.recommendedMovies
     ) {
-        val preferred = listOf(
-            DashboardHomeSection.FAVORITE_CHANNELS,
-            DashboardHomeSection.RECENT_CHANNELS,
-            DashboardHomeSection.LIVE_SHORTCUTS,
-            DashboardHomeSection.CONTINUE_WATCHING,
-            DashboardHomeSection.RECENT_MOVIES,
-            DashboardHomeSection.RECENT_SERIES
-        )
-
-        preferred.filter { section ->
-            when (section) {
-                DashboardHomeSection.LIVE_SHORTCUTS -> uiState.liveShortcuts.isNotEmpty()
-                DashboardHomeSection.FAVORITE_CHANNELS -> uiState.favoriteChannels.isNotEmpty()
-                DashboardHomeSection.RECENT_CHANNELS -> uiState.recentChannels.isNotEmpty()
-                DashboardHomeSection.CONTINUE_WATCHING -> uiState.continueWatching.isNotEmpty()
-                DashboardHomeSection.RECENT_MOVIES -> uiState.recentMovies.isNotEmpty()
-                DashboardHomeSection.RECENT_SERIES -> uiState.recentSeries.isNotEmpty()
-            }
-        }
+        resolveVisibleDashboardShelves(uiState)
     }
-}
-
-private enum class DashboardHomeSection {
-    LIVE_SHORTCUTS,
-    FAVORITE_CHANNELS,
-    RECENT_CHANNELS,
-    CONTINUE_WATCHING,
-    RECENT_MOVIES,
-    RECENT_SERIES
 }
 
 @Composable

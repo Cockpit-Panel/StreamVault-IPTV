@@ -1,6 +1,7 @@
 package com.streamvault.player.stats
 
 import androidx.media3.common.Format
+import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
 import com.streamvault.domain.model.VideoFormat
 import com.streamvault.player.PlaybackState
@@ -148,7 +149,11 @@ class PlayerStatsCollector(
                             bitrate   = video?.bitrate?.takeIf { it > 0 } ?: 0,
                             codecV = video?.sampleMimeType ?: video?.codecs,
                             codecA = audio?.sampleMimeType ?: audio?.codecs,
-                            pixelWidthHeightRatio = video?.pixelWidthHeightRatio?.takeIf { it > 0f } ?: 1f
+                            pixelWidthHeightRatio = video?.pixelWidthHeightRatio?.takeIf { it > 0f } ?: 1f,
+                            isHdr = video?.colorInfo?.colorTransfer in setOf(
+                                C.COLOR_TRANSFER_ST2084,
+                                C.COLOR_TRANSFER_HLG
+                            )
                         )
                         playerStats.value = playerStats.value.copy(
                             videoCodec        = video?.sampleMimeType ?: video?.codecs

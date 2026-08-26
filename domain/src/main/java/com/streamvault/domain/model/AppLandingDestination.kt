@@ -3,6 +3,8 @@ package com.streamvault.domain.model
 enum class AppLandingDestination(val storageValue: String) {
     HOME("home"),
     LIVE_TV("live_tv"),
+    FIRST_FAVORITE_LIVE("first_favorite_live"),
+    LAST_WATCHED_LIVE("last_watched_live"),
     MOVIES("movies"),
     SERIES("series"),
     GUIDE("guide"),

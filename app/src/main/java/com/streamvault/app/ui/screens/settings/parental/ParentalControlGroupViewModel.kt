@@ -58,12 +58,14 @@ class ParentalControlGroupViewModel @Inject constructor(
     private val hiddenCategoriesByType = combine(
         preferencesRepository.getHiddenCategoryIds(providerId, ContentType.LIVE),
         preferencesRepository.getHiddenCategoryIds(providerId, ContentType.MOVIE),
-        preferencesRepository.getHiddenCategoryIds(providerId, ContentType.SERIES)
-    ) { hiddenLive: Set<Long>, hiddenMovies: Set<Long>, hiddenSeries: Set<Long> ->
+        preferencesRepository.getHiddenCategoryIds(providerId, ContentType.SERIES),
+        preferencesRepository.getHiddenCategoryIds(providerId, ContentType.VOD)
+    ) { hiddenLive: Set<Long>, hiddenMovies: Set<Long>, hiddenSeries: Set<Long>, hiddenVod: Set<Long> ->
         mapOf(
             ContentType.LIVE to hiddenLive,
             ContentType.MOVIE to hiddenMovies,
-            ContentType.SERIES to hiddenSeries
+            ContentType.SERIES to hiddenSeries,
+            ContentType.VOD to hiddenVod
         )
     }
 
@@ -217,6 +219,7 @@ private fun categoryControlKey(category: Category): String = "${category.type.na
 private fun contentTypeMessageLabel(type: ContentType): String = when (type) {
     ContentType.LIVE -> "Live TV"
     ContentType.MOVIE -> "Movie"
+    ContentType.VOD -> "VOD"
     ContentType.SERIES,
     ContentType.SERIES_EPISODE -> "Series"
 }

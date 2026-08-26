@@ -43,12 +43,15 @@ import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.RemoteColorButton
 import com.streamvault.domain.model.RemoteShortcutProfile
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 
 internal fun LazyListScope.settingsBrowsingSection(
     uiState: SettingsUiState,
     viewModel: SettingsViewModel,
     context: android.content.Context,
     appLandingDestinationLabel: String,
+    topNavigationSummaryLabel: String,
+    homeDashboardSummaryLabel: String,
     guideDefaultCategoryLabel: String,
     timeFormatLabel: String,
     appLanguageLabel: String,
@@ -59,10 +62,14 @@ internal fun LazyListScope.settingsBrowsingSection(
     onShowLiveChannelGroupingDialogChange: (Boolean) -> Unit,
     onShowGroupedChannelLabelDialogChange: (Boolean) -> Unit,
     onShowLiveVariantPreferenceDialogChange: (Boolean) -> Unit,
+    onShowTopNavigationDialogChange: (Boolean) -> Unit,
+    onShowHomeDashboardDialogChange: (Boolean) -> Unit,
     onShowLandingScreenDialogChange: (Boolean) -> Unit,
     onShowGuideDefaultCategoryDialogChange: (Boolean) -> Unit,
     onShowTimeFormatDialogChange: (Boolean) -> Unit,
     onShowVodViewModeDialogChange: (Boolean) -> Unit,
+    onShowVodDuplicateHandlingDialogChange: (Boolean) -> Unit,
+    onShowVodVariantPreferenceDialogChange: (Boolean) -> Unit,
     onCategorySortDialogTypeChange: (String?) -> Unit,
     onShowLanguageDialogChange: (Boolean) -> Unit,
     onRemoteShortcutDialogTargetChange: (RemoteShortcutDialogTarget?) -> Unit
@@ -72,6 +79,16 @@ internal fun LazyListScope.settingsBrowsingSection(
             label = stringResource(R.string.settings_live_tv_channel_mode),
             value = stringResource(uiState.liveTvChannelMode.labelResId()),
             onClick = { onShowLiveTvModeDialogChange(true) }
+        )
+        ClickableSettingsRow(
+            label = stringResource(R.string.settings_top_navigation),
+            value = topNavigationSummaryLabel,
+            onClick = { onShowTopNavigationDialogChange(true) }
+        )
+        ClickableSettingsRow(
+            label = stringResource(R.string.settings_customize_home),
+            value = homeDashboardSummaryLabel,
+            onClick = { onShowHomeDashboardDialogChange(true) }
         )
         ClickableSettingsRow(
             label = stringResource(R.string.settings_default_landing_screen),
@@ -98,6 +115,28 @@ internal fun LazyListScope.settingsBrowsingSection(
                     Text(text = stringResource(R.string.settings_show_live_source_switcher_subtitle), style = MaterialTheme.typography.bodySmall, color = OnBackground.copy(alpha = 0.6f))
                 }
                 Switch(checked = uiState.showLiveSourceSwitcher, onCheckedChange = { viewModel.setShowLiveSourceSwitcher(it) })
+            }
+        }
+        TvClickableSurface(
+            onClick = { viewModel.setShowFavoritesCategory(!uiState.showFavoritesCategory) },
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color.Transparent,
+                focusedContainerColor = Primary.copy(alpha = 0.15f)
+            ),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = stringResource(R.string.settings_show_favorites_category), style = MaterialTheme.typography.bodyMedium, color = OnSurface)
+                    Text(text = stringResource(R.string.settings_show_favorites_category_subtitle), style = MaterialTheme.typography.bodySmall, color = OnBackground.copy(alpha = 0.6f))
+                }
+                Switch(checked = uiState.showFavoritesCategory, onCheckedChange = { viewModel.setShowFavoritesCategory(it) })
             }
         }
         TvClickableSurface(
@@ -154,6 +193,28 @@ internal fun LazyListScope.settingsBrowsingSection(
             value = stringResource(uiState.liveTvQuickFilterVisibilityMode.labelResId()),
             onClick = { onShowLiveTvQuickFilterVisibilityDialogChange(true) }
         )
+        TvClickableSurface(
+            onClick = { viewModel.setHideDecorativeLiveRows(!uiState.hideDecorativeLiveRows) },
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color.Transparent,
+                focusedContainerColor = Primary.copy(alpha = 0.15f)
+            ),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = stringResource(R.string.settings_hide_decorative_live_rows), style = MaterialTheme.typography.bodyMedium, color = OnSurface)
+                    Text(text = stringResource(R.string.settings_hide_decorative_live_rows_subtitle), style = MaterialTheme.typography.bodySmall, color = OnBackground.copy(alpha = 0.6f))
+                }
+                Switch(checked = uiState.hideDecorativeLiveRows, onCheckedChange = { viewModel.setHideDecorativeLiveRows(it) })
+            }
+        }
         ClickableSettingsRow(
             label = stringResource(R.string.settings_live_channel_numbering_mode),
             value = stringResource(uiState.liveChannelNumberingMode.labelResId()),
@@ -194,6 +255,19 @@ internal fun LazyListScope.settingsBrowsingSection(
             onClick = { onShowVodViewModeDialogChange(true) }
         )
         SwitchSettingsRow(
+            label = stringResource(R.string.settings_vod_complete_on_open),
+            value = stringResource(
+                if (uiState.vodCategoryLoadMode == com.streamvault.domain.model.VodCategoryLoadMode.COMPLETE_ON_OPEN) {
+                    R.string.settings_vod_complete_on_open_on
+                } else {
+                    R.string.settings_vod_complete_on_open_off
+                }
+            ),
+            checked = uiState.vodCategoryLoadMode == com.streamvault.domain.model.VodCategoryLoadMode.COMPLETE_ON_OPEN,
+            onCheckedChange = { viewModel.setVodCompleteOnOpen(it) },
+            indent = 24.dp
+        )
+        SwitchSettingsRow(
             label = stringResource(R.string.settings_vod_infinite_scroll),
             value = stringResource(
                 if (uiState.vodInfiniteScroll) R.string.settings_vod_infinite_scroll_on
@@ -201,7 +275,18 @@ internal fun LazyListScope.settingsBrowsingSection(
             ),
             checked = uiState.vodInfiniteScroll,
             onCheckedChange = { viewModel.setVodInfiniteScroll(it) },
-            enabled = uiState.vodViewMode == VodViewMode.MODERN,
+            indent = 24.dp
+        )
+        ClickableSettingsRow(
+            label = stringResource(R.string.settings_vod_duplicate_handling_mode),
+            value = stringResource(uiState.vodDuplicateHandlingMode.labelResId()),
+            onClick = { onShowVodDuplicateHandlingDialogChange(true) }
+        )
+        ClickableSettingsRow(
+            label = stringResource(R.string.settings_vod_variant_preference_mode),
+            value = stringResource(uiState.vodVariantPreferenceMode.labelResId()),
+            onClick = { onShowVodVariantPreferenceDialogChange(true) },
+            enabled = uiState.vodDuplicateHandlingMode != VodDuplicateHandlingMode.SHOW_ALL,
             indent = 24.dp
         )
         HorizontalDivider(color = Color.White.copy(alpha = 0.07f), modifier = Modifier.padding(vertical = 4.dp))

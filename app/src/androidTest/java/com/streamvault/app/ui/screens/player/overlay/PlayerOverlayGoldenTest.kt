@@ -38,6 +38,7 @@ class PlayerOverlayGoldenTest {
                         contentType = "MOVIE",
                         isPlaying = true,
                         currentProgram = null,
+                        currentChannel = null,
                         currentChannelName = null,
                         displayChannelNumber = TestFixtures.displayChannelNumber,
                         currentPosition = TestFixtures.currentPositionMs,

@@ -1,6 +1,5 @@
 package com.streamvault.app.ui.notifications
 
-import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -67,7 +66,7 @@ internal fun rememberNotificationPermissionGate(
                 needsNotificationRuntimePermission(context) -> {
                     pendingReminderAction = action
                     pendingRequestType = NotificationPermissionRequestType.REMINDER
-                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    permissionLauncher.launch(POST_NOTIFICATIONS_PERMISSION)
                 }
                 else -> {
                     pendingReminderAction = null
@@ -81,7 +80,7 @@ internal fun rememberNotificationPermissionGate(
                 needsNotificationRuntimePermission(context) -> {
                     pendingReminderAction = null
                     pendingRequestType = NotificationPermissionRequestType.RECORDING_ALERTS
-                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    permissionLauncher.launch(POST_NOTIFICATIONS_PERMISSION)
                 }
                 !notificationsEnabled(context) -> onNotificationsBlocked(recordingBlockedMessage)
             }
@@ -94,10 +93,12 @@ private fun needsNotificationRuntimePermission(context: Context): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
         return false
     }
-    return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    return ContextCompat.checkSelfPermission(context, POST_NOTIFICATIONS_PERMISSION) != PackageManager.PERMISSION_GRANTED
 }
 
 private fun notificationsEnabled(context: Context): Boolean {
     return !needsNotificationRuntimePermission(context) &&
         NotificationManagerCompat.from(context).areNotificationsEnabled()
 }
+
+private const val POST_NOTIFICATIONS_PERMISSION = "android.permission.POST_NOTIFICATIONS"

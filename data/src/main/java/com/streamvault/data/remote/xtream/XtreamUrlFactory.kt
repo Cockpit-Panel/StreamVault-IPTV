@@ -306,6 +306,7 @@ object XtreamUrlFactory {
 
     fun kindForContentType(contentType: ContentType): XtreamStreamKind? = when (contentType) {
         ContentType.LIVE -> XtreamStreamKind.LIVE
+        ContentType.VOD -> null
         ContentType.MOVIE -> XtreamStreamKind.MOVIE
         ContentType.SERIES_EPISODE -> XtreamStreamKind.SERIES
         ContentType.SERIES -> null

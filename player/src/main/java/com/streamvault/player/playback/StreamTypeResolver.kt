@@ -23,8 +23,20 @@ object StreamTypeResolver {
     )
     private val dashMimeHints = listOf("application/dash+xml")
     private val smoothStreamingMimeHints = listOf("application/vnd.ms-sstr+xml", "text/xml")
-    private val hlsQueryHints = listOf("ext=m3u8", "output=m3u8", "format=m3u8", "type=m3u8")
-    private val tsQueryHints = listOf("ext=ts", "output=ts", "format=ts", "type=ts")
+    private val hlsQueryHints = listOf(
+        "ext=m3u8",
+        "extension=m3u8",
+        "output=m3u8",
+        "format=m3u8",
+        "type=m3u8"
+    )
+    private val tsQueryHints = listOf(
+        "ext=ts",
+        "extension=ts",
+        "output=ts",
+        "format=ts",
+        "type=ts"
+    )
     private val hlsLiveAliases = setOf("sd", "hd", "fhd", "uhd", "4k", "playlist", "master", "index")
 
     fun resolve(streamInfo: StreamInfo, mimeType: String? = null): ResolvedStreamType {

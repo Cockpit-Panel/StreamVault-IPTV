@@ -18,6 +18,48 @@ dependencies {
     kover(project(":player"))
 }
 
+tasks.register("verifyLintBaseline") {
+    group = "verification"
+    description = "Verifies that the committed lint baseline is present and non-empty."
+    doLast {
+        val baselinePaths = listOf(
+            "app/lint-baseline.xml",
+            "data/lint-baseline.xml",
+            "player/lint-baseline.xml"
+        )
+        val issuePattern = Regex("""<issue(?:\s|>)""")
+        val issueIdPattern = Regex("""<issue\b[^>]*\bid=\"([^\"]+)\"""")
+
+        baselinePaths.forEach { path ->
+            val baseline = rootProject.file(path)
+            check(baseline.isFile) {
+                "Lint baseline not found: $path"
+            }
+
+            val content = baseline.readText()
+            val issueCount = issuePattern.findAll(content).count()
+            check(issueCount > 0) {
+                "Lint baseline is empty; remove it and require a clean lint run: $path"
+            }
+
+            val issueTypeCount = issueIdPattern.findAll(content)
+                .map { it.groupValues[1] }
+                .toSet()
+                .size
+            check(issueTypeCount > 0) {
+                "Lint baseline contains no issue identifiers: $path"
+            }
+            println("$path contains $issueCount issue records across $issueTypeCount issue types.")
+
+            // Baselines are intentionally committed and owned. This check prevents a later
+            // change from silently deleting the accepted backlog to make CI green.
+            check("by=\"lint " in content) {
+                "Lint baseline must retain the generated marker for reviewability: $path"
+            }
+        }
+    }
+}
+
 kover {
     currentProject {
         createVariant("ci") {}

@@ -13,17 +13,24 @@ import com.streamvault.data.local.dao.XtreamIndexJobDao
 import com.streamvault.data.local.DatabaseTransactionRunner
 import com.streamvault.data.local.entity.FavoriteEntity
 import com.streamvault.data.local.entity.MovieBrowseEntity
+import com.streamvault.data.local.entity.MovieCategoryHydrationEntity
 import com.streamvault.data.local.entity.MovieEntity
 import com.streamvault.data.local.entity.PlaybackHistoryLiteEntity
 import com.streamvault.data.local.entity.ProviderEntity
 import com.streamvault.data.local.entity.XtreamIndexJobEntity
+import com.streamvault.data.mapper.toEntity
+import com.streamvault.data.provider.ProviderCapabilityResolver
+import com.streamvault.data.provider.TypedProviderClientFactory
+import com.streamvault.data.provider.toProviderSnapshot
 import com.streamvault.data.preferences.PreferencesRepository
 import com.streamvault.data.remote.stalker.StalkerDeviceProfile
 import com.streamvault.data.remote.stalker.StalkerProviderProfile
+import com.streamvault.data.remote.stalker.StalkerProvider
 import com.streamvault.data.remote.stalker.StalkerSession
 import com.streamvault.data.remote.stalker.StalkerCategoryRecord
 import com.streamvault.data.remote.stalker.StalkerItemRecord
 import com.streamvault.data.remote.stalker.StalkerPagedItems
+import com.streamvault.data.remote.stalker.StalkerRemoteIdentityResolver
 import com.streamvault.data.remote.dto.XtreamCategory
 import com.streamvault.data.remote.dto.XtreamStream
 import com.streamvault.data.remote.stalker.StalkerApiService
@@ -36,14 +43,25 @@ import com.streamvault.domain.model.LibraryBrowseQuery
 import com.streamvault.domain.model.LibraryFilterBy
 import com.streamvault.domain.model.LibraryFilterType
 import com.streamvault.domain.model.LibrarySortBy
+import com.streamvault.domain.model.MovieDetailPresentationHint
 import com.streamvault.domain.model.PlaybackHistory
 import com.streamvault.domain.model.ProviderStatus
 import com.streamvault.domain.model.ProviderType
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.Result
 import com.streamvault.domain.model.SyncMetadata
+import com.streamvault.domain.model.VodDuplicateConfidence
+import com.streamvault.domain.model.VodDuplicateHandlingMode
+import com.streamvault.domain.model.VodCategoryHydrationRequest
+import com.streamvault.domain.model.VodCategoryLoadMode
+import com.streamvault.domain.model.VodMovieVariant
 import com.streamvault.domain.model.VodSyncMode
+import com.streamvault.domain.model.VodVariantObservation
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.repository.PlaybackHistoryRepository
 import com.streamvault.domain.repository.SyncMetadataRepository
+import com.streamvault.domain.provider.CapabilityResolution
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
@@ -53,6 +71,7 @@ import org.mockito.Mockito.timeout
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.doSuspendableAnswer
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -77,6 +96,9 @@ class MovieRepositoryImplTest {
     private val xtreamContentIndexDao: XtreamContentIndexDao = mock()
     private val xtreamIndexJobDao: XtreamIndexJobDao = mock()
     private val syncManager: SyncManager = mock()
+    private val providerCapabilityResolver: ProviderCapabilityResolver = mock()
+    private val typedProviderClientFactory: TypedProviderClientFactory = mock()
+    private val stalkerRemoteIdentityResolver: StalkerRemoteIdentityResolver = mock()
     private val credentialCrypto = object : CredentialCrypto {
         override fun encryptIfNeeded(value: String): String = value
         override fun decryptIfNeeded(value: String): String = value
@@ -190,8 +212,8 @@ class MovieRepositoryImplTest {
         whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0))
         whenever(movieDao.getByCategory(7L, 42L)).thenReturn(flowOf(emptyList()))
         whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(null)
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Xtream",
                 type = ProviderType.XTREAM_CODES,
@@ -221,8 +243,8 @@ class MovieRepositoryImplTest {
         whenever(syncMetadataRepository.getMetadata(7L)).thenReturn(
             SyncMetadata(providerId = 7L, movieSyncMode = VodSyncMode.LAZY_BY_CATEGORY)
         )
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Xtream",
                 type = ProviderType.XTREAM_CODES,
@@ -243,7 +265,7 @@ class MovieRepositoryImplTest {
     }
 
     @Test
-    fun `getMoviesByCategory prioritizes stalker category when background fetch is already running`() = runTest {
+    fun `getMoviesByCategory directly hydrates stalker category even when background fetch is running`() = runTest {
         whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
         whenever(preferencesRepository.xtreamBase64TextCompatibility).thenReturn(flowOf(false))
         whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0))
@@ -252,8 +274,8 @@ class MovieRepositoryImplTest {
         whenever(xtreamIndexJobDao.get(7L, ContentType.MOVIE.name)).thenReturn(
             XtreamIndexJobEntity(providerId = 7L, section = ContentType.MOVIE.name, state = "RUNNING")
         )
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Stalker",
                 type = ProviderType.STALKER_PORTAL,
@@ -263,13 +285,22 @@ class MovieRepositoryImplTest {
                 status = ProviderStatus.ACTIVE
             )
         )
+        whenever(stalkerApiService.authenticate(any())).thenReturn(
+            Result.success(StalkerSession("http://example.com/portal.php", "http://example.com/", "token") to StalkerProviderProfile())
+        )
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord("42", "Action")))
+        )
+        whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), any())).thenReturn(
+            Result.success(StalkerPagedItems(emptyList(), page = 1, totalPages = 1, pageSize = 20))
+        )
         val repository = createRepository()
 
         val result = repository.getMoviesByCategory(7L, 42L).first()
 
         assertThat(result).isEmpty()
-        verify(syncManager).prioritizeStalkerIndexCategory(7L, ContentType.MOVIE, 42L)
-        verify(stalkerApiService, never()).getVodStreamsPage(any(), any(), anyOrNull(), any())
+        verify(syncManager, never()).prioritizeStalkerIndexCategory(any(), any(), any())
+        verify(stalkerApiService).getVodStreamsPage(any(), any(), anyOrNull(), eq(1))
     }
 
     @Test
@@ -287,8 +318,8 @@ class MovieRepositoryImplTest {
                 detailHydratedAt = hydratedAt
             )
         )
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Xtream",
                 type = ProviderType.XTREAM_CODES,
@@ -307,13 +338,146 @@ class MovieRepositoryImplTest {
     }
 
     @Test
+    fun `getMovieDetails with duplicate handling uses narrow tmdb candidates instead of full provider scan`() = runTest {
+        val hydratedAt = System.currentTimeMillis()
+        val rawMovie = movieRecord(
+            id = 99L,
+            name = "Cached Movie HD",
+            genre = "Drama",
+            categoryId = 42L,
+            rating = 7.1f
+        ).copy(
+            tmdbId = 777L,
+            year = "2024",
+            cacheState = "DETAIL_HYDRATED",
+            detailHydratedAt = hydratedAt
+        )
+        val alternateMovie = movieRecord(
+            id = 100L,
+            name = "Cached Movie 4K",
+            genre = "Drama",
+            categoryId = 42L,
+            rating = 7.1f
+        ).copy(
+            tmdbId = 777L,
+            year = "2024"
+        )
+        whenever(movieDao.getById(99L)).thenReturn(rawMovie)
+        whenever(movieDao.getByProviderAndTmdbIdSync(7L, 777L)).thenReturn(listOf(rawMovie, alternateMovie))
+        stubProvider(
+            Provider(
+                id = 7L,
+                name = "Xtream",
+                type = ProviderType.XTREAM_CODES,
+                serverUrl = "http://example.com",
+                username = "user",
+                password = "pass",
+                status = ProviderStatus.ACTIVE
+            )
+        )
+
+        val result = createRepository(
+            duplicateHandlingMode = VodDuplicateHandlingMode.SMART,
+            variantPreferenceMode = VodVariantPreferenceMode.BEST_QUALITY
+        ).getMovieDetails(7L, 99L)
+
+        assertThat(result.getOrNull()?.selectedVariantId).isEqualTo(99L)
+        assertThat(result.getOrNull()?.variants?.map { it.rawMovieId }).containsExactly(99L, 100L)
+        verify(movieDao).getByProviderAndTmdbIdSync(7L, 777L)
+        verify(movieDao, never()).getByProvider(7L)
+        verify(movieDao, never()).getByProviderSync(7L)
+    }
+
+    @Test
+    fun `getMovieDetails reuses known presentation hint instead of loading duplicate candidates`() = runTest {
+        val hydratedAt = System.currentTimeMillis()
+        val rawMovie = movieRecord(
+            id = 99L,
+            name = "Cached Movie HD",
+            genre = "Drama",
+            categoryId = 42L,
+            rating = 7.1f
+        ).copy(
+            tmdbId = 777L,
+            year = "2024",
+            cacheState = "DETAIL_HYDRATED",
+            detailHydratedAt = hydratedAt
+        )
+        whenever(movieDao.getById(99L)).thenReturn(rawMovie)
+        stubProvider(
+            Provider(
+                id = 7L,
+                name = "Xtream",
+                type = ProviderType.XTREAM_CODES,
+                serverUrl = "http://example.com",
+                username = "user",
+                password = "pass",
+                status = ProviderStatus.ACTIVE
+            )
+        )
+
+        val result = createRepository(
+            duplicateHandlingMode = VodDuplicateHandlingMode.SMART,
+            variantPreferenceMode = VodVariantPreferenceMode.BEST_QUALITY
+        ).getMovieDetails(
+            7L,
+            99L,
+            MovieDetailPresentationHint(
+                providerId = 7L,
+                logicalGroupId = "movie:7:tmdb:777",
+                variants = listOf(
+                    VodMovieVariant(
+                        rawMovieId = 100L,
+                        name = "Cached Movie 4K",
+                        streamUrl = "https://example.com/100.m3u8",
+                        streamId = 100L,
+                        containerExtension = null,
+                        releaseDate = "2024-01-01",
+                        year = "2024",
+                        durationSeconds = 0,
+                        rating = 7.1f,
+                        addedAt = 0L,
+                        qualityScore = 2160,
+                        recencyScore = 20240101L,
+                        reliabilityScore = 0,
+                        label = "4K 2024"
+                    ),
+                    VodMovieVariant(
+                        rawMovieId = 99L,
+                        name = "Cached Movie HD",
+                        streamUrl = "https://example.com/99.m3u8",
+                        streamId = 99L,
+                        containerExtension = null,
+                        releaseDate = "2024-01-01",
+                        year = "2024",
+                        durationSeconds = 0,
+                        rating = 7.1f,
+                        addedAt = 0L,
+                        qualityScore = 1080,
+                        recencyScore = 20240101L,
+                        reliabilityScore = 0,
+                        label = "1080p 2024"
+                    )
+                ),
+                duplicateConfidence = VodDuplicateConfidence.EXACT
+            )
+        )
+
+        assertThat(result.getOrNull()?.selectedVariantId).isEqualTo(99L)
+        assertThat(result.getOrNull()?.variants?.map { it.rawMovieId }).containsExactly(100L, 99L).inOrder()
+        verify(movieDao, never()).getByProviderAndTmdbIdSync(any(), any())
+        verify(movieDao, never()).getByProviderAndYearSync(any(), any())
+        verify(movieDao, never()).getByProviderAndReleaseYearPrefixSync(any(), any())
+    }
+
+    @Test
     fun `getMoviesByCategory lazily hydrates stalker category when local cache is empty`() = runTest {
         whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
         whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0))
         whenever(movieDao.getByCategory(7L, 42L)).thenReturn(flowOf(emptyList()))
         whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(null)
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Stalker",
                 type = ProviderType.STALKER_PORTAL,
@@ -370,8 +534,8 @@ class MovieRepositoryImplTest {
         whenever(categoryDao.getByProviderAndType(7L, ContentType.MOVIE.name)).thenReturn(
             flowOf(listOf(com.streamvault.data.local.entity.CategoryEntity(providerId = 7L, categoryId = 42L, name = "Action", type = ContentType.MOVIE)))
         )
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Stalker",
                 type = ProviderType.STALKER_PORTAL,
@@ -414,14 +578,195 @@ class MovieRepositoryImplTest {
     }
 
     @Test
+    fun `stalker preview hydration survives preview flow cancellation`() = runTest {
+        val requestStarted = CompletableDeferred<Unit>()
+        val releaseRequest = CompletableDeferred<Unit>()
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0), flowOf(18))
+        whenever(movieDao.getByCategoryPreview(7L, 42L, 18)).thenReturn(flowOf(emptyList()))
+        whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(null)
+        whenever(categoryDao.getByProviderAndType(7L, ContentType.MOVIE.name)).thenReturn(
+            flowOf(
+                listOf(
+                    com.streamvault.data.local.entity.CategoryEntity(
+                        providerId = 7L,
+                        categoryId = 42L,
+                        name = "Action",
+                        type = ContentType.MOVIE
+                    )
+                )
+            )
+        )
+        stubProvider(stalkerProvider())
+        whenever(stalkerApiService.authenticate(any())).thenReturn(stalkerSessionResult())
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord(id = "42", name = "Action")))
+        )
+        whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), eq(1))).doSuspendableAnswer {
+            requestStarted.complete(Unit)
+            releaseRequest.await()
+            Result.success(stalkerMoviePage(page = 1, itemCount = 18, totalPages = 1))
+        }
+
+        createRepository().getCategoryPreviewRows(7L, listOf(42L), 18).first()
+        requestStarted.await()
+        releaseRequest.complete(Unit)
+
+        verify(movieDao, timeout(1_000)).upsertCategoryPage(eq(7L), any())
+    }
+
+    @Test
+    fun `stalker movie hydration restarts at page one when successful pages produced no category rows`() = runTest {
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0), flowOf(18))
+        whenever(movieDao.getByCategoryPreview(7L, 42L, 18)).thenReturn(flowOf(emptyList()))
+        whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(
+            MovieCategoryHydrationEntity(
+                providerId = 7L,
+                categoryId = 42L,
+                itemCount = 0,
+                lastStatus = "TRUNCATED",
+                lastLoadedPage = 2,
+                lastAttemptedPage = 2,
+                lastSuccessfulPage = 2,
+                totalPages = 10,
+                pageSize = 14
+            )
+        )
+        whenever(categoryDao.getByProviderAndType(7L, ContentType.MOVIE.name)).thenReturn(
+            flowOf(
+                listOf(
+                    com.streamvault.data.local.entity.CategoryEntity(
+                        providerId = 7L,
+                        categoryId = 42L,
+                        name = "Action",
+                        type = ContentType.MOVIE
+                    )
+                )
+            )
+        )
+        stubProvider(stalkerProvider())
+        whenever(stalkerApiService.authenticate(any())).thenReturn(stalkerSessionResult())
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord(id = "42", name = "Action")))
+        )
+        whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), eq(1))).thenReturn(
+            Result.success(stalkerMoviePage(page = 1, itemCount = 18))
+        )
+
+        createRepository().getCategoryPreviewRows(7L, listOf(42L), 18).first()
+
+        verify(stalkerApiService, timeout(1_000)).getVodStreamsPage(any(), any(), anyOrNull(), eq(1))
+        verify(stalkerApiService, never()).getVodStreamsPage(any(), any(), anyOrNull(), eq(3))
+    }
+
+    @Test
+    fun `opening stalker movie category fills at least forty items across natural pages`() = runTest {
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(0), flowOf(14), flowOf(28), flowOf(42))
+        whenever(movieDao.getByCategoryPage(7L, 42L, 60, 0)).thenReturn(flowOf(emptyList()))
+        whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(null)
+        stubProvider(stalkerProvider())
+        whenever(stalkerApiService.authenticate(any())).thenReturn(stalkerSessionResult())
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord(id = "42", name = "Action")))
+        )
+        (1..3).forEach { page ->
+            whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), eq(page))).thenReturn(
+                Result.success(stalkerMoviePage(page = page, itemCount = 14))
+            )
+        }
+
+        createRepository().getMoviesByCategoryPage(7L, 42L, limit = 60, offset = 0).first()
+
+        (1..3).forEach { page ->
+            verify(stalkerApiService).getVodStreamsPage(any(), any(), anyOrNull(), eq(page))
+        }
+        verify(stalkerApiService, never()).getVodStreamsPage(any(), any(), anyOrNull(), eq(4))
+    }
+
+    @Test
+    fun `complete request hydrates every advertised stalker movie page before returning`() = runTest {
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(preferencesRepository.vodCategoryLoadMode).thenReturn(flowOf(VodCategoryLoadMode.PAGED))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(
+            flowOf(0),
+            flowOf(14),
+            flowOf(28),
+            flowOf(42)
+        )
+        whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(null)
+        stubProvider(stalkerProvider())
+        whenever(stalkerApiService.authenticate(any())).thenReturn(stalkerSessionResult())
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord(id = "42", name = "Action")))
+        )
+        (1..3).forEach { page ->
+            whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), eq(page))).thenReturn(
+                Result.success(stalkerMoviePage(page = page, itemCount = 14, totalPages = 3))
+            )
+        }
+        whenever(movieDao.getFreshByCategoryCursorPage(7L, 42L, 40)).thenReturn(emptyList())
+        whenever(favoriteDao.getAllByType(7L, ContentType.MOVIE.name)).thenReturn(flowOf(emptyList()))
+
+        createRepository().requestCategoryHydration(
+            7L,
+            42L,
+            VodCategoryHydrationRequest.COMPLETE
+        )
+
+        (1..3).forEach { page ->
+            verify(stalkerApiService).getVodStreamsPage(any(), any(), anyOrNull(), eq(page))
+        }
+        verify(stalkerApiService, never()).getVodStreamsPage(any(), any(), anyOrNull(), eq(4))
+    }
+
+    @Test
+    fun `scrolling cached stalker movie category appends exactly one natural page`() = runTest {
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(42), flowOf(56))
+        whenever(movieDao.getByCategoryPage(7L, 42L, 60, 60)).thenReturn(flowOf(emptyList()))
+        whenever(movieCategoryHydrationDao.get(7L, 42L)).thenReturn(
+            MovieCategoryHydrationEntity(
+                providerId = 7L,
+                categoryId = 42L,
+                itemCount = 42,
+                lastStatus = "SUCCESS",
+                lastLoadedPage = 3,
+                lastAttemptedPage = 3,
+                lastSuccessfulPage = 3,
+                totalPages = 10,
+                pageSize = 14
+            )
+        )
+        stubProvider(stalkerProvider())
+        whenever(stalkerApiService.authenticate(any())).thenReturn(stalkerSessionResult())
+        whenever(stalkerApiService.getVodCategories(any(), any())).thenReturn(
+            Result.success(listOf(StalkerCategoryRecord(id = "42", name = "Action")))
+        )
+        whenever(stalkerApiService.getVodStreamsPage(any(), any(), anyOrNull(), eq(4))).thenReturn(
+            Result.success(stalkerMoviePage(page = 4, itemCount = 14))
+        )
+
+        createRepository().getMoviesByCategoryPage(7L, 42L, limit = 60, offset = 60).first()
+
+        verify(stalkerApiService).getVodStreamsPage(any(), any(), anyOrNull(), eq(4))
+        verify(stalkerApiService, never()).getVodStreamsPage(any(), any(), anyOrNull(), eq(5))
+    }
+
+    @Test
     fun `stalker movie category hydration preserves requested category when portal omits item category fields`() = runTest {
-        val actionCategoryId = ("7/${ContentType.MOVIE.name}/42".hashCode().toLong() and 0x7fff_ffffL).coerceAtLeast(1L)
+        val actionCategoryId = ("7/${ContentType.MOVIE.name}/42".hashCode().toLong() and 0x7fff_ffffL)
+            .coerceAtLeast(1L)
+        whenever(
+            stalkerRemoteIdentityResolver.resolveCategories(eq(7L), eq(ContentType.MOVIE), any())
+        ).thenReturn(mapOf("42" to actionCategoryId))
         whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
         whenever(movieDao.getCountByCategory(7L, actionCategoryId)).thenReturn(flowOf(0), flowOf(1))
         whenever(movieDao.getByCategory(7L, actionCategoryId)).thenReturn(flowOf(emptyList()))
         whenever(movieCategoryHydrationDao.get(7L, actionCategoryId)).thenReturn(null)
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Stalker",
                 type = ProviderType.STALKER_PORTAL,
@@ -482,8 +827,8 @@ class MovieRepositoryImplTest {
                 rating = 8.5f
             )
         )
-        whenever(providerDao.getById(7L)).thenReturn(
-            ProviderEntity(
+        stubProvider(
+            Provider(
                 id = 7L,
                 name = "Stalker",
                 type = ProviderType.STALKER_PORTAL,
@@ -568,6 +913,99 @@ class MovieRepositoryImplTest {
 
         assertThat(result.map { it.name }).containsExactly("Matrix")
         verify(movieDao, never()).searchFallback(eq(7L), any(), any())
+    }
+
+    @Test
+    fun `getMoviesByCategory show all preserves raw movie variants`() = runTest {
+        val hdVersion = movieEntity(
+            id = 101L,
+            name = "Arrival HD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016")
+        val fhdVersion = movieEntity(
+            id = 102L,
+            name = "Arrival FHD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016")
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(preferencesRepository.xtreamBase64TextCompatibility).thenReturn(flowOf(false))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(2))
+        whenever(movieDao.getByCategory(7L, 42L)).thenReturn(flowOf(listOf(hdVersion, fhdVersion)))
+
+        val result = createRepository().getMoviesByCategory(7L, 42L).first()
+
+        assertThat(result.map { it.id }).containsExactly(101L, 102L).inOrder()
+        assertThat(result.all { it.variants.isEmpty() }).isTrue()
+    }
+
+    @Test
+    fun `getMoviesByCategory smart groups same movie variants and prefers latest`() = runTest {
+        val hdVersion = movieEntity(
+            id = 101L,
+            name = "Arrival HD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016", addedAt = 1_000L)
+        val fhdVersion = movieEntity(
+            id = 102L,
+            name = "Arrival FHD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016", addedAt = 2_000L)
+        val remake = movieEntity(
+            id = 103L,
+            name = "Arrival",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 6.5f
+        ).copy(releaseDate = "2024-01-01", year = "2024", addedAt = 3_000L)
+        whenever(preferencesRepository.parentalControlLevel).thenReturn(flowOf(0))
+        whenever(preferencesRepository.xtreamBase64TextCompatibility).thenReturn(flowOf(false))
+        whenever(movieDao.getCountByCategory(7L, 42L)).thenReturn(flowOf(3))
+        whenever(movieDao.getByCategory(7L, 42L)).thenReturn(flowOf(listOf(remake, fhdVersion, hdVersion)))
+
+        val result = createRepository(
+            duplicateHandlingMode = VodDuplicateHandlingMode.SMART,
+            variantPreferenceMode = VodVariantPreferenceMode.FORCE_LATEST
+        ).getMoviesByCategory(7L, 42L).first()
+
+        assertThat(result.map { it.id }).containsExactly(103L, 102L).inOrder()
+        val groupedArrival = result.single { it.id == 102L }
+        assertThat(groupedArrival.variants.map { it.rawMovieId }).containsExactly(102L, 101L).inOrder()
+        assertThat(groupedArrival.selectedVariantId).isEqualTo(102L)
+    }
+
+    @Test
+    fun `getMoviesByIds stays raw when vod grouping is enabled`() = runTest {
+        val hdVersion = movieEntity(
+            id = 101L,
+            name = "Arrival HD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016")
+        val fhdVersion = movieEntity(
+            id = 102L,
+            name = "Arrival FHD",
+            genre = "Sci-Fi",
+            categoryId = 42L,
+            rating = 7.9f
+        ).copy(releaseDate = "2016-11-11", year = "2016")
+        whenever(movieDao.getByIds(listOf(101L, 102L))).thenReturn(flowOf(listOf(hdVersion, fhdVersion)))
+
+        val result = createRepository(
+            duplicateHandlingMode = VodDuplicateHandlingMode.SMART,
+            variantPreferenceMode = VodVariantPreferenceMode.FORCE_LATEST
+        ).getMoviesByIds(listOf(101L, 102L)).first()
+
+        assertThat(result.map { it.id }).containsExactly(101L, 102L).inOrder()
+        assertThat(result.all { it.variants.isEmpty() }).isTrue()
     }
 
     @Test
@@ -710,25 +1148,93 @@ class MovieRepositoryImplTest {
         verify(movieDao, never()).getByProviderCursorPage(any(), any())
     }
 
-    private fun createRepository() = MovieRepositoryImpl(
-        movieDao = movieDao,
-        categoryDao = categoryDao,
-        providerDao = providerDao,
-        stalkerApiService = stalkerApiService,
-        xtreamApiService = xtreamApiService,
-        credentialCrypto = credentialCrypto,
-        preferencesRepository = preferencesRepository,
-        favoriteDao = favoriteDao,
-        playbackHistoryDao = playbackHistoryDao,
-        playbackHistoryRepository = playbackHistoryRepository,
-        xtreamStreamUrlResolver = xtreamStreamUrlResolver,
-        movieCategoryHydrationDao = movieCategoryHydrationDao,
-        syncMetadataRepository = syncMetadataRepository,
-        xtreamContentIndexDao = xtreamContentIndexDao,
-        xtreamIndexJobDao = xtreamIndexJobDao,
-        syncManager = syncManager,
-        transactionRunner = transactionRunner
+    private fun createRepository(
+        duplicateHandlingMode: VodDuplicateHandlingMode = VodDuplicateHandlingMode.SHOW_ALL,
+        variantPreferenceMode: VodVariantPreferenceMode = VodVariantPreferenceMode.BALANCED,
+        preferredVariants: Map<String, Long> = emptyMap(),
+        variantObservations: Map<Long, VodVariantObservation> = emptyMap()
+    ): MovieRepositoryImpl {
+        whenever(preferencesRepository.vodDuplicateHandlingMode).thenReturn(flowOf(duplicateHandlingMode))
+        whenever(preferencesRepository.vodVariantPreferenceMode).thenReturn(flowOf(variantPreferenceMode))
+        whenever(preferencesRepository.vodVariantSelections).thenReturn(flowOf(preferredVariants))
+        whenever(preferencesRepository.vodVariantObservations).thenReturn(flowOf(variantObservations))
+        return MovieRepositoryImpl(
+            movieDao = movieDao,
+            categoryDao = categoryDao,
+            providerDao = providerDao,
+            preferencesRepository = preferencesRepository,
+            favoriteDao = favoriteDao,
+            playbackHistoryDao = playbackHistoryDao,
+            playbackHistoryRepository = playbackHistoryRepository,
+            xtreamStreamUrlResolver = xtreamStreamUrlResolver,
+            movieCategoryHydrationDao = movieCategoryHydrationDao,
+            syncMetadataRepository = syncMetadataRepository,
+            xtreamContentIndexDao = xtreamContentIndexDao,
+            xtreamIndexJobDao = xtreamIndexJobDao,
+            syncManager = syncManager,
+            transactionRunner = transactionRunner,
+            stalkerRequestCoordinator = com.streamvault.data.remote.stalker.StalkerRequestCoordinator(),
+            providerCapabilityResolver = providerCapabilityResolver,
+            typedProviderClientFactory = typedProviderClientFactory
+        )
+    }
+
+    private suspend fun stubProvider(provider: Provider) {
+        whenever(providerDao.getById(provider.id)).thenReturn(provider.toEntity())
+        val snapshot = provider.toProviderSnapshot()
+        whenever(providerCapabilityResolver.snapshot(provider.id)).thenReturn(snapshot)
+        if (provider.type == ProviderType.STALKER_PORTAL) {
+            whenever(typedProviderClientFactory.stalker(snapshot)).thenReturn(
+                CapabilityResolution.Available(
+                    StalkerProvider(
+                        providerId = provider.id,
+                        api = stalkerApiService,
+                        portalUrl = provider.serverUrl,
+                        macAddress = provider.stalkerMacAddress,
+                        deviceProfile = provider.stalkerDeviceProfile,
+                        timezone = provider.stalkerDeviceTimezone,
+                        locale = provider.stalkerDeviceLocale,
+                        identityResolver = stalkerRemoteIdentityResolver,
+                        portalStateStore = mock()
+                    )
+                )
+            )
+        }
+    }
+
+    private fun stalkerProvider() = Provider(
+        id = 7L,
+        name = "Stalker",
+        type = ProviderType.STALKER_PORTAL,
+        serverUrl = "http://example.com",
+        stalkerMacAddress = "00:11:22:33:44:55",
+        status = ProviderStatus.ACTIVE
     )
+
+    private fun stalkerSessionResult(): Result<Pair<StalkerSession, StalkerProviderProfile>> =
+        Result.success(
+            StalkerSession(
+                loadUrl = "http://example.com/stalker_portal/server/load.php",
+                portalReferer = "http://example.com/stalker_portal/c/",
+                token = "token"
+            ) to StalkerProviderProfile(accountName = "Stalker")
+        )
+
+    private fun stalkerMoviePage(page: Int, itemCount: Int, totalPages: Int = 10): StalkerPagedItems =
+        StalkerPagedItems(
+            items = (1..itemCount).map { index ->
+                StalkerItemRecord(
+                    id = "${page}00$index",
+                    name = "Movie $page-$index",
+                    categoryId = "42",
+                    cmd = "ffmpeg http://example.com/movie-$page-$index.mp4",
+                    containerExtension = "mp4"
+                )
+            },
+            page = page,
+            totalPages = totalPages,
+            pageSize = itemCount
+        )
 
     private fun movieEntity(
         id: Long,

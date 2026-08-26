@@ -3,6 +3,17 @@ package com.streamvault.domain.model
 /**
  * Represents an external EPG source (e.g. an XMLTV URL).
  */
+enum class XmltvTimezonePolicy {
+    /** XMLTV timestamps must contain an explicit offset or UTC designator. */
+    REQUIRE_OFFSET,
+
+    /** Offset-less XMLTV timestamps are interpreted as UTC. */
+    UTC,
+
+    /** Offset-less XMLTV timestamps are interpreted in [EpgSource.timezoneId]. */
+    EXPLICIT_ZONE
+}
+
 data class EpgSource(
     val id: Long = 0,
     val name: String,
@@ -15,7 +26,9 @@ data class EpgSource(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val etag: String? = null,
-    val lastModifiedHeader: String? = null
+    val lastModifiedHeader: String? = null,
+    val timezonePolicy: XmltvTimezonePolicy = XmltvTimezonePolicy.REQUIRE_OFFSET,
+    val timezoneId: String? = null
 )
 
 /**

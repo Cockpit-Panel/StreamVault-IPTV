@@ -70,6 +70,7 @@ import androidx.tv.material3.Text
 import com.streamvault.app.R
 import com.streamvault.app.device.rememberIsTelevisionDevice
 import com.streamvault.app.ui.components.rememberCrossfadeImageModel
+import com.streamvault.app.ui.model.isArchivePlayable
 import com.streamvault.app.ui.screens.player.NumericChannelInputState
 import com.streamvault.app.ui.screens.player.PlayerTimeshiftUiState
 import com.streamvault.app.ui.screens.player.SeekPreviewState
@@ -78,6 +79,7 @@ import com.streamvault.app.ui.time.LocalAppTimeFormat
 import com.streamvault.app.ui.time.createTimeFormat
 import com.streamvault.app.ui.theme.ErrorColor
 import com.streamvault.app.ui.theme.Primary
+import com.streamvault.domain.model.Channel
 import com.streamvault.domain.model.Program
 import com.streamvault.domain.model.RecordingStatus
 import coil3.compose.AsyncImage
@@ -103,6 +105,7 @@ fun PlayerControlsOverlay(
     isCatchUpPlayback: Boolean = false,
     isPlaying: Boolean,
     currentProgram: Program?,
+    currentChannel: Channel?,
     currentChannelName: String?,
     displayChannelNumber: Int,
     currentPosition: Long,
@@ -196,6 +199,7 @@ fun PlayerControlsOverlay(
                 isCatchUpPlayback = isCatchUpPlayback,
                 isPlaying = isPlaying,
                 currentProgram = currentProgram,
+                currentChannel = currentChannel,
                 currentChannelName = currentChannelName,
                 displayChannelNumber = displayChannelNumber,
                 currentPosition = currentPosition,
@@ -529,6 +533,7 @@ private fun PlayerBottomBar(
     isCatchUpPlayback: Boolean = false,
     isPlaying: Boolean,
     currentProgram: Program?,
+    currentChannel: Channel?,
     currentChannelName: String?,
     displayChannelNumber: Int,
     currentPosition: Long,
@@ -628,6 +633,7 @@ private fun PlayerBottomBar(
                 if (contentType == "LIVE") {
                     PlayerLiveInfo(
                         currentProgram = currentProgram,
+                        currentChannel = currentChannel,
                         currentChannelName = currentChannelName,
                         displayChannelNumber = displayChannelNumber,
                         aspectRatioLabel = aspectRatioLabel,
@@ -725,6 +731,7 @@ private fun PlayerBottomBar(
 @Composable
 private fun PlayerLiveInfo(
     currentProgram: Program?,
+    currentChannel: Channel?,
     currentChannelName: String?,
     displayChannelNumber: Int,
     aspectRatioLabel: String,
@@ -773,6 +780,9 @@ private fun PlayerLiveInfo(
     val showTimeshiftControls = timeshiftUiState.available && !isCastConnected
     val appTimeFormat = LocalAppTimeFormat.current
     val timeFormat = remember(appTimeFormat) { appTimeFormat.createTimeFormat() }
+    val canRestartProgram = currentChannel != null &&
+        currentProgram != null &&
+        currentChannel.isArchivePlayable(currentProgram)
     val primaryActions = buildList {
         if (showTimeshiftControls) {
             add(PlayerActionSpec(stringResource(R.string.player_jump_to_live), onSeekToLiveEdge))
@@ -811,7 +821,7 @@ private fun PlayerLiveInfo(
         if (showExternalPlayerAction) {
             add(PlayerActionSpec(stringResource(R.string.player_open_in_external_player), onOpenExternalPlayer))
         }
-        if (currentProgram?.hasArchive == true) {
+        if (canRestartProgram) {
             add(PlayerActionSpec(stringResource(R.string.player_restart), onRestartProgram))
             add(PlayerActionSpec(stringResource(R.string.player_archive), onOpenArchive))
         }
@@ -861,7 +871,7 @@ private fun PlayerLiveInfo(
                 if (displayChannelNumber > 0) {
                     PlayerMetaPill(text = stringResource(R.string.player_live_channel, displayChannelNumber))
                 }
-                if (currentProgram?.hasArchive == true) {
+                if (canRestartProgram) {
                     PlayerMetaPill(text = stringResource(R.string.player_archive_badge))
                 }
                 if (isMuted) {

@@ -6,19 +6,26 @@ import com.streamvault.app.ui.model.LiveTvChannelMode
 import com.streamvault.app.ui.model.LiveTvQuickFilterVisibilityMode
 import com.streamvault.app.ui.model.VodViewMode
 import com.streamvault.domain.model.AppTimeFormat
+import com.streamvault.domain.model.AppHomeDashboardShelf
 import com.streamvault.domain.model.AppLandingDestination
+import com.streamvault.domain.model.AppTopLevelDestination
 import com.streamvault.domain.model.AudioOutputPreference
 import com.streamvault.domain.model.Category
+import com.streamvault.domain.model.VodCategoryLoadMode
 import com.streamvault.domain.model.ExternalPlaybackMode
 import com.streamvault.domain.model.ChannelNumberingMode
 import com.streamvault.domain.model.DecoderMode
 import com.streamvault.domain.model.GroupedChannelLabelMode
 import com.streamvault.domain.model.LiveChannelGroupingMode
 import com.streamvault.domain.model.LiveVariantPreferenceMode
+import com.streamvault.domain.model.PlaybackBufferMode
+import com.streamvault.domain.model.VodDuplicateHandlingMode
 import com.streamvault.domain.model.VodHttpProtocolMode
+import com.streamvault.domain.model.VodVariantPreferenceMode
 import com.streamvault.domain.model.PlayerSurfaceMode
-import com.streamvault.domain.model.Provider
+import com.streamvault.domain.model.LegacyProvider as Provider
 import com.streamvault.domain.model.RemoteShortcutPreferences
+import com.streamvault.domain.model.TimeshiftBackendPreference
 
 enum class ProviderWarningAction {
     EPG,
@@ -42,11 +49,15 @@ internal data class SettingsPreferenceSnapshot(
     val hasParentalPin: Boolean,
     val appLanguage: String,
     val appLandingDestination: AppLandingDestination,
+    val appTopLevelDestinations: List<AppTopLevelDestination>,
+    val appHomeDashboardShelves: List<AppHomeDashboardShelf>,
     val appTimeFormat: AppTimeFormat,
     val preferredAudioLanguage: String,
     val playerMediaSessionEnabled: Boolean,
     val playerFastRetryOnTransientFailures: Boolean,
-    val playerDecoderMode: DecoderMode,
+    val playerAudioDecoderMode: DecoderMode,
+    val playerVideoDecoderMode: DecoderMode,
+    val playerPlaybackBufferMode: PlaybackBufferMode,
     val playerAudioOutputPreference: AudioOutputPreference,
     val playerCompatibilityMemoryEnabled: Boolean,
     val playerSurfaceMode: PlayerSurfaceMode,
@@ -70,6 +81,7 @@ internal data class SettingsPreferenceSnapshot(
     val ethernetMaxVideoHeight: Int?,
     val playerTimeshiftEnabled: Boolean,
     val playerTimeshiftDepthMinutes: Int,
+    val playerTimeshiftBackend: TimeshiftBackendPreference,
     val defaultStopPlaybackTimerMinutes: Int,
     val defaultIdleStandbyTimerMinutes: Int,
     val lastSpeedTestMegabits: Double?,
@@ -82,17 +94,22 @@ internal data class SettingsPreferenceSnapshot(
     val xtreamBase64TextCompatibility: Boolean,
     val liveTvChannelMode: LiveTvChannelMode,
     val showLiveSourceSwitcher: Boolean,
+    val showFavoritesCategory: Boolean,
     val showAllChannelsCategory: Boolean,
     val showRecentChannelsCategory: Boolean,
     val remoteShortcutPreferences: RemoteShortcutPreferences,
     val liveTvCategoryFilters: List<String>,
     val liveTvQuickFilterVisibilityMode: LiveTvQuickFilterVisibilityMode,
+    val hideDecorativeLiveRows: Boolean,
     val liveChannelNumberingMode: ChannelNumberingMode,
     val liveChannelGroupingMode: LiveChannelGroupingMode,
     val groupedChannelLabelMode: GroupedChannelLabelMode,
     val liveVariantPreferenceMode: LiveVariantPreferenceMode,
     val vodViewMode: VodViewMode,
+    val vodCategoryLoadMode: VodCategoryLoadMode,
     val vodInfiniteScroll: Boolean,
+    val vodDuplicateHandlingMode: VodDuplicateHandlingMode,
+    val vodVariantPreferenceMode: VodVariantPreferenceMode,
     val guideDefaultCategoryId: Long,
     val guideDefaultCategoryOptions: List<Category>,
     val preventStandbyDuringPlayback: Boolean,
@@ -105,6 +122,7 @@ internal data class SettingsPreferenceSnapshot(
     val cachedAppUpdateVersionCode: Int?,
     val cachedAppUpdateReleaseUrl: String?,
     val cachedAppUpdateDownloadUrl: String?,
+    val cachedAppUpdateDownloadSha256: String?,
     val cachedAppUpdateReleaseNotes: String,
     val cachedAppUpdatePublishedAt: String?
 )

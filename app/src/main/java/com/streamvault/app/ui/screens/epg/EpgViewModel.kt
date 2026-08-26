@@ -16,7 +16,10 @@ import com.streamvault.domain.model.CombinedCategory
 import com.streamvault.domain.model.ContentType
 import com.streamvault.domain.model.EpgOverrideCandidate
 import com.streamvault.domain.model.Favorite
+import com.streamvault.domain.model.GuideSourcePolicy
 import com.streamvault.domain.model.Program
+import com.streamvault.domain.model.ProgramReminder
+import com.streamvault.domain.model.ProgramReminderDeliveryState
 import com.streamvault.domain.model.VirtualCategoryIds
 import com.streamvault.domain.repository.ChannelRepository
 import com.streamvault.domain.repository.CombinedM3uRepository
@@ -105,6 +108,7 @@ data class EpgUiState(
     val guideWindowStart: Long = DEFAULT_NOW - EpgViewModel.LOOKBACK_MS,
     val guideWindowEnd: Long = DEFAULT_NOW + EpgViewModel.LOOKAHEAD_MS,
     val recordingMessage: String? = null,
+    val reminderMessage: String? = null,
     val pendingRecordingConflict: RecordingConflictInfo? = null,
     val hasMoreChannels: Boolean = false,
     val previewPlayerEngine: PlayerEngine? = null,
@@ -140,6 +144,17 @@ data class ProgramReminderUiState(
             this.channelId == channelId &&
             this.programTitle == programTitle &&
             this.programStartTime == programStartTime
+}
+
+internal fun programReminderDeliveryIssueMessage(reminders: List<ProgramReminder>): String? {
+    val issue = reminders.firstOrNull {
+        it.deliveryState == ProgramReminderDeliveryState.BLOCKED ||
+            it.deliveryState == ProgramReminderDeliveryState.FAILED
+    } ?: return null
+    val reason = issue.deliveryFailureReason
+        ?.takeIf { it.isNotBlank() }
+        ?: "The notification was not accepted."
+    return "Reminder for ${issue.programTitle} was not delivered: $reason"
 }
 
 enum class GuideChannelMode {
@@ -319,12 +334,26 @@ class EpgViewModel @Inject constructor(
         restoreGuidePreferences()
         observeGuideBase()
         observeGuidePresentation()
+        observeReminderDeliveryIssues()
         viewModelScope.launch {
             livePreviewHandoffManager.reverseSessionFlow.collect { session ->
                 if (session != null && session.source == PreviewHandoffSource.GUIDE) {
                     resumePreviewFromHandoff()
                 }
             }
+        }
+    }
+
+    private fun observeReminderDeliveryIssues() {
+        viewModelScope.launch {
+            programReminderManager.observeUpcomingReminders()
+                .map(::programReminderDeliveryIssueMessage)
+                .distinctUntilChanged()
+                .collectLatest { message ->
+                    if (message != null) {
+                        _uiState.update { it.copy(reminderMessage = message) }
+                    }
+                }
         }
     }
 
@@ -412,8 +441,12 @@ class EpgViewModel @Inject constructor(
                     }
                     if (!isActivePreviewSession(version, channel.id)) return@launch
                     engine.stop()
-                    engine.setDecoderMode(preferencesRepository.playerDecoderMode.first())
+                    engine.setDecoderModes(
+                        audioMode = preferencesRepository.playerAudioDecoderMode.first(),
+                        videoMode = preferencesRepository.playerVideoDecoderMode.first()
+                    )
                     engine.setSurfaceMode(preferencesRepository.playerSurfaceMode.first())
+                    engine.setPlaybackBufferMode(preferencesRepository.playerPlaybackBufferMode.first())
                     engine.prepare(preparedStreamInfo)
                     engine.setVolume(1f)
                     engine.play()
@@ -833,6 +866,16 @@ class EpgViewModel @Inject constructor(
         _uiState.update { it.copy(recordingMessage = null) }
     }
 
+    fun clearReminderMessage() {
+        _uiState.update { it.copy(reminderMessage = null) }
+    }
+
+    fun reconcileProgramReminders() {
+        viewModelScope.launch {
+            programReminderManager.restoreScheduledReminders()
+        }
+    }
+
     fun updateEpgOverrideSearch(query: String) {
         val channel = _overrideUiState.value.channel ?: return
         _overrideUiState.update {
@@ -1031,7 +1074,7 @@ class EpgViewModel @Inject constructor(
         }
     }
 
-    private suspend fun observeSingleProviderGuide(provider: com.streamvault.domain.model.Provider) {
+    private suspend fun observeSingleProviderGuide(provider: com.streamvault.domain.model.LegacyProvider) {
         combine(
             channelRepository.getCategories(provider.id),
             getCustomCategories(provider.id, ContentType.LIVE),
@@ -1490,15 +1533,16 @@ class EpgViewModel @Inject constructor(
         }
     }
 
-    private fun buildProviderSourceLabel(provider: com.streamvault.domain.model.Provider): String {
+    private fun buildProviderSourceLabel(provider: com.streamvault.domain.model.LegacyProvider): String {
         return when (provider.type) {
             com.streamvault.domain.model.ProviderType.XTREAM_CODES -> "Xtream Codes"
             com.streamvault.domain.model.ProviderType.M3U -> "M3U Playlist"
             com.streamvault.domain.model.ProviderType.STALKER_PORTAL -> "Stalker/MAG Portal"
+            com.streamvault.domain.model.ProviderType.JELLYFIN -> "Jellyfin"
         }
     }
 
-    private fun buildProviderArchiveSummary(provider: com.streamvault.domain.model.Provider): String {
+    private fun buildProviderArchiveSummary(provider: com.streamvault.domain.model.LegacyProvider): String {
         return when (provider.type) {
             com.streamvault.domain.model.ProviderType.XTREAM_CODES ->
                 "Xtream replay depends on archive-enabled channels and valid replay stream ids from the provider."
@@ -1513,6 +1557,12 @@ class EpgViewModel @Inject constructor(
                     "Portal guide falls back to on-demand Stalker data when XMLTV is unavailable."
                 } else {
                     "Guide combines optional XMLTV with on-demand Stalker portal data."
+                }
+            com.streamvault.domain.model.ProviderType.JELLYFIN ->
+                if (provider.epgUrl.isBlank()) {
+                    "Jellyfin replay depends on the server guide data being populated."
+                } else {
+                    "Jellyfin replay combines server guide data with optional XMLTV import."
                 }
         }
     }
@@ -1755,13 +1805,18 @@ class EpgViewModel @Inject constructor(
     }
 
     private suspend fun fetchXtreamGuideFallback(
-        provider: com.streamvault.domain.model.Provider,
+        provider: com.streamvault.domain.model.LegacyProvider,
         providerId: Long,
         channels: List<Channel>,
         existingProgramsByChannel: Map<String, List<Program>>,
         windowStart: Long,
         windowEnd: Long
     ): Map<String, List<Program>> {
+        if (provider.guideSourcePolicy == GuideSourcePolicy.EXTERNAL_ONLY ||
+            provider.guideSourcePolicy == GuideSourcePolicy.DISABLED
+        ) {
+            return emptyMap()
+        }
         if (
             provider.type != com.streamvault.domain.model.ProviderType.XTREAM_CODES &&
             provider.type != com.streamvault.domain.model.ProviderType.STALKER_PORTAL

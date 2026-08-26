@@ -6,6 +6,7 @@ import android.view.KeyEvent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -48,14 +50,18 @@ internal fun SettingsScreenDialogs(
     viewModel: SettingsViewModel,
     context: Context,
     scope: CoroutineScope,
-    dialogState: SettingsScreenDialogState
+    dialogState: SettingsScreenDialogState,
+    onCancelSync: () -> Unit
 ) {
     val providerState = rememberSettingsProviderSectionState(dialogState)
 
     SyncingOverlay(
         isSyncing = uiState.isSyncing,
         providerName = uiState.syncingProviderName,
-        progress = uiState.syncProgress
+        progress = uiState.syncProgress,
+        sectionLabel = uiState.syncSectionLabel,
+        startedAt = uiState.syncStartedAt,
+        onCancel = onCancelSync.takeIf { uiState.syncCanCancel }
     )
 
     if (dialogState.showLiveTvModeDialog) {
@@ -146,10 +152,36 @@ internal fun SettingsScreenDialogs(
         )
     }
 
+    if (dialogState.showVodDuplicateHandlingDialog) {
+        VodDuplicateHandlingModeDialog(
+            selectedMode = uiState.vodDuplicateHandlingMode,
+            onDismiss = { dialogState.showVodDuplicateHandlingDialog = false },
+            onModeSelected = { mode ->
+                viewModel.setVodDuplicateHandlingMode(mode)
+                dialogState.showVodDuplicateHandlingDialog = false
+            }
+        )
+    }
+
+    if (dialogState.showVodVariantPreferenceDialog) {
+        VodVariantPreferenceModeDialog(
+            selectedMode = uiState.vodVariantPreferenceMode,
+            onDismiss = { dialogState.showVodVariantPreferenceDialog = false },
+            onModeSelected = { mode ->
+                viewModel.setVodVariantPreferenceMode(mode)
+                dialogState.showVodVariantPreferenceDialog = false
+            }
+        )
+    }
+
     SettingsPreferenceDialogs(
         uiState = uiState,
         viewModel = viewModel,
         context = context,
+        showTopNavigationDialog = dialogState.showTopNavigationDialog,
+        onShowTopNavigationDialogChange = { dialogState.showTopNavigationDialog = it },
+        showHomeDashboardDialog = dialogState.showHomeDashboardDialog,
+        onShowHomeDashboardDialogChange = { dialogState.showHomeDashboardDialog = it },
         showLandingScreenDialog = dialogState.showLandingScreenDialog,
         onShowLandingScreenDialogChange = { dialogState.showLandingScreenDialog = it },
         showGuideDefaultCategoryDialog = dialogState.showGuideDefaultCategoryDialog,
@@ -160,8 +192,12 @@ internal fun SettingsScreenDialogs(
         onShowTimeFormatDialogChange = { dialogState.showTimeFormatDialog = it },
         showAudioVideoOffsetDialog = dialogState.showAudioVideoOffsetDialog,
         onShowAudioVideoOffsetDialogChange = { dialogState.showAudioVideoOffsetDialog = it },
-        showDecoderModeDialog = dialogState.showDecoderModeDialog,
-        onShowDecoderModeDialogChange = { dialogState.showDecoderModeDialog = it },
+        showAudioDecoderModeDialog = dialogState.showAudioDecoderModeDialog,
+        onShowAudioDecoderModeDialogChange = { dialogState.showAudioDecoderModeDialog = it },
+        showVideoDecoderModeDialog = dialogState.showVideoDecoderModeDialog,
+        onShowVideoDecoderModeDialogChange = { dialogState.showVideoDecoderModeDialog = it },
+        showPlaybackBufferModeDialog = dialogState.showPlaybackBufferModeDialog,
+        onShowPlaybackBufferModeDialogChange = { dialogState.showPlaybackBufferModeDialog = it },
         showAudioOutputPreferenceDialog = dialogState.showAudioOutputPreferenceDialog,
         onShowAudioOutputPreferenceDialogChange = { dialogState.showAudioOutputPreferenceDialog = it },
         showSurfaceModeDialog = dialogState.showSurfaceModeDialog,
@@ -170,6 +206,8 @@ internal fun SettingsScreenDialogs(
         onShowVodHttpProtocolDialogChange = { dialogState.showVodHttpProtocolDialog = it },
         showTimeshiftDepthDialog = dialogState.showTimeshiftDepthDialog,
         onShowTimeshiftDepthDialogChange = { dialogState.showTimeshiftDepthDialog = it },
+        showTimeshiftBackendDialog = dialogState.showTimeshiftBackendDialog,
+        onShowTimeshiftBackendDialogChange = { dialogState.showTimeshiftBackendDialog = it },
         showDefaultStopTimerDialog = dialogState.showDefaultStopTimerDialog,
         onShowDefaultStopTimerDialogChange = { dialogState.showDefaultStopTimerDialog = it },
         showDefaultIdleTimerDialog = dialogState.showDefaultIdleTimerDialog,
@@ -251,6 +289,37 @@ internal fun SettingsScreenDialogs(
             onImportRecordingSchedulesChanged = { viewModel.setImportRecordingSchedules(it) },
             isImporting = uiState.isImportingBackup,
             onConfirm = { viewModel.confirmBackupImport() }
+        )
+    }
+
+    if (uiState.pendingRestoreProviders.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = viewModel::restoreSyncLater,
+            title = { Text("Restore waiting for sync") },
+            text = {
+                Column {
+                    Text("Choose providers to sync now. Nothing is selected by default; pending restore data is kept if you choose Later.")
+                    uiState.pendingRestoreProviders.forEachIndexed { index, provider ->
+                        Row {
+                            Checkbox(
+                                checked = index in uiState.selectedRestoreProviderIndices,
+                                onCheckedChange = { viewModel.toggleRestoreSyncProvider(index) }
+                            )
+                            Text(provider.serverUrl + provider.username.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty())
+                        }
+                    }
+                    TextButton(onClick = viewModel::selectAllRestoreSyncProviders) { Text("Select all") }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = uiState.selectedRestoreProviderIndices.isNotEmpty(),
+                    onClick = viewModel::syncSelectedRestoreProviders
+                ) { Text("Sync selected") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::restoreSyncLater) { Text("Later") }
+            }
         )
     }
 
