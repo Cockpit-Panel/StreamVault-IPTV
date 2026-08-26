@@ -206,6 +206,7 @@ class ProviderSetupViewModelTest {
             importBackup = importBackup,
             driveBackupSyncManager = driveBackupSyncManager,
             providerQrPairingManager = providerQrPairingManager,
+            okHttpClient = okHttpClient,
         )
         val credentials = listOf(
             ProviderCredentials(
@@ -245,6 +246,7 @@ class ProviderSetupViewModelTest {
             importBackup = importBackup,
             driveBackupSyncManager = driveBackupSyncManager,
             providerQrPairingManager = providerQrPairingManager,
+            okHttpClient = okHttpClient,
         )
 
         viewModel.importBackupFromDrive()
@@ -539,6 +541,7 @@ class ProviderSetupViewModelTest {
             importBackup = importBackup,
             driveBackupSyncManager = driveBackupSyncManager,
             providerQrPairingManager = providerQrPairingManager,
+            okHttpClient = okHttpClient,
         )
 
         viewModel.loginStalker(
@@ -597,6 +600,7 @@ class ProviderSetupViewModelTest {
             importBackup = importBackup,
             driveBackupSyncManager = driveBackupSyncManager,
             providerQrPairingManager = providerQrPairingManager,
+            okHttpClient = okHttpClient,
         )
 
         viewModel.loginStalker(
@@ -641,6 +645,7 @@ class ProviderSetupViewModelTest {
             importBackup = importBackup,
             driveBackupSyncManager = driveBackupSyncManager,
             providerQrPairingManager = providerQrPairingManager,
+            okHttpClient = okHttpClient,
         )
 
         viewModel.loginStalker(
