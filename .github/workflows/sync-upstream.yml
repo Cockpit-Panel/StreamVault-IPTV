@@ -43,7 +43,13 @@ jobs:
           old_base="$(git merge-base HEAD "upstream/$UPSTREAM_REF")"
           new_upstream="$(git rev-parse "upstream/$UPSTREAM_REF")"
           if [ "$old_base" = "$new_upstream" ]; then
-            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
+              echo "manual_build=true" >> "$GITHUB_OUTPUT"
+              echo "Manual run requested: building and releasing the current verified Cockpit tree." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
           patch="$RUNNER_TEMP/cockpit-overlay.patch"
@@ -98,12 +104,20 @@ jobs:
           grep -q 'PanelURL.URL + "api.php"' app/src/main/java/com/streamvault/app/ui/screens/provider/ProviderSetupViewModel.kt
           grep -q 'PanelURL.URL + "update.php"' app/src/main/java/com/streamvault/app/update/GitHubReleaseChecker.kt
           grep -q 'portalId' app/src/main/java/com/streamvault/app/pairing/ProviderQrPairingManager.kt
+          grep -q 'receivedPage()' app/src/main/java/com/streamvault/app/pairing/ProviderQrPairingManager.kt
+          grep -q 'PortalSelector(' app/src/main/java/com/streamvault/app/ui/screens/provider/ProviderSetupScreen.kt
+          grep -q 'isEditing && sourceType == SourceType.M3U_URL' app/src/main/java/com/streamvault/app/ui/screens/provider/ProviderSetupScreen.kt
+          grep -q 'isEditing && sourceType == SourceType.JELLYFIN' app/src/main/java/com/streamvault/app/ui/screens/provider/ProviderSetupScreen.kt
+          if grep -q 'settingsDriveBackupSection(' app/src/main/java/com/streamvault/app/ui/screens/settings/SettingsContentPane.kt; then
+            echo "Google Drive settings UI unexpectedly exposed." >&2
+            exit 1
+          fi
 
       - name: Test and build release APK
         if: steps.overlay.outputs.no_changes != 'true'
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest :app:assembleRelease --no-daemon --console=plain
+          ./gradlew testDebugUnitTest :app:assembleRelease --no-daemon --console=plain --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
 
       - name: Collect APK
         if: steps.overlay.outputs.no_changes != 'true'
@@ -131,7 +145,7 @@ jobs:
           if-no-files-found: error
 
       - name: Push verified sync
-        if: steps.overlay.outputs.no_changes != 'true'
+        if: steps.overlay.outputs.no_changes != 'true' && steps.overlay.outputs.manual_build != 'true'
         env:
           GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN || github.token }}
         run: |
