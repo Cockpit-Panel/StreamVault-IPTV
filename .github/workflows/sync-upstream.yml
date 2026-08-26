@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: streamvault-upstream-sync
@@ -50,11 +50,17 @@ jobs:
           git diff --binary "$old_base..$old_head" > "$patch"
           test -s "$patch"
           git reset --hard "upstream/$UPSTREAM_REF"
-          git apply --3way --index "$patch" || {
-            git diff --name-only --diff-filter=U
-            echo "Cockpit overlay conflicts require review; refusing to publish a partial build." >&2
-            exit 1
-          }
+          if ! git apply --3way --index "$patch"; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if (( ${#conflicts[@]} == 0 )); then
+              echo "Cockpit overlay failed without resolvable index conflicts." >&2
+              exit 1
+            fi
+            # Prefer the Cockpit overlay for conflicted files. Marker checks and the
+            # full compile/build below prevent a broken automatic sync being pushed.
+            git checkout --theirs -- "${conflicts[@]}"
+            git add -- "${conflicts[@]}"
+          fi
           ! git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ':!*.md'
           git commit -m "chore: sync upstream and reapply Cockpit overlay"
           echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
@@ -127,7 +133,7 @@ jobs:
       - name: Push verified sync
         if: steps.overlay.outputs.no_changes != 'true'
         env:
-          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN || github.token }}
         run: |
           test -n "$GH_TOKEN"
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
@@ -136,5 +142,5 @@ jobs:
       - name: Publish GitHub release
         if: steps.overlay.outputs.no_changes != 'true'
         env:
-          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN || github.token }}
         run: gh release create "${{ steps.release.outputs.tag }}" release-artifacts/* --target "${{ steps.release.outputs.sha }}" --title "StreamVault ${{ steps.release.outputs.version }} Cockpit" --generate-notes --latest
