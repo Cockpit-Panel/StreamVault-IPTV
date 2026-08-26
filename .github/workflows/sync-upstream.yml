@@ -159,4 +159,5 @@ jobs:
         if: steps.overlay.outputs.no_changes != 'true'
         env:
           GH_TOKEN: ${{ secrets.STREAMVAULT_RELEASE_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release create "${{ steps.release.outputs.tag }}" release-artifacts/* --target "${{ steps.release.outputs.sha }}" --title "StreamVault ${{ steps.release.outputs.version }} Cockpit" --generate-notes --latest
